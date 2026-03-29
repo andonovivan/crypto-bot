@@ -47,6 +47,13 @@ class TradingEngine
             return null;
         }
 
+        // Verify the symbol is still tradable
+        if (! $this->exchange->isTradable($signal->symbol)) {
+            Log::warning('Symbol not tradable, skipping', ['symbol' => $signal->symbol]);
+            $signal->update(['status' => SignalStatus::Skipped]);
+            return null;
+        }
+
         try {
             $price = $this->exchange->getPrice($signal->symbol);
 
@@ -122,14 +129,30 @@ class TradingEngine
 
     /**
      * Monitor all open positions and close if conditions are met.
+     * Uses batch price fetching for efficiency.
      */
     public function monitorPositions(): void
     {
         $positions = Position::open()->get();
 
+        if ($positions->isEmpty()) {
+            return;
+        }
+
+        // Fetch all prices in one API call
+        $symbols = $positions->pluck('symbol')->unique()->toArray();
+        $prices = $this->exchange->getPrices($symbols);
+
         foreach ($positions as $position) {
             try {
-                $this->checkPosition($position);
+                $currentPrice = $prices[$position->symbol] ?? null;
+
+                if ($currentPrice === null) {
+                    Log::warning('No price data for position', ['symbol' => $position->symbol]);
+                    continue;
+                }
+
+                $this->checkPosition($position, $currentPrice);
             } catch (\Throwable $e) {
                 Log::warning('Failed to monitor position', [
                     'position_id' => $position->id,
@@ -143,9 +166,8 @@ class TradingEngine
     /**
      * Check a single position and close if SL/TP/expiry hit.
      */
-    private function checkPosition(Position $position): void
+    private function checkPosition(Position $position, float $currentPrice): void
     {
-        $currentPrice = $this->exchange->getPrice($position->symbol);
         $unrealizedPnl = $this->calculatePnl($position, $currentPrice);
 
         $position->update([

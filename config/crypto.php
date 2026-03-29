@@ -48,5 +48,6 @@ return [
         'min_volume_multiplier' => (float) env('PUMP_MIN_VOLUME_MULTIPLIER', 3),
         'reversal_drop_pct' => (float) env('PUMP_REVERSAL_DROP_PCT', 3),
         'scan_interval_minutes' => (int) env('PUMP_SCAN_INTERVAL_MINUTES', 5),
+        'min_volume_usdt' => (float) env('PUMP_MIN_VOLUME_USDT', 5000000),
     ],
 ];

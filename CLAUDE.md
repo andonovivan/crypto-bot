@@ -76,6 +76,7 @@ Laravel 13 (PHP 8.4) auto-trading bot that detects pump & dump coins on Binance 
 | `min_price_change_pct` | 15 | Min 24h price change to detect pump |
 | `min_volume_multiplier` | 3 | Min volume vs 7-day average |
 | `reversal_drop_pct` | 3 | Min drop from peak to confirm reversal |
+| `min_volume_usdt` | 5000000 | Min 24h USDT volume to consider coin |
 
 ## API Endpoints
 
@@ -111,6 +112,17 @@ Laravel 13 (PHP 8.4) auto-trading bot that detects pump & dump coins on Binance 
 ./develop monitor        # Manual position monitor
 ./develop status         # Show bot status
 ```
+
+## Performance & Reliability
+
+- **Price cache**: 10s TTL in database cache. `getFuturesTickers()` populates cache for all symbols. `getPrices()` and `getPrice()` read from cache first.
+- **Batch pricing**: `getPrices(array $symbols)` fetches all prices in 1 API call. Used by `checkReversals()`, `monitorPositions()`, and dashboard `data()`.
+- **Tradability filter**: `getExchangeInfo()` cached 1 hour. `isTradable()` checks symbol status is "TRADING". Skips delisted/frozen coins in scan and before opening trades.
+- **LOT_SIZE**: `calculateQuantity()` and `formatQuantity()` use actual stepSize from exchangeInfo instead of hardcoded rounding.
+- **Min volume filter**: `min_volume_usdt` setting (default $5M) skips low-liquidity coins before any pump evaluation.
+- **SQLite WAL mode**: `busy_timeout=5000`, `journal_mode=wal` in config/database.php. Prevents "database is locked" across 3 containers.
+- **Rate limiting**: Tracks `X-MBX-USED-WEIGHT-1M` header from Binance. Warns at 1800/2400. Pauses at 2300/2400.
+- **Bot loop**: Scans every 300s, monitors positions every 60s (decoupled intervals).
 
 ## Known Issues & Gotchas
 

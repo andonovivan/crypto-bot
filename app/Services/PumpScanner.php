@@ -24,16 +24,28 @@ class PumpScanner
     {
         $minPriceChange = Settings::get('min_price_change_pct');
         $minVolumeMultiplier = Settings::get('min_volume_multiplier');
+        $minVolumeUsdt = (float) Settings::get('min_volume_usdt');
         $signals = collect();
 
         Log::info('Starting pump scan', [
             'min_price_change' => $minPriceChange,
             'min_volume_multiplier' => $minVolumeMultiplier,
+            'min_volume_usdt' => $minVolumeUsdt,
         ]);
 
         $tickers = $this->exchange->getFuturesTickers();
 
         foreach ($tickers as $ticker) {
+            // Skip low-liquidity coins
+            if ($minVolumeUsdt > 0 && $ticker['volume'] < $minVolumeUsdt) {
+                continue;
+            }
+
+            // Skip non-tradable symbols (delisted, settling, etc.)
+            if (! $this->exchange->isTradable($ticker['symbol'])) {
+                continue;
+            }
+
             $this->updateScannedCoin($ticker);
 
             if ($ticker['priceChangePct'] < $minPriceChange) {
@@ -76,6 +88,7 @@ class PumpScanner
                 'symbol' => $ticker['symbol'],
                 'price_change' => $ticker['priceChangePct'] . '%',
                 'volume_multiplier' => $volumeMultiplier . 'x',
+                'volume_usdt' => $ticker['volume'],
                 'price' => $ticker['price'],
                 'high_24h' => $ticker['high'],
             ]);
@@ -90,6 +103,7 @@ class PumpScanner
 
     /**
      * Check detected signals for reversal confirmation.
+     * Uses batch price fetching for efficiency.
      *
      * @return Collection<int, PumpSignal>
      */
@@ -102,40 +116,47 @@ class PumpScanner
             ->where('created_at', '>=', now()->subHours(24))
             ->get();
 
+        if ($activeSignals->isEmpty()) {
+            return $confirmedSignals;
+        }
+
+        // Fetch all prices in one API call
+        $symbols = $activeSignals->pluck('symbol')->unique()->toArray();
+        $prices = $this->exchange->getPrices($symbols);
+
         foreach ($activeSignals as $signal) {
-            try {
-                $currentPrice = $this->exchange->getPrice($signal->symbol);
-                $dropFromPeak = $this->calculateDropFromPeak($currentPrice, $signal->peak_price);
+            $currentPrice = $prices[$signal->symbol] ?? null;
 
-                $signal->update([
-                    'current_price' => $currentPrice,
-                    'drop_from_peak_pct' => $dropFromPeak,
-                ]);
+            if ($currentPrice === null) {
+                Log::warning('No price data for signal', ['symbol' => $signal->symbol]);
+                continue;
+            }
 
-                // Update peak if price went higher
-                if ($currentPrice > $signal->peak_price) {
-                    $signal->update(['peak_price' => $currentPrice]);
-                    continue;
-                }
+            $dropFromPeak = $this->calculateDropFromPeak($currentPrice, $signal->peak_price);
 
-                // Check if reversal is confirmed
-                if ($dropFromPeak >= $reversalDropPct) {
-                    $signal->update(['status' => SignalStatus::ReversalConfirmed]);
+            $signal->update([
+                'current_price' => $currentPrice,
+                'drop_from_peak_pct' => $dropFromPeak,
+            ]);
 
-                    Log::info('Reversal confirmed', [
-                        'symbol' => $signal->symbol,
-                        'peak' => $signal->peak_price,
-                        'current' => $currentPrice,
-                        'drop' => $dropFromPeak . '%',
-                    ]);
+            // Update peak if price went higher
+            if ($currentPrice > $signal->peak_price) {
+                $signal->update(['peak_price' => $currentPrice]);
+                continue;
+            }
 
-                    $confirmedSignals->push($signal->fresh());
-                }
-            } catch (\Throwable $e) {
-                Log::warning('Failed to check reversal', [
+            // Check if reversal is confirmed
+            if ($dropFromPeak >= $reversalDropPct) {
+                $signal->update(['status' => SignalStatus::ReversalConfirmed]);
+
+                Log::info('Reversal confirmed', [
                     'symbol' => $signal->symbol,
-                    'error' => $e->getMessage(),
+                    'peak' => $signal->peak_price,
+                    'current' => $currentPrice,
+                    'drop' => $dropFromPeak . '%',
                 ]);
+
+                $confirmedSignals->push($signal->fresh());
             }
         }
 

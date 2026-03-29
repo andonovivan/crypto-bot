@@ -27,17 +27,24 @@ class DashboardController extends Controller
             ->orderByDesc('opened_at')
             ->get();
 
-        // Refresh live prices for open positions
-        foreach ($openPositions as $position) {
+        // Refresh live prices for open positions (single batch API call)
+        if ($openPositions->isNotEmpty()) {
             try {
-                $currentPrice = $exchange->getPrice($position->symbol);
-                $pnl = round(($position->entry_price - $currentPrice) * $position->quantity, 4);
-                $position->update([
-                    'current_price' => $currentPrice,
-                    'unrealized_pnl' => $pnl,
-                ]);
+                $symbols = $openPositions->pluck('symbol')->unique()->toArray();
+                $prices = $exchange->getPrices($symbols);
+
+                foreach ($openPositions as $position) {
+                    $currentPrice = $prices[$position->symbol] ?? null;
+                    if ($currentPrice !== null) {
+                        $pnl = round(($position->entry_price - $currentPrice) * $position->quantity, 4);
+                        $position->update([
+                            'current_price' => $currentPrice,
+                            'unrealized_pnl' => $pnl,
+                        ]);
+                    }
+                }
             } catch (\Throwable $e) {
-                // Use last known price if API fails
+                // Use last known prices if API fails
             }
         }
 

@@ -24,6 +24,7 @@ class Settings
         'min_price_change_pct' => ['config' => 'crypto.pump_detection.min_price_change_pct', 'type' => 'float', 'label' => 'Min Price Change (%)'],
         'min_volume_multiplier' => ['config' => 'crypto.pump_detection.min_volume_multiplier', 'type' => 'float', 'label' => 'Min Volume Multiplier'],
         'reversal_drop_pct' => ['config' => 'crypto.pump_detection.reversal_drop_pct', 'type' => 'float', 'label' => 'Reversal Drop (%)'],
+        'min_volume_usdt' => ['config' => 'crypto.pump_detection.min_volume_usdt', 'type' => 'float', 'label' => 'Min 24h Volume (USDT)'],
     ];
 
     /**

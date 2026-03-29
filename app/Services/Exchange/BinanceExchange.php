@@ -2,6 +2,7 @@
 
 namespace App\Services\Exchange;
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -10,6 +11,10 @@ class BinanceExchange implements ExchangeInterface
     private string $baseUrl;
     private string $apiKey;
     private string $apiSecret;
+
+    private const PRICE_CACHE_TTL = 10; // seconds
+    private const EXCHANGE_INFO_CACHE_TTL = 3600; // 1 hour
+    private const RATE_LIMIT_WARN_THRESHOLD = 1800; // warn at 75% of 2400
 
     public function __construct()
     {
@@ -38,16 +43,133 @@ class BinanceExchange implements ExchangeInterface
             ];
         }
 
+        // Cache all prices from this bulk response
+        $priceMap = [];
+        foreach ($tickers as $t) {
+            $priceMap[$t['symbol']] = $t['price'];
+        }
+        Cache::put('binance:prices', $priceMap, self::PRICE_CACHE_TTL);
+
         return $tickers;
     }
 
     public function getPrice(string $symbol): float
     {
+        // Try cache first
+        $cached = Cache::get('binance:prices');
+        if ($cached && isset($cached[$symbol])) {
+            return $cached[$symbol];
+        }
+
+        // Single symbol fallback
         $response = $this->publicRequest('GET', '/fapi/v1/ticker/price', [
             'symbol' => $symbol,
         ]);
 
         return (float) $response['price'];
+    }
+
+    /**
+     * Get prices for multiple symbols in a single API call.
+     *
+     * @param array<string> $symbols
+     * @return array<string, float> Symbol => price map
+     */
+    public function getPrices(array $symbols): array
+    {
+        if (empty($symbols)) {
+            return [];
+        }
+
+        // Try cache first
+        $cached = Cache::get('binance:prices');
+        if ($cached) {
+            $result = [];
+            $missing = [];
+            foreach ($symbols as $symbol) {
+                if (isset($cached[$symbol])) {
+                    $result[$symbol] = $cached[$symbol];
+                } else {
+                    $missing[] = $symbol;
+                }
+            }
+            if (empty($missing)) {
+                return $result;
+            }
+        }
+
+        // Fetch all prices in one call (no symbol param = all symbols)
+        $response = $this->publicRequest('GET', '/fapi/v1/ticker/price');
+
+        $priceMap = [];
+        foreach ($response as $item) {
+            $priceMap[$item['symbol']] = (float) $item['price'];
+        }
+
+        Cache::put('binance:prices', $priceMap, self::PRICE_CACHE_TTL);
+
+        $result = [];
+        foreach ($symbols as $symbol) {
+            if (isset($priceMap[$symbol])) {
+                $result[$symbol] = $priceMap[$symbol];
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Get exchange info with tradability status and LOT_SIZE filters.
+     * Cached for 1 hour.
+     *
+     * @return array<string, array{status: string, stepSize: float, minQty: float, minNotional: float}>
+     */
+    public function getExchangeInfo(): array
+    {
+        $cached = Cache::get('binance:exchange_info');
+        if ($cached) {
+            return $cached;
+        }
+
+        $response = $this->publicRequest('GET', '/fapi/v1/exchangeInfo');
+
+        $info = [];
+        foreach ($response['symbols'] ?? [] as $symbol) {
+            $stepSize = 1.0;
+            $minQty = 0.0;
+            $minNotional = 0.0;
+
+            foreach ($symbol['filters'] ?? [] as $filter) {
+                if ($filter['filterType'] === 'LOT_SIZE') {
+                    $stepSize = (float) $filter['stepSize'];
+                    $minQty = (float) $filter['minQty'];
+                }
+                if ($filter['filterType'] === 'MIN_NOTIONAL') {
+                    $minNotional = (float) ($filter['notional'] ?? $filter['minNotional'] ?? 0);
+                }
+            }
+
+            $info[$symbol['symbol']] = [
+                'status' => $symbol['status'],
+                'stepSize' => $stepSize,
+                'minQty' => $minQty,
+                'minNotional' => $minNotional,
+            ];
+        }
+
+        Cache::put('binance:exchange_info', $info, self::EXCHANGE_INFO_CACHE_TTL);
+
+        return $info;
+    }
+
+    /**
+     * Check if a symbol is currently tradable on the exchange.
+     */
+    public function isTradable(string $symbol): bool
+    {
+        $info = $this->getExchangeInfo();
+
+        return isset($info[$symbol]) && $info[$symbol]['status'] === 'TRADING';
     }
 
     public function getKlines(string $symbol, string $interval = '1h', int $limit = 24): array
@@ -84,7 +206,7 @@ class BinanceExchange implements ExchangeInterface
             'symbol' => $symbol,
             'side' => 'SELL',
             'type' => 'MARKET',
-            'quantity' => $this->formatQuantity($quantity),
+            'quantity' => $this->formatQuantity($quantity, $symbol),
         ]);
 
         return [
@@ -100,7 +222,7 @@ class BinanceExchange implements ExchangeInterface
             'symbol' => $symbol,
             'side' => 'BUY',
             'type' => 'MARKET',
-            'quantity' => $this->formatQuantity($quantity),
+            'quantity' => $this->formatQuantity($quantity, $symbol),
             'reduceOnly' => 'true',
         ]);
 
@@ -118,7 +240,7 @@ class BinanceExchange implements ExchangeInterface
             'side' => 'BUY',
             'type' => 'STOP_MARKET',
             'stopPrice' => $this->formatPrice($stopPrice),
-            'quantity' => $this->formatQuantity($quantity),
+            'quantity' => $this->formatQuantity($quantity, $symbol),
             'reduceOnly' => 'true',
         ]);
 
@@ -132,7 +254,7 @@ class BinanceExchange implements ExchangeInterface
             'side' => 'BUY',
             'type' => 'TAKE_PROFIT_MARKET',
             'stopPrice' => $this->formatPrice($takeProfitPrice),
-            'quantity' => $this->formatQuantity($quantity),
+            'quantity' => $this->formatQuantity($quantity, $symbol),
             'reduceOnly' => 'true',
         ]);
 
@@ -195,15 +317,32 @@ class BinanceExchange implements ExchangeInterface
     }
 
     /**
+     * Get the current API rate limit usage.
+     *
+     * @return array{used: int, limit: int}
+     */
+    public function getRateLimitUsage(): array
+    {
+        return [
+            'used' => (int) Cache::get('binance:rate_weight', 0),
+            'limit' => 2400,
+        ];
+    }
+
+    /**
      * Make a public (unsigned) API request.
      */
     private function publicRequest(string $method, string $endpoint, array $params = []): array
     {
+        $this->checkRateLimit();
+
         $url = $this->baseUrl . $endpoint;
 
         $response = Http::timeout(10)
             ->withHeaders(['X-MBX-APIKEY' => $this->apiKey])
             ->$method($url, $params);
+
+        $this->trackRateLimit($response);
 
         if ($response->failed()) {
             Log::error('Binance API error', [
@@ -222,6 +361,8 @@ class BinanceExchange implements ExchangeInterface
      */
     private function signedRequest(string $method, string $endpoint, array $params = []): array
     {
+        $this->checkRateLimit();
+
         $params['timestamp'] = (int) (microtime(true) * 1000);
         $params['recvWindow'] = 5000;
 
@@ -241,6 +382,8 @@ class BinanceExchange implements ExchangeInterface
             default => throw new \InvalidArgumentException("Unsupported method: {$method}"),
         };
 
+        $this->trackRateLimit($response);
+
         if ($response->failed()) {
             Log::error('Binance signed API error', [
                 'endpoint' => $endpoint,
@@ -253,9 +396,44 @@ class BinanceExchange implements ExchangeInterface
         return $response->json();
     }
 
-    private function formatQuantity(float $quantity): string
+    /**
+     * Track rate limit weight from Binance response headers.
+     */
+    private function trackRateLimit($response): void
     {
-        return rtrim(rtrim(number_format($quantity, 8, '.', ''), '0'), '.');
+        $weight = $response->header('X-MBX-USED-WEIGHT-1M');
+
+        if ($weight !== null) {
+            $weight = (int) $weight;
+            Cache::put('binance:rate_weight', $weight, 60);
+
+            if ($weight >= self::RATE_LIMIT_WARN_THRESHOLD) {
+                Log::warning('Binance rate limit approaching', [
+                    'used_weight' => $weight,
+                    'limit' => 2400,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Check if we're approaching the rate limit before making a request.
+     */
+    private function checkRateLimit(): void
+    {
+        $used = (int) Cache::get('binance:rate_weight', 0);
+
+        if ($used >= 2300) {
+            Log::warning('Binance rate limit critical, pausing', ['used_weight' => $used]);
+            sleep(10);
+        }
+    }
+
+    private function formatQuantity(float $quantity, string $symbol = ''): string
+    {
+        $decimals = $this->getQuantityDecimals($symbol);
+
+        return rtrim(rtrim(number_format($quantity, $decimals, '.', ''), '0'), '.');
     }
 
     private function formatPrice(float $price): string
@@ -264,12 +442,41 @@ class BinanceExchange implements ExchangeInterface
     }
 
     /**
-     * Round quantity to the nearest valid step size.
-     * For simplicity, we round to 3 decimal places. A production bot would
-     * fetch exchangeInfo and use the actual LOT_SIZE filter per symbol.
+     * Round quantity to the nearest valid step size from exchangeInfo.
      */
     private function roundStepSize(float $quantity, string $symbol): float
     {
-        return round($quantity, 3);
+        $info = $this->getExchangeInfo();
+
+        if (isset($info[$symbol])) {
+            $stepSize = $info[$symbol]['stepSize'];
+            if ($stepSize > 0) {
+                $quantity = floor($quantity / $stepSize) * $stepSize;
+            }
+
+            $minQty = $info[$symbol]['minQty'];
+            if ($quantity < $minQty) {
+                return 0;
+            }
+        }
+
+        return $quantity;
+    }
+
+    /**
+     * Determine decimal places for quantity formatting based on stepSize.
+     */
+    private function getQuantityDecimals(string $symbol): int
+    {
+        $info = $this->getExchangeInfo();
+
+        if (isset($info[$symbol])) {
+            $stepSize = $info[$symbol]['stepSize'];
+            if ($stepSize > 0 && $stepSize < 1) {
+                return max(0, (int) -floor(log10($stepSize)));
+            }
+        }
+
+        return 8; // default
     }
 }

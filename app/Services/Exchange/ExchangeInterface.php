@@ -17,6 +17,14 @@ interface ExchangeInterface
     public function getPrice(string $symbol): float;
 
     /**
+     * Get prices for multiple symbols in a single operation.
+     *
+     * @param array<string> $symbols
+     * @return array<string, float> Symbol => price map
+     */
+    public function getPrices(array $symbols): array;
+
+    /**
      * Get kline/candlestick data.
      *
      * @return array<array{openTime: int, open: float, high: float, low: float, close: float, volume: float}>
@@ -77,4 +85,9 @@ interface ExchangeInterface
      * Calculate the quantity of contracts for a given USDT amount.
      */
     public function calculateQuantity(string $symbol, float $usdtAmount, float $price): float;
+
+    /**
+     * Check if a symbol is currently tradable on the exchange.
+     */
+    public function isTradable(string $symbol): bool;
 }

@@ -15,12 +15,10 @@ use Illuminate\Support\Facades\Log;
 class DryRunExchange implements ExchangeInterface
 {
     private ExchangeInterface $realExchange;
-    private float $startingBalance;
 
-    public function __construct(ExchangeInterface $realExchange, float $startingBalance = 10000.0)
+    public function __construct(ExchangeInterface $realExchange)
     {
         $this->realExchange = $realExchange;
-        $this->startingBalance = $startingBalance;
     }
 
     public function getFuturesTickers(): array
@@ -33,9 +31,19 @@ class DryRunExchange implements ExchangeInterface
         return $this->realExchange->getPrice($symbol);
     }
 
+    public function getPrices(array $symbols): array
+    {
+        return $this->realExchange->getPrices($symbols);
+    }
+
     public function getKlines(string $symbol, string $interval = '1h', int $limit = 24): array
     {
         return $this->realExchange->getKlines($symbol, $interval, $limit);
+    }
+
+    public function isTradable(string $symbol): bool
+    {
+        return $this->realExchange->isTradable($symbol);
     }
 
     public function setLeverage(string $symbol, int $leverage): bool
