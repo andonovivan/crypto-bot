@@ -35,6 +35,7 @@ return [
         'max_hold_hours' => (int) env('TRADE_MAX_HOLD_HOURS', 24),
         'leverage' => (int) env('TRADE_LEVERAGE', 5),
         'dry_run' => filter_var(env('DRY_RUN', true), FILTER_VALIDATE_BOOLEAN),
+        'starting_balance' => (float) env('TRADE_STARTING_BALANCE', 10000),
     ],
 
     /*

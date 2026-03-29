@@ -6,6 +6,8 @@ use App\Enums\CloseReason;
 use App\Models\Position;
 use App\Models\PumpSignal;
 use App\Models\Trade;
+use App\Services\Exchange\ExchangeInterface;
+use App\Services\PumpScanner;
 use App\Services\Settings;
 use App\Services\TradingEngine;
 use Illuminate\Http\JsonResponse;
@@ -18,7 +20,7 @@ class DashboardController extends Controller
         return view('dashboard');
     }
 
-    public function data(): JsonResponse
+    public function data(ExchangeInterface $exchange): JsonResponse
     {
         $openPositions = Position::open()
             ->with('pumpSignal')
@@ -87,6 +89,7 @@ class DashboardController extends Controller
                 'created_at' => $s->created_at->timestamp,
             ]),
             'summary' => [
+                'balance' => round($exchange->getBalance(), 2),
                 'combined_pnl' => round($totalPnl + $unrealizedPnl, 4),
                 'realized_pnl' => round($totalPnl, 4),
                 'unrealized_pnl' => round($unrealizedPnl, 4),
@@ -100,6 +103,33 @@ class DashboardController extends Controller
                 'dry_run' => (bool) Settings::get('dry_run'),
             ],
             'ts' => now()->timestamp,
+        ]);
+    }
+
+    public function scanNow(PumpScanner $scanner, TradingEngine $engine, Request $request): JsonResponse
+    {
+        $autoTrade = $request->boolean('auto_trade', false);
+
+        $signals = $scanner->scan();
+        $reversals = $scanner->checkReversals();
+        $expired = $scanner->expireStaleSignals();
+
+        $trades = [];
+        if ($autoTrade) {
+            foreach ($reversals as $signal) {
+                $position = $engine->openShort($signal);
+                if ($position) {
+                    $trades[] = $position->symbol;
+                }
+            }
+        }
+
+        return response()->json([
+            'ok' => true,
+            'signals' => $signals->count(),
+            'reversals' => $reversals->count(),
+            'expired' => $expired,
+            'trades_opened' => $trades,
         ]);
     }
 
@@ -126,6 +156,15 @@ class DashboardController extends Controller
                 'testnet' => config('crypto.binance.testnet'),
             ],
         ]);
+    }
+
+    public function resetAll(): JsonResponse
+    {
+        Trade::truncate();
+        Position::truncate();
+        PumpSignal::truncate();
+
+        return response()->json(['ok' => true]);
     }
 
     public function saveSettings(Request $request): JsonResponse

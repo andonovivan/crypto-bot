@@ -6,7 +6,7 @@ services:
     ports:
       - "8090:8090"
     volumes:
-      - ./database/database.sqlite:/app/database/database.sqlite
+      - ./database:/app/database
       - ./storage/logs:/app/storage/logs
 
   bot:
@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
     command: php artisan bot:run
     volumes:
-      - ./database/database.sqlite:/app/database/database.sqlite
+      - ./database:/app/database
       - ./storage/logs:/app/storage/logs
     depends_on:
       - app
@@ -27,7 +27,7 @@ services:
     command: >
       sh -c "while true; do php artisan schedule:run --no-interaction; sleep 60; done"
     volumes:
-      - ./database/database.sqlite:/app/database/database.sqlite
+      - ./database:/app/database
       - ./storage/logs:/app/storage/logs
     depends_on:
       - app

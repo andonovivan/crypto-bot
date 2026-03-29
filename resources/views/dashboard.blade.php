@@ -93,6 +93,10 @@
 <div id="tab-dashboard" class="tab-pane active">
   <div class="cards">
     <div class="card">
+      <div class="card-label">Balance</div>
+      <div class="card-value neutral" id="balance">-</div>
+    </div>
+    <div class="card">
       <div class="card-label">Combined P&amp;L</div>
       <div class="card-value" id="combined">-</div>
     </div>
@@ -139,7 +143,11 @@
 
 <!-- Signals Tab -->
 <div id="tab-signals" class="tab-pane">
-  <h2 class="section-title">Active Pump Signals</h2>
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+    <h2 class="section-title" style="margin:0;">Active Pump Signals</h2>
+    <button class="btn-save" id="scan-btn" onclick="scanNow(this)">Scan Now</button>
+  </div>
+  <div class="settings-msg" id="scan-msg"></div>
   <table>
     <thead>
       <tr>
@@ -188,6 +196,15 @@
   <div style="margin-top:8px;">
     <span style="color:#8b949e; font-size:0.8em;">Exchange: <span id="settings-exchange">-</span> | Testnet: <span id="settings-testnet">-</span></span>
   </div>
+
+  <h2 class="section-title" style="margin-top:32px;">Danger Zone</h2>
+  <div class="setting-item" style="border-color:#da3633; max-width:560px; justify-content:space-between;">
+    <div>
+      <label style="color:#c9d1d9; font-weight:bold;">Reset All Data</label>
+      <div style="color:#8b949e; font-size:0.8em; margin-top:2px;">Deletes all trades, positions, and pump signals. Cannot be undone.</div>
+    </div>
+    <button class="btn-close-pos" style="padding:6px 16px; font-size:0.85em;" onclick="resetAll(this)">Reset</button>
+  </div>
 </div>
 
 <div class="footer">Auto-refreshes every 10s</div>
@@ -234,14 +251,13 @@ function pnlClass(val) {
 
 function pnlStr(val) {
   if (val === null || val === undefined) return '-';
-  const prefix = val >= 0 ? '+' : '';
-  return prefix + val.toFixed(4);
+  const prefix = val >= 0 ? '+$' : '-$';
+  return prefix + Math.abs(val).toFixed(2);
 }
 
 function formatPrice(val) {
   if (val === null || val === undefined) return '-';
-  if (val >= 1) return val.toFixed(4);
-  return val.toFixed(6);
+  return '$' + val.toFixed(2);
 }
 
 function timeAgo(ts) {
@@ -305,14 +321,16 @@ function render(data) {
   document.getElementById('updated').textContent = new Date(data.ts * 1000).toLocaleTimeString();
 
   // Cards
+  document.getElementById('balance').textContent = '$' + s.balance.toFixed(2);
+
   document.getElementById('combined').className = 'card-value ' + pnlClass(s.combined_pnl);
-  document.getElementById('combined').textContent = pnlStr(s.combined_pnl) + ' USDT';
+  document.getElementById('combined').textContent = pnlStr(s.combined_pnl);
 
   document.getElementById('unrealized').className = 'card-value ' + pnlClass(s.unrealized_pnl);
-  document.getElementById('unrealized').textContent = pnlStr(s.unrealized_pnl) + ' USDT';
+  document.getElementById('unrealized').textContent = pnlStr(s.unrealized_pnl);
 
   document.getElementById('realized').className = 'card-value ' + pnlClass(s.realized_pnl);
-  document.getElementById('realized').textContent = pnlStr(s.realized_pnl) + ' USDT';
+  document.getElementById('realized').textContent = pnlStr(s.realized_pnl);
 
   document.getElementById('winrate').className = 'card-value ' + (s.win_rate >= 50 ? 'positive' : s.win_rate > 0 ? 'negative' : 'neutral');
   document.getElementById('winrate').textContent = s.win_rate + '% (' + s.winning_trades + '/' + s.total_trades + ')';
@@ -367,7 +385,7 @@ function render(data) {
       <td>${formatPrice(t.entry_price)}</td>
       <td>${formatPrice(t.exit_price)}</td>
       <td>${t.quantity.toFixed(4)}</td>
-      <td class="${pnlClass(t.pnl)}">${pnlStr(t.pnl)} USDT</td>
+      <td class="${pnlClass(t.pnl)}">${pnlStr(t.pnl)}</td>
       <td class="${pnlClass(t.pnl_pct)}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
       <td>${reasonBadge(t.close_reason)}</td>
       <td>${timeAgo(t.created_at)}</td>
@@ -448,6 +466,59 @@ async function saveSettings(btn) {
 
   btn.disabled = false;
   btn.textContent = 'Save Settings';
+}
+
+async function scanNow(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+  const msg = document.getElementById('scan-msg');
+  msg.textContent = '';
+
+  try {
+    const res = await fetch('/api/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
+      body: JSON.stringify({ auto_trade: true }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      let text = `Found ${data.signals} signal(s), ${data.reversals} reversal(s)`;
+      if (data.trades_opened.length > 0) {
+        text += ` — opened shorts: ${data.trades_opened.join(', ')}`;
+      }
+      msg.style.color = '#3fb950';
+      msg.textContent = text;
+      fetchData();
+    }
+  } catch (e) {
+    msg.style.color = '#f85149';
+    msg.textContent = 'Error: ' + e.message;
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Scan Now';
+}
+
+async function resetAll(btn) {
+  if (!confirm('This will delete ALL trades, positions, and signals. Are you sure?')) return;
+  btn.disabled = true;
+  btn.textContent = 'Resetting...';
+  try {
+    const res = await fetch('/api/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.textContent = 'Done';
+      fetchData();
+      setTimeout(() => { btn.disabled = false; btn.textContent = 'Reset'; }, 2000);
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Reset';
+  }
 }
 
 async function fetchData() {

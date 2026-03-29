@@ -20,6 +20,7 @@ class Settings
         'max_hold_hours' => ['config' => 'crypto.trading.max_hold_hours', 'type' => 'int', 'label' => 'Max Hold Time (hours)'],
         'leverage' => ['config' => 'crypto.trading.leverage', 'type' => 'int', 'label' => 'Leverage'],
         'dry_run' => ['config' => 'crypto.trading.dry_run', 'type' => 'bool', 'label' => 'Dry Run Mode'],
+        'starting_balance' => ['config' => 'crypto.trading.starting_balance', 'type' => 'float', 'label' => 'Starting Balance (USDT)'],
         'min_price_change_pct' => ['config' => 'crypto.pump_detection.min_price_change_pct', 'type' => 'float', 'label' => 'Min Price Change (%)'],
         'min_volume_multiplier' => ['config' => 'crypto.pump_detection.min_volume_multiplier', 'type' => 'float', 'label' => 'Min Volume Multiplier'],
         'reversal_drop_pct' => ['config' => 'crypto.pump_detection.reversal_drop_pct', 'type' => 'float', 'label' => 'Reversal Drop (%)'],

@@ -8,3 +8,5 @@ Route::get('/api/data', [DashboardController::class, 'data']);
 Route::get('/api/settings', [DashboardController::class, 'settings']);
 Route::post('/api/close', [DashboardController::class, 'closePosition']);
 Route::post('/api/settings', [DashboardController::class, 'saveSettings']);
+Route::post('/api/reset', [DashboardController::class, 'resetAll']);
+Route::post('/api/scan', [DashboardController::class, 'scanNow']);

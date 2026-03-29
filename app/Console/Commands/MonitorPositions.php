@@ -2,7 +2,6 @@
 
 namespace App\Console\Commands;
 
-use App\Enums\PositionStatus;
 use App\Models\Position;
 use App\Services\TradingEngine;
 use Illuminate\Console\Command;
@@ -38,10 +37,10 @@ class MonitorPositions extends Command
             $positions->map(fn (Position $p) => [
                 $p->symbol,
                 number_format($p->entry_price, 4),
-                number_format($p->current_price, 4),
+                number_format($p->current_price ?? 0, 4),
                 $this->formatPnl($p->unrealized_pnl),
-                number_format($p->stop_loss_price, 4),
-                number_format($p->take_profit_price, 4),
+                number_format($p->stop_loss_price ?? 0, 4),
+                number_format($p->take_profit_price ?? 0, 4),
                 $p->expires_at?->diffForHumans(),
             ])->toArray()
         );

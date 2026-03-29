@@ -4,6 +4,7 @@ namespace App\Services\Exchange;
 
 use App\Enums\PositionStatus;
 use App\Models\Position;
+use App\Services\Settings;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -105,11 +106,15 @@ class DryRunExchange implements ExchangeInterface
 
     public function getBalance(): float
     {
+        $startingBalance = (float) Settings::get('starting_balance');
+
         $allocatedUsdt = Position::where('status', PositionStatus::Open)
             ->where('is_dry_run', true)
             ->sum('position_size_usdt');
 
-        return $this->startingBalance - $allocatedUsdt;
+        $realizedPnl = \App\Models\Trade::where('is_dry_run', true)->sum('pnl');
+
+        return $startingBalance - $allocatedUsdt + $realizedPnl;
     }
 
     public function getOpenPositions(): array

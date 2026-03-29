@@ -42,7 +42,10 @@ class PumpScanner
 
             $volumeMultiplier = $this->calculateVolumeMultiplier($ticker);
 
-            if ($volumeMultiplier < $minVolumeMultiplier) {
+            // For extreme pumps (>2x the threshold), skip volume check — price alone is enough.
+            // For moderate pumps, require volume confirmation to filter out organic growth.
+            $isExtremePump = $ticker['priceChangePct'] >= $minPriceChange * 2;
+            if (! $isExtremePump && $volumeMultiplier < $minVolumeMultiplier) {
                 continue;
             }
 
