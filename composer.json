@@ -1,5 +1,4 @@
 {
-    "$schema": "https://getcomposer.org/schema.json",
     "name": "laravel/laravel",
     "type": "project",
     "description": "The skeleton application for the Laravel framework.",
@@ -7,6 +6,7 @@
     "license": "MIT",
     "require": {
         "php": "^8.3",
+        "ext-pdo": "*",
         "laravel/framework": "^13.0",
         "laravel/tinker": "^3.0"
     },
