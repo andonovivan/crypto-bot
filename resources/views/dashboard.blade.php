@@ -68,6 +68,7 @@
   .settings-msg { font-size: 0.85em; margin-bottom: 12px; min-height: 1.4em; }
   .footer { color: #484f58; font-size: 0.75em; margin-top: 24px; }
   .empty { color: #484f58; text-align: center; padding: 20px; }
+  td sub, .card-value sub { font-size: 0.7em; vertical-align: baseline; color: #8b949e; }
   @media (max-width: 600px) {
     .cards { grid-template-columns: 1fr 1fr; }
     td, th { padding: 6px 8px; font-size: 0.8em; }
@@ -257,7 +258,25 @@ function pnlStr(val) {
 
 function formatPrice(val) {
   if (val === null || val === undefined) return '-';
-  return '$' + val.toFixed(2);
+  if (val === 0) return '$0';
+  const abs = Math.abs(val);
+  const sign = val < 0 ? '-' : '';
+  // For prices >= 100, use 2 decimal places
+  if (abs >= 100) return sign + '$' + abs.toFixed(2);
+  // For prices >= 1, use 4 decimal places
+  if (abs >= 1) return sign + '$' + abs.toFixed(4);
+  // For prices < 1, check for leading zeros after decimal
+  const str = abs.toFixed(20).replace(/0+$/, '');
+  const zeros = (str.match(/^0\.(0+)/) || [, ''])[1].length;
+  if (zeros >= 3) {
+    // Subscript notation: 0.0₃160 means 0.000160
+    const sigStart = zeros + 2; // skip "0."
+    const sigDigits = str.slice(sigStart, sigStart + 4).replace(/0+$/, '') || '0';
+    const subscript = String(zeros).split('').map(d => '₀₁₂₃₄₅₆₇₈₉'[d]).join('');
+    return sign + '$0.0' + '<sub>' + subscript + '</sub>' + sigDigits;
+  }
+  // Small price with 0-2 leading zeros — show 6 significant digits
+  return sign + '$' + parseFloat(abs.toPrecision(6));
 }
 
 function timeAgo(ts) {
