@@ -27,6 +27,20 @@ class DashboardController extends Controller
             ->orderByDesc('opened_at')
             ->get();
 
+        // Refresh live prices for open positions
+        foreach ($openPositions as $position) {
+            try {
+                $currentPrice = $exchange->getPrice($position->symbol);
+                $pnl = round(($position->entry_price - $currentPrice) * $position->quantity, 4);
+                $position->update([
+                    'current_price' => $currentPrice,
+                    'unrealized_pnl' => $pnl,
+                ]);
+            } catch (\Throwable $e) {
+                // Use last known price if API fails
+            }
+        }
+
         $recentTrades = Trade::with('position')
             ->orderByDesc('created_at')
             ->limit(50)

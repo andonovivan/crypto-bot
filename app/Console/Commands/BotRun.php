@@ -34,41 +34,55 @@ class BotRun extends Command
         $this->info("  Max positions: " . config('crypto.trading.max_positions'));
         $this->newLine();
 
+        $monitorInterval = 60; // Monitor positions every 60 seconds
+        $lastScanAt = 0;
+
         while (! $this->shouldStop) {
-            $this->line('[' . now()->toDateTimeString() . '] Scanning...');
+            $now = time();
 
-            try {
-                // 1. Scan for pumps
-                $signals = $scanner->scan();
+            // Scan for pumps + trade on the full interval
+            if ($now - $lastScanAt >= $interval) {
+                $this->line('[' . now()->toDateTimeString() . '] Scanning...');
 
-                if ($signals->isNotEmpty()) {
-                    $this->info("  Pumps detected: {$signals->count()}");
-                }
+                try {
+                    // 1. Scan for pumps
+                    $signals = $scanner->scan();
 
-                // 2. Check for reversals and auto-trade
-                $reversals = $scanner->checkReversals();
-
-                foreach ($reversals as $signal) {
-                    $this->warn("  Reversal: {$signal->symbol} (-{$signal->drop_from_peak_pct}% from peak)");
-
-                    $position = $engine->openShort($signal);
-                    if ($position) {
-                        $this->info("  -> SHORT {$position->symbol} @ {$position->entry_price}");
+                    if ($signals->isNotEmpty()) {
+                        $this->info("  Pumps detected: {$signals->count()}");
                     }
+
+                    // 2. Check for reversals and auto-trade
+                    $reversals = $scanner->checkReversals();
+
+                    foreach ($reversals as $signal) {
+                        $this->warn("  Reversal: {$signal->symbol} (-{$signal->drop_from_peak_pct}% from peak)");
+
+                        $position = $engine->openShort($signal);
+                        if ($position) {
+                            $this->info("  -> SHORT {$position->symbol} @ {$position->entry_price}");
+                        }
+                    }
+
+                    // 3. Clean up
+                    $scanner->expireStaleSignals();
+
+                } catch (\Throwable $e) {
+                    $this->error("  Scan error: {$e->getMessage()}");
                 }
 
-                // 3. Monitor existing positions
+                $lastScanAt = $now;
+            }
+
+            // Monitor positions every cycle (60s)
+            try {
                 $engine->monitorPositions();
-
-                // 4. Clean up
-                $scanner->expireStaleSignals();
-
             } catch (\Throwable $e) {
-                $this->error("  Error: {$e->getMessage()}");
+                $this->error("  Monitor error: {$e->getMessage()}");
             }
 
             // Sleep in 1-second increments so we can catch shutdown signals promptly
-            for ($i = 0; $i < $interval && ! $this->shouldStop; $i++) {
+            for ($i = 0; $i < $monitorInterval && ! $this->shouldStop; $i++) {
                 sleep(1);
             }
         }
