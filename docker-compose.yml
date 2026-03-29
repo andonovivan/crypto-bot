@@ -1,4 +1,20 @@
 services:
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: secret
+      MARIADB_DATABASE: crypto_bot
+      MARIADB_USER: crypto
+      MARIADB_PASSWORD: secret
+    volumes:
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   app:
     build: .
     env_file: .env
@@ -6,8 +22,10 @@ services:
     ports:
       - "8090:8090"
     volumes:
-      - ./database:/app/database
       - ./storage/logs:/app/storage/logs
+    depends_on:
+      db:
+        condition: service_healthy
 
   bot:
     build: .
@@ -15,10 +33,12 @@ services:
     restart: unless-stopped
     command: php artisan bot:run
     volumes:
-      - ./database:/app/database
       - ./storage/logs:/app/storage/logs
     depends_on:
-      - app
+      app:
+        condition: service_started
+      db:
+        condition: service_healthy
 
   scheduler:
     build: .
@@ -27,7 +47,12 @@ services:
     command: >
       sh -c "while true; do php artisan schedule:run --no-interaction; sleep 60; done"
     volumes:
-      - ./database:/app/database
       - ./storage/logs:/app/storage/logs
     depends_on:
-      - app
+      app:
+        condition: service_started
+      db:
+        condition: service_healthy
+
+volumes:
+  dbdata:

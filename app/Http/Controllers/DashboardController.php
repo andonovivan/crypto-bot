@@ -181,9 +181,11 @@ class DashboardController extends Controller
 
     public function resetAll(): JsonResponse
     {
+        \Illuminate\Support\Facades\DB::statement('SET FOREIGN_KEY_CHECKS=0');
         Trade::truncate();
         Position::truncate();
         PumpSignal::truncate();
+        \Illuminate\Support\Facades\DB::statement('SET FOREIGN_KEY_CHECKS=1');
 
         return response()->json(['ok' => true]);
     }

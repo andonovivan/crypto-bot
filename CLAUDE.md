@@ -7,10 +7,11 @@ Laravel 13 (PHP 8.4) auto-trading bot that detects pump & dump coins on Binance 
 ## Architecture
 
 ### Docker Services (docker-compose.yml)
-- **app** — Dashboard web server (port 8090, `php artisan serve`)
+- **db** — MariaDB 11 (persistent volume `dbdata`, healthcheck)
+- **app** — Dashboard web server (port 8090, runs migrations on startup)
 - **bot** — Continuous scan loop (`bot:run`, scans every 5 min, monitors every 1 min)
 - **scheduler** — Laravel scheduler (`schedule:run` loop)
-- Shared volume: SQLite database + storage/logs
+- App runs migrations; bot/scheduler wait for app to start first
 
 ### Exchange Abstraction
 - `ExchangeInterface` — contract for all exchange operations
@@ -90,9 +91,9 @@ Laravel 13 (PHP 8.4) auto-trading bot that detects pump & dump coins on Binance 
 | POST | `/api/close` | Close position `{position_id: int}` |
 | POST | `/api/reset` | Truncate all trades/positions/signals |
 
-## Database (SQLite)
+## Database (MariaDB 11)
 
-**Tables**: `scanned_coins`, `pump_signals`, `positions`, `trades`, `bot_settings`
+**Tables**: `scanned_coins`, `pump_signals`, `positions`, `trades`, `bot_settings`, `cache`, `jobs`, `users`
 
 **Enums**:
 - `PositionStatus`: Open, Closed, Expired, StoppedOut
@@ -120,7 +121,7 @@ Laravel 13 (PHP 8.4) auto-trading bot that detects pump & dump coins on Binance 
 - **Tradability filter**: `getExchangeInfo()` cached 1 hour. `isTradable()` checks symbol status is "TRADING". Skips delisted/frozen coins in scan and before opening trades.
 - **LOT_SIZE**: `calculateQuantity()` and `formatQuantity()` use actual stepSize from exchangeInfo instead of hardcoded rounding.
 - **Min volume filter**: `min_volume_usdt` setting (default $5M) skips low-liquidity coins before any pump evaluation.
-- **SQLite WAL mode**: `busy_timeout=5000`, `journal_mode=wal` in config/database.php. Prevents "database is locked" across 3 containers.
+- **MariaDB**: Proper concurrent access from all containers. No file locking issues.
 - **Rate limiting**: Tracks `X-MBX-USED-WEIGHT-1M` header from Binance. Warns at 1800/2400. Pauses at 2300/2400.
 - **Bot loop**: Scans every 300s, monitors positions every 60s (decoupled intervals).
 
