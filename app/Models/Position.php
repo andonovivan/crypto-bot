@@ -1,0 +1,63 @@
+<?php
+
+namespace App\Models;
+
+use App\Enums\PositionStatus;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+class Position extends Model
+{
+    protected $fillable = [
+        'pump_signal_id',
+        'symbol',
+        'side',
+        'entry_price',
+        'quantity',
+        'position_size_usdt',
+        'stop_loss_price',
+        'take_profit_price',
+        'current_price',
+        'unrealized_pnl',
+        'leverage',
+        'status',
+        'exchange_order_id',
+        'is_dry_run',
+        'opened_at',
+        'expires_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'entry_price' => 'float',
+            'quantity' => 'float',
+            'position_size_usdt' => 'float',
+            'stop_loss_price' => 'float',
+            'take_profit_price' => 'float',
+            'current_price' => 'float',
+            'unrealized_pnl' => 'float',
+            'leverage' => 'integer',
+            'status' => PositionStatus::class,
+            'is_dry_run' => 'boolean',
+            'opened_at' => 'datetime',
+            'expires_at' => 'datetime',
+        ];
+    }
+
+    public function pumpSignal(): BelongsTo
+    {
+        return $this->belongsTo(PumpSignal::class);
+    }
+
+    public function trades(): HasMany
+    {
+        return $this->hasMany(Trade::class);
+    }
+
+    public function scopeOpen($query)
+    {
+        return $query->where('status', PositionStatus::Open);
+    }
+}

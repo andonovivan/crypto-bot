@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+
+COMPOSE="docker compose"
+
+# If no arguments, show usage
+if [ $# -eq 0 ]; then
+    echo "Usage:"
+    echo "  ./develop up [-d]              Start all services (app + bot + scheduler)"
+    echo "  ./develop down                 Stop all services"
+    echo "  ./develop build                Build Docker images"
+    echo "  ./develop logs [service]       View logs"
+    echo "  ./develop art <command>        Run artisan command"
+    echo "  ./develop composer <command>   Run composer command"
+    echo "  ./develop bash                 Shell into app container"
+    echo "  ./develop tinker               Open Laravel tinker REPL"
+    echo "  ./develop test                 Run tests"
+    echo "  ./develop migrate              Run migrations"
+    echo "  ./develop scan                 Run one pump scan cycle"
+    echo "  ./develop monitor              Monitor open positions"
+    echo "  ./develop status               Show bot P&L status"
+    echo "  ./develop run                  Start bot loop manually"
+    exit 0
+fi
+
+# Passthrough to docker compose for standard commands
+if [ "$1" == "up" ] || [ "$1" == "down" ] || [ "$1" == "build" ] || [ "$1" == "logs" ] || [ "$1" == "ps" ] || [ "$1" == "restart" ]; then
+    $COMPOSE "$@"
+
+elif [ "$1" == "art" ] || [ "$1" == "artisan" ]; then
+    shift 1
+    $COMPOSE exec app php artisan "$@"
+
+elif [ "$1" == "composer" ]; then
+    shift 1
+    $COMPOSE exec app composer "$@"
+
+elif [ "$1" == "test" ]; then
+    shift 1
+    $COMPOSE exec app ./vendor/bin/phpunit "$@"
+
+elif [ "$1" == "bash" ]; then
+    $COMPOSE exec app bash
+
+elif [ "$1" == "tinker" ]; then
+    $COMPOSE exec app php artisan tinker
+
+elif [ "$1" == "migrate" ]; then
+    $COMPOSE exec app php artisan migrate --force
+
+elif [ "$1" == "scan" ]; then
+    shift 1
+    $COMPOSE exec app php artisan bot:scan "$@"
+
+elif [ "$1" == "monitor" ]; then
+    $COMPOSE exec app php artisan bot:monitor
+
+elif [ "$1" == "status" ]; then
+    $COMPOSE exec app php artisan bot:status
+
+elif [ "$1" == "run" ]; then
+    shift 1
+    $COMPOSE exec app php artisan bot:run "$@"
+
+else
+    $COMPOSE "$@"
+fi

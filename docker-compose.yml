@@ -1,0 +1,33 @@
+services:
+  app:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./database/database.sqlite:/app/database/database.sqlite
+      - ./storage/logs:/app/storage/logs
+
+  bot:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    command: php artisan bot:run
+    volumes:
+      - ./database/database.sqlite:/app/database/database.sqlite
+      - ./storage/logs:/app/storage/logs
+    depends_on:
+      - app
+
+  scheduler:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    command: >
+      sh -c "while true; do php artisan schedule:run --no-interaction; sleep 60; done"
+    volumes:
+      - ./database/database.sqlite:/app/database/database.sqlite
+      - ./storage/logs:/app/storage/logs
+    depends_on:
+      - app

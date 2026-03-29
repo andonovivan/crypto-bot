@@ -1,0 +1,80 @@
+<?php
+
+namespace App\Services\Exchange;
+
+interface ExchangeInterface
+{
+    /**
+     * Get all futures trading pairs with 24h ticker data.
+     *
+     * @return array<array{symbol: string, price: float, priceChangePct: float, volume: float, high: float, low: float}>
+     */
+    public function getFuturesTickers(): array;
+
+    /**
+     * Get the current price for a symbol.
+     */
+    public function getPrice(string $symbol): float;
+
+    /**
+     * Get kline/candlestick data.
+     *
+     * @return array<array{openTime: int, open: float, high: float, low: float, close: float, volume: float}>
+     */
+    public function getKlines(string $symbol, string $interval = '1h', int $limit = 24): array;
+
+    /**
+     * Set leverage for a symbol.
+     */
+    public function setLeverage(string $symbol, int $leverage): bool;
+
+    /**
+     * Open a short position (market order).
+     *
+     * @return array{orderId: string, price: float, quantity: float}
+     */
+    public function openShort(string $symbol, float $quantity): array;
+
+    /**
+     * Close a short position (market buy).
+     *
+     * @return array{orderId: string, price: float, quantity: float}
+     */
+    public function closeShort(string $symbol, float $quantity): array;
+
+    /**
+     * Set a stop-loss order for a short position.
+     *
+     * @return array{orderId: string}
+     */
+    public function setStopLoss(string $symbol, float $stopPrice, float $quantity): array;
+
+    /**
+     * Set a take-profit order for a short position.
+     *
+     * @return array{orderId: string}
+     */
+    public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity): array;
+
+    /**
+     * Get account balance in USDT.
+     */
+    public function getBalance(): float;
+
+    /**
+     * Get open positions from the exchange.
+     *
+     * @return array<array{symbol: string, quantity: float, entryPrice: float, unrealizedPnl: float}>
+     */
+    public function getOpenPositions(): array;
+
+    /**
+     * Cancel all open orders for a symbol.
+     */
+    public function cancelOrders(string $symbol): bool;
+
+    /**
+     * Calculate the quantity of contracts for a given USDT amount.
+     */
+    public function calculateQuantity(string $symbol, float $usdtAmount, float $price): float;
+}
