@@ -130,6 +130,8 @@
         <th onclick="sortTable('positions', 'symbol')">Symbol <span class="sort-arrow" id="pos-sort-symbol"></span></th>
         <th onclick="sortTable('positions', 'entry_price')">Entry <span class="sort-arrow" id="pos-sort-entry_price"></span></th>
         <th onclick="sortTable('positions', 'current_price')">Current <span class="sort-arrow" id="pos-sort-current_price"></span></th>
+        <th onclick="sortTable('positions', 'position_size_usdt')">Invested <span class="sort-arrow" id="pos-sort-position_size_usdt"></span></th>
+        <th onclick="sortTable('positions', 'current_value')">Value <span class="sort-arrow" id="pos-sort-current_value"></span></th>
         <th onclick="sortTable('positions', 'unrealized_pnl')">P&amp;L <span class="sort-arrow" id="pos-sort-unrealized_pnl"></span></th>
         <th onclick="sortTable('positions', 'pnl_pct')">P&amp;L % <span class="sort-arrow" id="pos-sort-pnl_pct"></span></th>
         <th>SL</th>
@@ -138,7 +140,7 @@
         <th></th>
       </tr>
     </thead>
-    <tbody id="positions-body"><tr><td colspan="9" class="empty">Loading...</td></tr></tbody>
+    <tbody id="positions-body"><tr><td colspan="11" class="empty">Loading...</td></tr></tbody>
   </table>
 </div>
 
@@ -360,13 +362,18 @@ function render(data) {
   // Positions table
   const posBody = document.getElementById('positions-body');
   if (data.positions.length === 0) {
-    posBody.innerHTML = '<tr><td colspan="9" class="empty">No open positions</td></tr>';
+    posBody.innerHTML = '<tr><td colspan="11" class="empty">No open positions</td></tr>';
   } else {
-    const sorted = sortData(data.positions, sortState.positions.key, sortState.positions.asc);
+    const sorted = sortData(data.positions.map(p => ({
+      ...p,
+      current_value: p.position_size_usdt + (p.unrealized_pnl || 0),
+    })), sortState.positions.key, sortState.positions.asc);
     posBody.innerHTML = sorted.map(p => `<tr>
       <td><strong>${p.symbol}</strong>${p.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.6em">DRY</span>' : ''}</td>
       <td>${formatPrice(p.entry_price)}</td>
       <td>${formatPrice(p.current_price)}</td>
+      <td>$${p.position_size_usdt.toFixed(2)}</td>
+      <td class="${pnlClass(p.unrealized_pnl)}">$${p.current_value.toFixed(2)}</td>
       <td class="${pnlClass(p.unrealized_pnl)}">${pnlStr(p.unrealized_pnl)}</td>
       <td class="${pnlClass(p.pnl_pct)}">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</td>
       <td>${formatPrice(p.stop_loss_price)}</td>
