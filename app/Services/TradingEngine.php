@@ -128,6 +128,31 @@ class TradingEngine
     }
 
     /**
+     * Retry trading on reversal_confirmed signals that don't have active positions.
+     * This catches cases where a previous position was stopped out or closed,
+     * but the coin is still in a confirmed reversal state.
+     *
+     * @return array<int, Position> Positions opened
+     */
+    public function retryConfirmedSignals(): array
+    {
+        $openedPositions = [];
+
+        $confirmedSignals = PumpSignal::where('status', SignalStatus::ReversalConfirmed)
+            ->where('created_at', '>=', now()->subHours(24))
+            ->get();
+
+        foreach ($confirmedSignals as $signal) {
+            $position = $this->openShort($signal);
+            if ($position) {
+                $openedPositions[] = $position;
+            }
+        }
+
+        return $openedPositions;
+    }
+
+    /**
      * Monitor all open positions and close if conditions are met.
      * Uses batch price fetching for efficiency.
      */

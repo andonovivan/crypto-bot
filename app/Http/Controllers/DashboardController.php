@@ -143,6 +143,11 @@ class DashboardController extends Controller
                     $trades[] = $position->symbol;
                 }
             }
+
+            // Retry confirmed signals that weren't traded yet
+            foreach ($engine->retryConfirmedSignals() as $position) {
+                $trades[] = $position->symbol;
+            }
         }
 
         return response()->json([

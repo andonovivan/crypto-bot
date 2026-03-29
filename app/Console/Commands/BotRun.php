@@ -64,6 +64,13 @@ class BotRun extends Command
                         }
                     }
 
+                    // 2b. Retry confirmed signals that weren't traded yet
+                    // (e.g. previous position was stopped out, max positions was reached, etc.)
+                    $retried = $engine->retryConfirmedSignals();
+                    foreach ($retried as $position) {
+                        $this->info("  -> RETRY SHORT {$position->symbol} @ {$position->entry_price}");
+                    }
+
                     // 3. Clean up
                     $scanner->expireStaleSignals();
 
