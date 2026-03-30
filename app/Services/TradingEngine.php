@@ -146,9 +146,10 @@ class TradingEngine
             ->where('created_at', '>=', now()->subHours(24))
             ->get();
 
-        // Get symbols that were stopped out in the last 24 hours — skip these
+        // Get symbols that were stopped out within the cooldown window — skip these
+        $cooldownHours = (int) Settings::get('retry_cooldown_hours');
         $recentStopLossSymbols = Trade::where('close_reason', CloseReason::StopLoss)
-            ->where('created_at', '>=', now()->subHours(24))
+            ->where('created_at', '>=', now()->subHours($cooldownHours))
             ->pluck('symbol')
             ->unique()
             ->toArray();

@@ -33,6 +33,7 @@ return [
         'stop_loss_pct' => (float) env('TRADE_STOP_LOSS_PCT', 8),
         'take_profit_pct' => (float) env('TRADE_TAKE_PROFIT_PCT', 15),
         'max_hold_hours' => (int) env('TRADE_MAX_HOLD_HOURS', 24),
+        'retry_cooldown_hours' => (int) env('TRADE_RETRY_COOLDOWN_HOURS', 24),
         'trailing_stop_activation_pct' => (float) env('TRADE_TRAILING_STOP_ACTIVATION_PCT', 3),
         'trailing_stop_pct' => (float) env('TRADE_TRAILING_STOP_PCT', 3),
         'leverage' => (int) env('TRADE_LEVERAGE', 5),
