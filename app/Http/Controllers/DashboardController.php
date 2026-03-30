@@ -79,6 +79,7 @@ class DashboardController extends Controller
                 'pnl_pct' => $p->entry_price > 0
                     ? round((($p->entry_price - ($p->current_price ?? $p->entry_price)) / $p->entry_price) * 100, 2)
                     : 0,
+                'best_price' => $p->best_price,
                 'stop_loss_price' => $p->stop_loss_price,
                 'take_profit_price' => $p->take_profit_price,
                 'leverage' => $p->leverage,

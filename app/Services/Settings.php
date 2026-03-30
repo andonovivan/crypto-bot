@@ -18,6 +18,8 @@ class Settings
         'stop_loss_pct' => ['config' => 'crypto.trading.stop_loss_pct', 'type' => 'float', 'label' => 'Stop Loss (%)'],
         'take_profit_pct' => ['config' => 'crypto.trading.take_profit_pct', 'type' => 'float', 'label' => 'Take Profit (%)'],
         'max_hold_hours' => ['config' => 'crypto.trading.max_hold_hours', 'type' => 'int', 'label' => 'Max Hold Time (hours)'],
+        'trailing_stop_activation_pct' => ['config' => 'crypto.trading.trailing_stop_activation_pct', 'type' => 'float', 'label' => 'Trailing Stop Activation (%)'],
+        'trailing_stop_pct' => ['config' => 'crypto.trading.trailing_stop_pct', 'type' => 'float', 'label' => 'Trailing Stop Distance (%)'],
         'leverage' => ['config' => 'crypto.trading.leverage', 'type' => 'int', 'label' => 'Leverage'],
         'dry_run' => ['config' => 'crypto.trading.dry_run', 'type' => 'bool', 'label' => 'Dry Run Mode'],
         'starting_balance' => ['config' => 'crypto.trading.starting_balance', 'type' => 'float', 'label' => 'Starting Balance (USDT)'],

@@ -96,6 +96,7 @@ class TradingEngine
                 'stop_loss_price' => $stopLossPrice,
                 'take_profit_price' => $takeProfitPrice,
                 'current_price' => $entryPrice,
+                'best_price' => $entryPrice,
                 'leverage' => $leverage,
                 'status' => PositionStatus::Open,
                 'exchange_order_id' => $order['orderId'],
@@ -132,6 +133,9 @@ class TradingEngine
      * This catches cases where a previous position was stopped out or closed,
      * but the coin is still in a confirmed reversal state.
      *
+     * Skips symbols that had a stop-loss within the last 24 hours to avoid
+     * compounding losses on the same pump.
+     *
      * @return array<int, Position> Positions opened
      */
     public function retryConfirmedSignals(): array
@@ -142,7 +146,19 @@ class TradingEngine
             ->where('created_at', '>=', now()->subHours(24))
             ->get();
 
+        // Get symbols that were stopped out in the last 24 hours — skip these
+        $recentStopLossSymbols = Trade::where('close_reason', CloseReason::StopLoss)
+            ->where('created_at', '>=', now()->subHours(24))
+            ->pluck('symbol')
+            ->unique()
+            ->toArray();
+
         foreach ($confirmedSignals as $signal) {
+            if (in_array($signal->symbol, $recentStopLossSymbols)) {
+                Log::info('Skipping retry — recent stop loss cooldown', ['symbol' => $signal->symbol]);
+                continue;
+            }
+
             $position = $this->openShort($signal);
             if ($position) {
                 $openedPositions[] = $position;
@@ -190,15 +206,48 @@ class TradingEngine
 
     /**
      * Check a single position and close if SL/TP/expiry hit.
+     * Applies trailing stop when position is profitable enough.
      */
     private function checkPosition(Position $position, float $currentPrice): void
     {
         $unrealizedPnl = $this->calculatePnl($position, $currentPrice);
 
+        // Track best price (lowest for shorts = most profitable)
+        $bestPrice = $position->best_price ?? $position->entry_price;
+        if ($currentPrice < $bestPrice) {
+            $bestPrice = $currentPrice;
+        }
+
         $position->update([
             'current_price' => $currentPrice,
+            'best_price' => $bestPrice,
             'unrealized_pnl' => $unrealizedPnl,
         ]);
+
+        // Trailing stop: once profit exceeds activation threshold, tighten stop loss
+        $trailingActivationPct = (float) Settings::get('trailing_stop_activation_pct');
+        $trailingStopPct = (float) Settings::get('trailing_stop_pct');
+
+        if ($trailingActivationPct > 0 && $trailingStopPct > 0 && $position->entry_price > 0) {
+            $profitPct = (($position->entry_price - $bestPrice) / $position->entry_price) * 100;
+
+            if ($profitPct >= $trailingActivationPct) {
+                // For shorts: trailing stop sits above the best (lowest) price
+                $trailingStopPrice = $bestPrice * (1 + $trailingStopPct / 100);
+
+                // Only tighten — never loosen the stop loss
+                if ($trailingStopPrice < $position->stop_loss_price) {
+                    $position->update(['stop_loss_price' => $trailingStopPrice]);
+
+                    Log::info('Trailing stop updated', [
+                        'symbol' => $position->symbol,
+                        'best_price' => $bestPrice,
+                        'new_stop_loss' => $trailingStopPrice,
+                        'profit_pct' => round($profitPct, 2),
+                    ]);
+                }
+            }
+        }
 
         // Check stop-loss (price went up for a short)
         if ($position->stop_loss_price && $currentPrice >= $position->stop_loss_price) {
