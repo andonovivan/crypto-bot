@@ -101,7 +101,7 @@ class TradingEngine
 
             // Calculate SL/TP — ATR-based if available, fixed % fallback
             $atrValue = $signal->atr_value ?? null;
-            $slTp = $this->calculateSlTp($entryPrice, $direction, $atrValue, $settingsPrefix, $signal->score ?? 0);
+            $slTp = $this->calculateSlTp($entryPrice, $direction, $atrValue, $settingsPrefix, $signal->score ?? 0, $signal->symbol);
 
             // Place stop-loss and take-profit orders
             try {
@@ -348,7 +348,7 @@ class TradingEngine
             $avgEntry = ($oldNotional + $newNotional) / $totalQty;
 
             // Recalculate SL/TP from new average entry
-            $slTp = $this->calculateSlTp($avgEntry, $position->side, $atr, '', 0);
+            $slTp = $this->calculateSlTp($avgEntry, $position->side, $atr, '', 0, $position->symbol);
 
             // Cancel old SL/TP orders and set new ones
             try {
@@ -472,7 +472,7 @@ class TradingEngine
      *
      * @return array{sl: float, tp: float}
      */
-    private function calculateSlTp(float $entryPrice, string $direction, ?float $atr, string $settingsPrefix, int $score): array
+    private function calculateSlTp(float $entryPrice, string $direction, ?float $atr, string $settingsPrefix, int $score, string $symbol = ''): array
     {
         // ATR-based SL/TP from wave settings
         if ($atr > 0) {
@@ -485,6 +485,26 @@ class TradingEngine
 
                 $slDistance = $slMultiplier * $atr;
                 $tpDistance = $tpMultiplier * $atr;
+
+                // Ensure TP covers round-trip fees with a 50% margin
+                // Min profitable TP distance = price * 2 * takerRate * 1.5
+                try {
+                    $rates = $this->exchange->getCommissionRate($symbol);
+                    $takerRate = $rates['taker'];
+                } catch (\Throwable) {
+                    $takerRate = (float) Settings::get('dry_run_fee_rate') ?: 0.0005;
+                }
+                $minTpDistance = $entryPrice * 2 * $takerRate * 1.5;
+
+                if ($tpDistance < $minTpDistance) {
+                    Log::info('TP distance adjusted to cover fees', [
+                        'original' => round($tpDistance, 6),
+                        'minimum' => round($minTpDistance, 6),
+                        'entry' => $entryPrice,
+                        'taker_rate' => $takerRate,
+                    ]);
+                    $tpDistance = $minTpDistance;
+                }
 
                 if ($direction === 'LONG') {
                     return [
