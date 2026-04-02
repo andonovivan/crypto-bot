@@ -15,8 +15,6 @@ if [ $# -eq 0 ]; then
     echo "  ./develop tinker               Open Laravel tinker REPL"
     echo "  ./develop test                 Run tests"
     echo "  ./develop migrate              Run migrations"
-    echo "  ./develop scan                 Run one pump scan cycle"
-    echo "  ./develop monitor              Monitor open positions"
     echo "  ./develop status               Show bot P&L status"
     echo "  ./develop run                  Start bot loop manually"
     exit 0
@@ -46,13 +44,6 @@ elif [ "$1" == "tinker" ]; then
 
 elif [ "$1" == "migrate" ]; then
     $COMPOSE exec app php artisan migrate --force
-
-elif [ "$1" == "scan" ]; then
-    shift 1
-    $COMPOSE exec app php artisan bot:scan "$@"
-
-elif [ "$1" == "monitor" ]; then
-    $COMPOSE exec app php artisan bot:monitor
 
 elif [ "$1" == "status" ]; then
     $COMPOSE exec app php artisan bot:status

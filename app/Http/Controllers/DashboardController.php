@@ -4,8 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Enums\CloseReason;
 use App\Models\Position;
-use App\Models\PumpSignal;
-use App\Models\TrendSignal;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
 use App\Services\Settings;
@@ -252,8 +250,6 @@ class DashboardController extends Controller
         \Illuminate\Support\Facades\DB::statement('SET FOREIGN_KEY_CHECKS=0');
         Trade::truncate();
         Position::truncate();
-        PumpSignal::truncate();
-        TrendSignal::truncate();
         \Illuminate\Support\Facades\DB::statement('SET FOREIGN_KEY_CHECKS=1');
 
         return response()->json(['ok' => true]);

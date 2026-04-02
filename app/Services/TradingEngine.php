@@ -4,13 +4,9 @@ namespace App\Services;
 
 use App\Enums\CloseReason;
 use App\Enums\PositionStatus;
-use App\Enums\SignalStatus;
 use App\Models\Position;
-use App\Models\PumpSignal;
-use App\Models\TrendSignal;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Log;
 
 class TradingEngine
@@ -21,10 +17,9 @@ class TradingEngine
     ) {}
 
     /**
-     * Open a position in the given direction based on any signal type.
-     * Accepts WaveSignal, TrendSignal, PumpSignal, or any object with symbol/atr_value/score.
+     * Open a position in the given direction based on a signal (WaveSignal DTO).
      */
-    public function openPosition(object $signal, string $direction, string $settingsPrefix = ''): ?Position
+    public function openPosition(object $signal, string $direction): ?Position
     {
         $maxPositions = Settings::get('max_positions');
         $leverage = (int) Settings::get('leverage');
@@ -40,8 +35,7 @@ class TradingEngine
             $maxHoldMinutes = (int) Settings::get('staircase_max_hold_minutes') ?: 1440;
             $expiresAt = now()->addMinutes($maxHoldMinutes);
         } else {
-            $maxHoldHours = (int) Settings::get($settingsPrefix . 'max_hold_hours');
-            $expiresAt = now()->addHours($maxHoldHours);
+            $expiresAt = now()->addMinutes(120); // fallback
         }
 
         // Check if we've hit max positions
@@ -75,9 +69,6 @@ class TradingEngine
         // Verify the symbol is still tradable
         if (! $this->exchange->isTradable($signal->symbol)) {
             Log::warning('Symbol not tradable, skipping', ['symbol' => $signal->symbol]);
-            if ($signal instanceof Model) {
-                $signal->update(['status' => SignalStatus::Skipped]);
-            }
             return null;
         }
 
@@ -132,7 +123,7 @@ class TradingEngine
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
             // Calculate SL/TP — ATR-based if available, fixed % fallback
-            $slTp = $this->calculateSlTp($entryPrice, $direction, $atrValue, $settingsPrefix, $signal->score ?? 0, $signal->symbol);
+            $slTp = $this->calculateSlTp($entryPrice, $direction, $atrValue, $signal->symbol);
 
             // Place stop-loss and take-profit orders
             try {
@@ -145,16 +136,7 @@ class TradingEngine
                 ]);
             }
 
-            // Determine which signal FK to set
-            $signalFk = [];
-            if ($signal instanceof PumpSignal) {
-                $signalFk = ['pump_signal_id' => $signal->id];
-            } elseif ($signal instanceof TrendSignal) {
-                $signalFk = ['trend_signal_id' => $signal->id];
-            }
-            // WaveSignal has no FK — ephemeral
-
-            $position = Position::create(array_merge($signalFk, [
+            $position = Position::create([
                 'symbol' => $signal->symbol,
                 'side' => $direction,
                 'entry_price' => $entryPrice,
@@ -172,12 +154,7 @@ class TradingEngine
                 'is_dry_run' => $isDryRun,
                 'opened_at' => now(),
                 'expires_at' => $expiresAt,
-            ]));
-
-            // Update signal status if it's a DB model
-            if ($signal instanceof Model) {
-                $signal->update(['status' => SignalStatus::Traded]);
-            }
+            ]);
 
             Log::info('Position opened', [
                 'symbol' => $signal->symbol,
@@ -421,7 +398,7 @@ class TradingEngine
             $avgEntry = ($oldNotional + $newNotional) / $totalQty;
 
             // Recalculate SL/TP from new average entry
-            $slTp = $this->calculateSlTp($avgEntry, $position->side, $atr, '', 0, $position->symbol);
+            $slTp = $this->calculateSlTp($avgEntry, $position->side, $atr, $position->symbol);
 
             // Cancel old SL/TP orders and set new ones
             try {
@@ -546,7 +523,7 @@ class TradingEngine
      *
      * @return array{sl: float, tp: float}
      */
-    private function calculateSlTp(float $entryPrice, string $direction, ?float $atr, string $settingsPrefix, int $score, string $symbol = ''): array
+    private function calculateSlTp(float $entryPrice, string $direction, ?float $atr, string $symbol = ''): array
     {
         // Staircase: fixed-percentage SL/TP (not ATR-based)
         $strategy = (string) Settings::get('strategy') ?: 'wave';

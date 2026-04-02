@@ -2,14 +2,5 @@
 
 use Illuminate\Support\Facades\Schedule;
 
-// Scan for pumps every 5 minutes
-Schedule::command('bot:scan --trade')
-    ->everyFiveMinutes()
-    ->withoutOverlapping()
-    ->appendOutputTo(storage_path('logs/bot-scan.log'));
-
-// Monitor positions every minute
-Schedule::command('bot:monitor')
-    ->everyMinute()
-    ->withoutOverlapping()
-    ->appendOutputTo(storage_path('logs/bot-monitor.log'));
+// No scheduled commands — bot:run handles everything in its own loop.
+// The scheduler container is kept for potential future use (e.g., daily reports).

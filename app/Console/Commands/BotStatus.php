@@ -4,8 +4,6 @@ namespace App\Console\Commands;
 
 use App\Enums\PositionStatus;
 use App\Models\Position;
-use App\Models\PumpSignal;
-use App\Models\TrendSignal;
 use App\Models\Trade;
 use App\Services\Settings;
 use Illuminate\Console\Command;
@@ -60,18 +58,9 @@ class BotStatus extends Command
             $this->line('  No open positions.');
         }
 
-        // Active signals
-        $strategy = (string) Settings::get('strategy') ?: 'trend';
-        $pumpSignals = PumpSignal::whereIn('status', ['detected', 'reversal_confirmed'])
-            ->where('created_at', '>=', now()->subHours(24))
-            ->count();
-        $trendSignals = TrendSignal::whereIn('status', ['detected'])
-            ->where('created_at', '>=', now()->subHours(4))
-            ->count();
         $this->newLine();
+        $strategy = (string) Settings::get('strategy') ?: 'wave';
         $this->line("Strategy: {$strategy}");
-        $this->line("Active pump signals: {$pumpSignals}");
-        $this->line("Active trend signals: {$trendSignals}");
         $this->line("Mode: " . (config('crypto.trading.dry_run') ? 'DRY RUN' : 'LIVE'));
 
         return self::SUCCESS;

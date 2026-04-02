@@ -64,10 +64,6 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **Max hold**: 1440 minutes (24h) by default
 - **Origin**: Reverse-engineered from OKX position history (149 trades, 89.9% win rate, ~1.68% TP target)
 
-### Legacy Strategies (kept for backward compatibility)
-- **Trend Following** (`TrendScanner`) — EMA(9/21/50), RSI(14), MACD, ATR on 5m klines. Not actively used.
-- **Pump & Dump** (`PumpScanner`) — 24h price/volume spike detection. Not actively used.
-
 ### Position Management (bidirectional)
 - **LONG entry**: `openLong()` — ATR-based SL/TP, fallback to fixed %
 - **SHORT entry**: `openShort()` — ATR-based SL/TP, fallback to fixed %
@@ -116,8 +112,6 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 | `app/Console/Commands/BotRun.php` | Unified 30-second scan+monitor loop with graceful shutdown |
 | `bootstrap/app.php` | CSRF exemption for `api/*` routes |
 | `config/crypto.php` | Default config values |
-| `app/Services/TrendScanner.php` | Legacy: trend detection (not actively used) |
-| `app/Services/PumpScanner.php` | Legacy: pump detection (not actively used) |
 
 ## Settings (runtime-configurable from dashboard)
 
@@ -134,7 +128,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 | `max_position_usdt` | 150 | Max total USDT per coin incl. DCA layers |
 | `dca_enabled` | true | Enable/disable DCA layers |
 | `dca_max_layers` | 3 | Max DCA layers per position |
-| `strategy` | wave | Active strategy: 'wave', 'staircase', 'trend', or 'pump' |
+| `strategy` | wave | Active strategy: 'wave' or 'staircase' |
 
 ### Wave Settings
 | Key | Default | Description |
@@ -166,16 +160,6 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 | `staircase_rsi_filter` | false | Whether to apply RSI overbought/oversold filter |
 | `staircase_scan_interval` | 30 | Scan interval in seconds |
 
-### Legacy Settings (pump/trend — kept for backward compat)
-| Key | Default | Description |
-|-----|---------|-------------|
-| `stop_loss_pct` | 8 | Stop loss % (pump strategy) |
-| `take_profit_pct` | 15 | Take profit % (pump strategy) |
-| `max_hold_hours` | 24 | Auto-close after N hours (pump) |
-| `trend_scan_interval` | 120 | Seconds between trend scans |
-| `trend_min_score` | 75 | Min score to open a trend trade |
-| `trend_max_hold_hours` | 2 | Max hold time for trend trades |
-
 ## API Endpoints
 
 | Method | Path | Action |
@@ -186,15 +170,14 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 | POST | `/api/settings` | Save settings `{settings: {key: value}}` |
 | POST | `/api/scan` | Manual wave scan `{auto_trade: bool}` |
 | POST | `/api/close` | Close position `{position_id: int}` |
-| POST | `/api/reset` | Truncate all trades/positions/signals |
+| POST | `/api/reset` | Truncate all trades/positions |
 
 ## Database (MariaDB 11)
 
-**Tables**: `scanned_coins`, `pump_signals`, `trend_signals`, `positions`, `trades`, `bot_settings`, `cache`, `jobs`, `users`
+**Tables**: `scanned_coins`, `positions`, `trades`, `bot_settings`, `cache`, `jobs`, `users`
 
 **Enums**:
 - `PositionStatus`: Open, Closed, Expired, StoppedOut
-- `SignalStatus`: Detected, ReversalConfirmed, Traded, Expired, Skipped
 - `CloseReason`: TakeProfit, StopLoss, Expired, Manual, WaveBreak, Breakeven
 
 ## Development Commands
@@ -206,8 +189,6 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 ./develop logs [-f]      # View logs
 ./develop art <cmd>      # Run artisan command
 ./develop bash           # Shell into app container
-./develop scan           # Manual scan
-./develop monitor        # Manual position monitor
 ./develop status         # Show bot status
 ```
 
@@ -240,7 +221,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **Open Positions table**: Symbol, side, entry/current price, invested, value, P&L, P&L%, Net (estimated fees + net P&L), SL, TP, DCA layers, hold time with expiry countdown, close button
 - **Wave Status tab**: Per-symbol wave direction, state (new_wave/riding/weakening), RSI, ATR, EMA gap, price
 - **Trade History table**: Symbol, side, entry/exit price, qty, gross P&L (before fees), P&L%, fees, net P&L (after fees), close reason, time
-- **Settings tab**: All runtime-configurable settings with strategy dropdown (Wave/Trend/Pump)
+- **Settings tab**: All runtime-configurable settings with strategy dropdown (Wave/Staircase)
 - **Formatting**: Thousand separators on all dollar amounts ($66,591.10), subscript notation for micro-prices, inline color styling for P&L values
 
 ## Known Issues & Gotchas

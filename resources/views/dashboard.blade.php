@@ -211,7 +211,7 @@
   <div class="setting-item" style="border-color:#da3633; max-width:560px; justify-content:space-between;">
     <div>
       <label style="color:#c9d1d9; font-weight:bold;">Reset All Data</label>
-      <div style="color:#8b949e; font-size:0.8em; margin-top:2px;">Deletes all trades, positions, and pump signals. Cannot be undone.</div>
+      <div style="color:#8b949e; font-size:0.8em; margin-top:2px;">Deletes all trades and positions. Cannot be undone.</div>
     </div>
     <button class="btn-close-pos" style="padding:6px 16px; font-size:0.85em;" onclick="resetAll(this)">Reset</button>
   </div>
@@ -361,7 +361,7 @@ function sideBadge(side) {
 function render(data) {
   lastData = data;
   const s = data.summary;
-  const strategy = s.strategy || 'pump';
+  const strategy = s.strategy || 'wave';
 
   // Badge
   document.getElementById('badge').innerHTML = s.dry_run
@@ -372,8 +372,6 @@ function render(data) {
   const stratBadges = {
     wave: { bg: '#1f6feb', label: 'WAVE' },
     staircase: { bg: '#3fb950', label: 'STAIRCASE' },
-    trend: { bg: '#8957e5', label: 'TREND' },
-    pump: { bg: '#da3633', label: 'PUMP' },
   };
   const sb = stratBadges[strategy] || stratBadges.wave;
   document.getElementById('strategy-badge').innerHTML =
@@ -511,8 +509,6 @@ async function loadSettings() {
           <select data-key="${key}">
             <option value="wave" ${meta.value === 'wave' ? 'selected' : ''}>Wave Rider</option>
             <option value="staircase" ${meta.value === 'staircase' ? 'selected' : ''}>Staircase</option>
-            <option value="trend" ${meta.value === 'trend' ? 'selected' : ''}>Trend Following</option>
-            <option value="pump" ${meta.value === 'pump' ? 'selected' : ''}>Pump &amp; Dump</option>
           </select>
         </div>`;
       } else if (meta.type === 'string') {

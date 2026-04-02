@@ -4,14 +4,11 @@ namespace App\Models;
 
 use App\Enums\PositionStatus;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Position extends Model
 {
     protected $fillable = [
-        'pump_signal_id',
-        'trend_signal_id',
         'symbol',
         'side',
         'entry_price',
@@ -53,16 +50,6 @@ class Position extends Model
             'opened_at' => 'datetime',
             'expires_at' => 'datetime',
         ];
-    }
-
-    public function pumpSignal(): BelongsTo
-    {
-        return $this->belongsTo(PumpSignal::class);
-    }
-
-    public function trendSignal(): BelongsTo
-    {
-        return $this->belongsTo(TrendSignal::class);
     }
 
     public function trades(): HasMany
