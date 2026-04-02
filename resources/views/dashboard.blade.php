@@ -134,6 +134,7 @@
         <th onclick="sortTable('positions', 'current_value')">Value <span class="sort-arrow" id="pos-sort-current_value"></span></th>
         <th onclick="sortTable('positions', 'unrealized_pnl')">P&amp;L <span class="sort-arrow" id="pos-sort-unrealized_pnl"></span></th>
         <th onclick="sortTable('positions', 'pnl_pct')">P&amp;L % <span class="sort-arrow" id="pos-sort-pnl_pct"></span></th>
+        <th onclick="sortTable('positions', 'net_pnl')">Net <span class="sort-arrow" id="pos-sort-net_pnl"></span></th>
         <th>SL</th>
         <th>TP</th>
         <th>Layers</th>
@@ -142,7 +143,7 @@
         <th></th>
       </tr>
     </thead>
-    <tbody id="positions-body"><tr><td colspan="14" class="empty">Loading...</td></tr></tbody>
+    <tbody id="positions-body"><tr><td colspan="15" class="empty">Loading...</td></tr></tbody>
   </table>
 </div>
 
@@ -182,14 +183,15 @@
         <th onclick="sortTable('history', 'entry_price')">Entry <span class="sort-arrow" id="hist-sort-entry_price"></span></th>
         <th onclick="sortTable('history', 'exit_price')">Exit <span class="sort-arrow" id="hist-sort-exit_price"></span></th>
         <th onclick="sortTable('history', 'quantity')">Qty <span class="sort-arrow" id="hist-sort-quantity"></span></th>
-        <th onclick="sortTable('history', 'pnl')">P&amp;L <span class="sort-arrow" id="hist-sort-pnl"></span></th>
+        <th onclick="sortTable('history', 'gross_pnl')">Gross <span class="sort-arrow" id="hist-sort-gross_pnl"></span></th>
         <th onclick="sortTable('history', 'pnl_pct')">P&amp;L % <span class="sort-arrow" id="hist-sort-pnl_pct"></span></th>
         <th onclick="sortTable('history', 'fees')">Fees <span class="sort-arrow" id="hist-sort-fees"></span></th>
+        <th onclick="sortTable('history', 'net_pnl')">Net <span class="sort-arrow" id="hist-sort-net_pnl"></span></th>
         <th>Reason</th>
         <th onclick="sortTable('history', 'created_at')">Closed <span class="sort-arrow" id="hist-sort-created_at"></span></th>
       </tr>
     </thead>
-    <tbody id="history-body"><tr><td colspan="10" class="empty">Loading...</td></tr></tbody>
+    <tbody id="history-body"><tr><td colspan="11" class="empty">Loading...</td></tr></tbody>
   </table>
   <div class="pagination" id="history-pagination"></div>
 </div>
@@ -402,7 +404,7 @@ function render(data) {
   // Positions table
   const posBody = document.getElementById('positions-body');
   if (data.positions.length === 0) {
-    posBody.innerHTML = '<tr><td colspan="14" class="empty">No open positions</td></tr>';
+    posBody.innerHTML = '<tr><td colspan="15" class="empty">No open positions</td></tr>';
   } else {
     const sorted = sortData(data.positions.map(p => ({
       ...p,
@@ -417,6 +419,7 @@ function render(data) {
       <td style="color:${pnlColor(p.unrealized_pnl)}">$${p.current_value.toFixed(2)}</td>
       <td style="color:${pnlColor(p.unrealized_pnl)}">${pnlStr(p.unrealized_pnl)}</td>
       <td style="color:${pnlColor(p.pnl_pct)}">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</td>
+      <td style="color:${pnlColor(p.net_pnl)};font-weight:bold">${pnlStr(p.net_pnl)} <span style="color:#8b949e;font-weight:normal;font-size:0.75em">(-$${(p.estimated_fees || 0).toFixed(4)} fees)</span></td>
       <td>${formatPrice(p.stop_loss_price)}</td>
       <td>${formatPrice(p.take_profit_price)}</td>
       <td>${p.layer_count || 1}${p.layer_count > 1 ? ' <span style="color:#d29922;font-size:0.75em">DCA</span>' : ''}</td>
@@ -453,21 +456,25 @@ function render(data) {
   // History table
   const histBody = document.getElementById('history-body');
   if (data.recent_trades.length === 0) {
-    histBody.innerHTML = '<tr><td colspan="10" class="empty">No closed trades yet</td></tr>';
+    histBody.innerHTML = '<tr><td colspan="11" class="empty">No closed trades yet</td></tr>';
   } else {
-    const sorted = sortData(data.recent_trades, sortState.history.key, sortState.history.asc);
-    histBody.innerHTML = sorted.map(t => `<tr>
+    const trades = data.recent_trades.map(t => ({ ...t, net_pnl: t.pnl, gross_pnl: t.pnl + (t.fees || 0) }));
+    const sorted = sortData(trades, sortState.history.key, sortState.history.asc);
+    histBody.innerHTML = sorted.map(t => {
+      return `<tr>
       <td><strong>${t.symbol}</strong>${t.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.6em">DRY</span>' : ''}</td>
       <td>${sideBadge(t.side)}</td>
       <td>${formatPrice(t.entry_price)}</td>
       <td>${formatPrice(t.exit_price)}</td>
       <td>${t.quantity.toFixed(4)}</td>
-      <td style="color:${pnlColor(t.pnl)}">${pnlStr(t.pnl)}</td>
+      <td style="color:${pnlColor(t.gross_pnl)}">${pnlStr(t.gross_pnl)}</td>
       <td style="color:${pnlColor(t.pnl_pct)}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
       <td class="negative">$${(t.fees || 0).toFixed(4)}</td>
+      <td style="color:${pnlColor(t.net_pnl)};font-weight:bold">${pnlStr(t.net_pnl)}</td>
       <td>${reasonBadge(t.close_reason)}</td>
       <td>${timeAgo(t.created_at)}</td>
-    </tr>`).join('');
+    </tr>`;
+    }).join('');
   }
 }
 

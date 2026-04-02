@@ -84,31 +84,56 @@ class DashboardController extends Controller
             // Wave analysis failed, show empty
         }
 
+        // Estimate fees for open positions (entry + projected exit at current price)
+        $feeRateCache = [];
+
         return response()->json([
-            'positions' => $openPositions->map(fn (Position $p) => [
-                'id' => $p->id,
-                'symbol' => $p->symbol,
-                'side' => $p->side,
-                'entry_price' => $p->entry_price,
-                'current_price' => $p->current_price,
-                'quantity' => $p->quantity,
-                'position_size_usdt' => $p->position_size_usdt,
-                'unrealized_pnl' => $p->unrealized_pnl,
-                'pnl_pct' => $p->entry_price > 0
-                    ? round($p->side === 'LONG'
-                        ? ((($p->current_price ?? $p->entry_price) - $p->entry_price) / $p->entry_price) * 100
-                        : (($p->entry_price - ($p->current_price ?? $p->entry_price)) / $p->entry_price) * 100, 2)
-                    : 0,
-                'best_price' => $p->best_price,
-                'stop_loss_price' => $p->stop_loss_price,
-                'take_profit_price' => $p->take_profit_price,
-                'leverage' => $p->leverage,
-                'is_dry_run' => $p->is_dry_run,
-                'layer_count' => $p->layer_count ?? 1,
-                'atr_value' => $p->atr_value,
-                'opened_at' => $p->opened_at->timestamp,
-                'expires_at' => $p->expires_at?->timestamp,
-            ]),
+            'positions' => $openPositions->map(function (Position $p) use ($exchange, &$feeRateCache) {
+                $currentPrice = $p->current_price ?? $p->entry_price;
+
+                // Get taker fee rate (cached per symbol)
+                if (! isset($feeRateCache[$p->symbol])) {
+                    try {
+                        $rates = $exchange->getCommissionRate($p->symbol);
+                        $feeRateCache[$p->symbol] = $rates['taker'];
+                    } catch (\Throwable) {
+                        $feeRateCache[$p->symbol] = (float) Settings::get('dry_run_fee_rate') ?: 0.0005;
+                    }
+                }
+                $takerRate = $feeRateCache[$p->symbol];
+
+                $entryFee = $p->entry_price * $p->quantity * $takerRate;
+                $exitFee = $currentPrice * $p->quantity * $takerRate;
+                $estimatedFees = round($entryFee + $exitFee, 4);
+                $netPnl = round(($p->unrealized_pnl ?? 0) - $estimatedFees, 4);
+
+                return [
+                    'id' => $p->id,
+                    'symbol' => $p->symbol,
+                    'side' => $p->side,
+                    'entry_price' => $p->entry_price,
+                    'current_price' => $currentPrice,
+                    'quantity' => $p->quantity,
+                    'position_size_usdt' => $p->position_size_usdt,
+                    'unrealized_pnl' => $p->unrealized_pnl,
+                    'pnl_pct' => $p->entry_price > 0
+                        ? round($p->side === 'LONG'
+                            ? (($currentPrice - $p->entry_price) / $p->entry_price) * 100
+                            : (($p->entry_price - $currentPrice) / $p->entry_price) * 100, 2)
+                        : 0,
+                    'estimated_fees' => $estimatedFees,
+                    'net_pnl' => $netPnl,
+                    'best_price' => $p->best_price,
+                    'stop_loss_price' => $p->stop_loss_price,
+                    'take_profit_price' => $p->take_profit_price,
+                    'leverage' => $p->leverage,
+                    'is_dry_run' => $p->is_dry_run,
+                    'layer_count' => $p->layer_count ?? 1,
+                    'atr_value' => $p->atr_value,
+                    'opened_at' => $p->opened_at->timestamp,
+                    'expires_at' => $p->expires_at?->timestamp,
+                ];
+            }),
             'recent_trades' => $recentTrades->map(fn (Trade $t) => [
                 'id' => $t->id,
                 'symbol' => $t->symbol,
