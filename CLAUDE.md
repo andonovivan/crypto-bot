@@ -64,11 +64,12 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 
 ### ATR-Based SL/TP (Wave Rider)
 - **SL**: 1.0x ATR from entry price (configurable via `wave_sl_atr_multiplier`)
-- **TP**: 0.5x ATR from entry (configurable via `wave_tp_atr_multiplier`) — quick profit capture
-- **Fee-aware TP floor**: TP distance is guaranteed to cover round-trip fees with 50% margin. Min TP = `entryPrice × 2 × takerRate × 1.5`. Fetches actual commission rate per symbol (cached 1h). Logged when adjustment occurs.
+- **TP**: 1.5x ATR from entry (configurable via `wave_tp_atr_multiplier`)
+- **Fee-aware TP floor**: TP distance guaranteed to cover round-trip fees × configurable multiplier. Min TP = `entryPrice × 2 × takerRate × feeFloorMultiplier` (default 2.5×). Logged when adjustment occurs.
+- **ATR/fee viability filter**: Before opening, checks if fee-floor-adjusted TP exceeds `wave_max_tp_atr` × ATR (default 2.5×). If so, skips the trade — ATR is too low relative to fees for TP to be reachable. Prevents opening positions that can never realistically hit TP.
 - **Fallback**: If ATR < 0.1% of price, uses 1% SL / 0.5% TP
-- **Trailing stop**: Activates at 0.3x ATR profit, trails at 0.3x ATR distance (configurable)
-- **No breakeven** — trailing at 0.3x ATR activates before old breakeven would
+- **Breakeven protection**: When unrealized profit >= round-trip fee distance (`entryPrice × 2 × takerRate`), SL moves to entry price. Prevents profitable positions from reversing to full SL loss. Resets on DCA (entry changes). Uses `CloseReason::Breakeven` to distinguish from full stop-loss.
+- **Trailing stop**: Activates at 0.15x ATR profit, trails at 0.2x ATR distance (configurable). Engages after breakeven, only moves SL further into profit.
 
 ### DCA (Dollar Cost Averaging)
 - **Purpose**: Build positions when price moves against entry but wave still intact
@@ -131,9 +132,11 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 | `wave_atr_period` | 14 | ATR period |
 | `wave_kline_limit` | 30 | Number of 1m candles to fetch |
 | `wave_sl_atr_multiplier` | 1.0 | Stop loss distance in ATR multiples |
-| `wave_tp_atr_multiplier` | 0.5 | Take profit distance in ATR multiples |
-| `wave_trailing_activation_atr` | 0.3 | Trailing stop activation in ATR multiples |
-| `wave_trailing_distance_atr` | 0.3 | Trailing stop distance in ATR multiples |
+| `wave_tp_atr_multiplier` | 1.5 | Take profit distance in ATR multiples |
+| `wave_fee_floor_multiplier` | 2.5 | Fee floor multiplier for minimum TP distance |
+| `wave_max_tp_atr` | 2.5 | Max TP distance in ATR multiples (skip trade if fee floor exceeds this) |
+| `wave_trailing_activation_atr` | 0.15 | Trailing stop activation in ATR multiples |
+| `wave_trailing_distance_atr` | 0.2 | Trailing stop distance in ATR multiples |
 | `wave_max_hold_minutes` | 30 | Max hold time before forced close |
 | `wave_dca_trigger_atr` | 0.5 | DCA trigger distance in ATR multiples |
 | `wave_rsi_overbought` | 80 | RSI overbought threshold (reject LONG above) |
@@ -168,7 +171,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 **Enums**:
 - `PositionStatus`: Open, Closed, Expired, StoppedOut
 - `SignalStatus`: Detected, ReversalConfirmed, Traded, Expired, Skipped
-- `CloseReason`: TakeProfit, StopLoss, Expired, Manual, WaveBreak
+- `CloseReason`: TakeProfit, StopLoss, Expired, Manual, WaveBreak, Breakeven
 
 ## Development Commands
 
@@ -201,7 +204,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 
 - **Trading fees**: Calculated on position close. Both entry and exit use taker rate (market orders). Fee = `price * quantity * takerRate` per side. Deducted from realized P&L.
 - **Estimated fees for open positions**: Dashboard computes `estimated_fees` (entry + projected exit at current price) and `net_pnl` (unrealized P&L minus estimated fees) per position. Uses `getCommissionRate()` (cached 1h per symbol) with fallback to `dry_run_fee_rate`.
-- **Fee-aware TP floor**: `calculateSlTp()` ensures TP distance always exceeds round-trip fees by 50% margin. Prevents take-profit exits that lose money after fees.
+- **Fee-aware TP floor**: `calculateSlTp()` ensures TP distance always exceeds round-trip fees × configurable multiplier (default 2.5×). Min TP = `entryPrice × 2 × takerRate × feeFloorMultiplier`. Prevents take-profit exits that lose money after fees.
 - **Fee rates**: Live mode fetches from `/fapi/v1/commissionRate` (default ~0.05% taker). Dry-run uses `dry_run_fee_rate` setting.
 - **Balance model**: `getAccountData()` returns Binance-compatible fields: `walletBalance`, `availableBalance`, `unrealizedProfit`, `marginBalance`, `positionMargin`, `maintMargin`.
 - **DryRun margin**: Uses `position_size_usdt / leverage` (margin), not full notional. With 5x leverage, a $50 position locks $10 margin.

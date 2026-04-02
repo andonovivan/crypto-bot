@@ -92,6 +92,35 @@ class TradingEngine
                 return null;
             }
 
+            // ATR/fee viability check — skip if fee floor pushes TP beyond reachable ATR range
+            $atrValue = $signal->atr_value ?? null;
+            if ($atrValue > 0 && $strategy === 'wave') {
+                $maxTpAtr = (float) Settings::get('wave_max_tp_atr') ?: 2.5;
+
+                try {
+                    $rates = $this->exchange->getCommissionRate($signal->symbol);
+                    $takerRate = $rates['taker'];
+                } catch (\Throwable) {
+                    $takerRate = (float) Settings::get('dry_run_fee_rate') ?: 0.0005;
+                }
+                $feeFloorMultiplier = (float) Settings::get('wave_fee_floor_multiplier') ?: 2.5;
+                $minTpDistance = $price * 2 * $takerRate * $feeFloorMultiplier;
+                $effectiveTpInAtr = $minTpDistance / $atrValue;
+
+                if ($effectiveTpInAtr > $maxTpAtr) {
+                    Log::info('Trade skipped — ATR too low for fees', [
+                        'symbol' => $signal->symbol,
+                        'direction' => $direction,
+                        'atr' => round($atrValue, 6),
+                        'fee_floor_tp' => round($minTpDistance, 6),
+                        'effective_tp_atr' => round($effectiveTpInAtr, 2),
+                        'max_tp_atr' => $maxTpAtr,
+                        'price' => $price,
+                    ]);
+                    return null;
+                }
+            }
+
             // Open position in the correct direction
             $order = $direction === 'LONG'
                 ? $this->exchange->openLong($signal->symbol, $quantity)
@@ -100,7 +129,6 @@ class TradingEngine
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
             // Calculate SL/TP — ATR-based if available, fixed % fallback
-            $atrValue = $signal->atr_value ?? null;
             $slTp = $this->calculateSlTp($entryPrice, $direction, $atrValue, $settingsPrefix, $signal->score ?? 0, $signal->symbol);
 
             // Place stop-loss and take-profit orders
@@ -197,6 +225,46 @@ class TradingEngine
             'unrealized_pnl' => $unrealizedPnl,
         ]);
 
+        // Breakeven protection: move SL to entry price once fees are covered
+        if (! $position->breakeven_activated) {
+            try {
+                $rates = $this->exchange->getCommissionRate($position->symbol);
+                $takerRate = $rates['taker'];
+            } catch (\Throwable) {
+                $takerRate = (float) Settings::get('dry_run_fee_rate') ?: 0.0005;
+            }
+
+            $feeCoverDistance = $position->entry_price * 2 * $takerRate;
+            $profitFromEntry = $isLong
+                ? $currentPrice - $position->entry_price
+                : $position->entry_price - $currentPrice;
+
+            if ($profitFromEntry >= $feeCoverDistance) {
+                $breakevenSl = $position->entry_price;
+
+                try {
+                    $this->exchange->cancelOrders($position->symbol);
+                    $this->exchange->setStopLoss($position->symbol, $breakevenSl, $position->quantity, $position->side);
+                    $this->exchange->setTakeProfit($position->symbol, $position->take_profit_price, $position->quantity, $position->side);
+                } catch (\Throwable $e) {
+                    Log::warning('Failed to set breakeven SL', ['error' => $e->getMessage()]);
+                }
+
+                $position->update([
+                    'stop_loss_price' => $breakevenSl,
+                    'breakeven_activated' => true,
+                ]);
+
+                Log::info('Breakeven SL activated', [
+                    'symbol' => $position->symbol,
+                    'side' => $position->side,
+                    'entry' => $position->entry_price,
+                    'current' => $currentPrice,
+                    'fee_distance' => round($feeCoverDistance, 6),
+                ]);
+            }
+        }
+
         // ATR-based trailing stop
         $atr = $position->atr_value;
         if ($atr > 0) {
@@ -234,7 +302,8 @@ class TradingEngine
             : ($position->stop_loss_price && $currentPrice >= $position->stop_loss_price);
 
         if ($slHit) {
-            $this->closePosition($position, $currentPrice, CloseReason::StopLoss);
+            $reason = $position->breakeven_activated ? CloseReason::Breakeven : CloseReason::StopLoss;
+            $this->closePosition($position, $currentPrice, $reason);
             return;
         }
 
@@ -367,6 +436,7 @@ class TradingEngine
                 'take_profit_price' => $slTp['tp'],
                 'layer_count' => $position->layer_count + 1,
                 'best_price' => $avgEntry, // Reset best price to new avg entry
+                'breakeven_activated' => false, // Reset breakeven — entry changed
             ]);
 
             Log::info('DCA layer added', [
@@ -494,7 +564,8 @@ class TradingEngine
                 } catch (\Throwable) {
                     $takerRate = (float) Settings::get('dry_run_fee_rate') ?: 0.0005;
                 }
-                $minTpDistance = $entryPrice * 2 * $takerRate * 1.5;
+                $feeFloorMultiplier = (float) Settings::get('wave_fee_floor_multiplier') ?: 2.5;
+                $minTpDistance = $entryPrice * 2 * $takerRate * $feeFloorMultiplier;
 
                 if ($tpDistance < $minTpDistance) {
                     Log::info('TP distance adjusted to cover fees', [

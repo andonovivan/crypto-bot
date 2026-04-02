@@ -320,6 +320,7 @@ function reasonBadge(reason) {
     expired: '#d29922',
     manual: '#8b949e',
     wave_break: '#1f6feb',
+    breakeven: '#d29922',
   };
   const color = colors[reason] || '#8b949e';
   return `<span style="color:${color};font-weight:bold;font-size:0.85em">${reason.replace('_', ' ').toUpperCase()}</span>`;

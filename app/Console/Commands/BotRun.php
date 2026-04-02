@@ -39,7 +39,7 @@ class BotRun extends Command
         $this->info("  Scan interval: {$scanInterval}s");
         $this->info("  EMA: " . Settings::get('wave_ema_fast') . "/" . Settings::get('wave_ema_slow'));
         $this->info("  RSI: " . Settings::get('wave_rsi_period') . " (OB:" . Settings::get('wave_rsi_overbought') . " OS:" . Settings::get('wave_rsi_oversold') . ")");
-        $this->info("  SL: " . Settings::get('wave_sl_atr_multiplier') . "x ATR | TP: " . Settings::get('wave_tp_atr_multiplier') . "x ATR");
+        $this->info("  SL: " . Settings::get('wave_sl_atr_multiplier') . "x ATR | TP: " . Settings::get('wave_tp_atr_multiplier') . "x ATR (max " . Settings::get('wave_max_tp_atr') . "x ATR)");
         $this->info("  Trailing: activate " . Settings::get('wave_trailing_activation_atr') . "x ATR, trail " . Settings::get('wave_trailing_distance_atr') . "x ATR");
         $this->info("  DCA: " . (Settings::get('dca_enabled') ? 'enabled (max ' . Settings::get('dca_max_layers') . ' layers, trigger ' . Settings::get('wave_dca_trigger_atr') . 'x ATR)' : 'disabled'));
         $this->info("  Max hold: " . Settings::get('wave_max_hold_minutes') . " min | Position: $" . Settings::get('position_size_usdt'));

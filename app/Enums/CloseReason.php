@@ -9,4 +9,5 @@ enum CloseReason: string
     case Expired = 'expired';
     case Manual = 'manual';
     case WaveBreak = 'wave_break';
+    case Breakeven = 'breakeven';
 }

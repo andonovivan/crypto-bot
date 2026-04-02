@@ -50,6 +50,8 @@ class Settings
         'wave_sl_atr_multiplier' => ['config' => 'crypto.wave.sl_atr_multiplier', 'type' => 'float', 'label' => 'Wave SL (ATR multiplier)'],
         'wave_trailing_activation_atr' => ['config' => 'crypto.wave.trailing_activation_atr', 'type' => 'float', 'label' => 'Wave Trailing Activation (ATR mult)'],
         'wave_trailing_distance_atr' => ['config' => 'crypto.wave.trailing_distance_atr', 'type' => 'float', 'label' => 'Wave Trailing Distance (ATR mult)'],
+        'wave_fee_floor_multiplier' => ['config' => 'crypto.wave.fee_floor_multiplier', 'type' => 'float', 'label' => 'Wave Fee Floor Multiplier'],
+        'wave_max_tp_atr' => ['config' => 'crypto.wave.max_tp_atr', 'type' => 'float', 'label' => 'Wave Max TP (ATR multiplier)'],
         'wave_max_hold_minutes' => ['config' => 'crypto.wave.max_hold_minutes', 'type' => 'int', 'label' => 'Wave Max Hold Time (minutes)'],
         'wave_dca_trigger_atr' => ['config' => 'crypto.wave.dca_trigger_atr', 'type' => 'float', 'label' => 'Wave DCA Trigger (ATR mult per layer)'],
         'wave_rsi_overbought' => ['config' => 'crypto.wave.rsi_overbought', 'type' => 'int', 'label' => 'Wave RSI Overbought'],
