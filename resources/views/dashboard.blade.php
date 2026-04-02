@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Crypto Pump &amp; Dump Bot</title>
+<title>Wave Rider Bot</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
@@ -19,7 +19,6 @@
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
   .card-label { color: #8b949e; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.05em; }
   .card-value { font-size: 1.5em; font-weight: bold; margin-top: 4px; }
-  .positive { color: #3fb950; }
   .negative { color: #f85149; }
   .neutral { color: #c9d1d9; }
   table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
@@ -42,21 +41,11 @@
     padding: 3px 10px; cursor: pointer; font-size: 0.75em; white-space: nowrap; }
   .btn-close-pos:hover { background: #f85149; }
   .btn-close-pos:disabled { opacity: 0.4; cursor: default; }
-  .signal-status { padding: 2px 6px; border-radius: 3px; font-size: 0.75em; font-weight: bold; }
-  .signal-detected { background: #d29922; color: #0d1117; }
-  .signal-reversal { background: #f85149; color: #fff; }
-  .side-long { color: #3fb950; font-weight: bold; font-size: 0.75em; }
-  .side-short { color: #f85149; font-weight: bold; font-size: 0.75em; }
-  .score-bar { display: inline-block; height: 6px; border-radius: 3px; background: #30363d; width: 60px; vertical-align: middle; }
-  .score-fill { display: block; height: 100%; border-radius: 3px; }
-  .signal-long { background: #238636; color: #fff; }
-  .signal-short { background: #da3633; color: #fff; }
   .pagination { display: flex; align-items: center; gap: 8px; margin: 8px 0 20px; }
   .pagination button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
     border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 0.8em; }
   .pagination button:hover { background: #30363d; }
   .pagination button:disabled { opacity: 0.4; cursor: default; }
-  .pagination .page-info { color: #8b949e; font-size: 0.8em; }
   .settings-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; overflow: hidden; }
   .setting-item { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px;
     display: flex; justify-content: space-between; align-items: center; gap: 12px; overflow: hidden; min-width: 0; }
@@ -82,7 +71,7 @@
 </style>
 </head>
 <body>
-<h1>Crypto Trading Bot <span id="badge"></span> <span id="strategy-badge"></span></h1>
+<h1>Wave Rider Bot <span id="badge"></span> <span id="strategy-badge"></span></h1>
 <p class="subtitle">
   <span id="signals-count">-</span> active signals &middot;
   <span id="positions-count-sub">-</span> open positions &middot;
@@ -91,7 +80,7 @@
 
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
-  <button class="tab-btn" onclick="switchTab('signals')" id="signals-tab-btn">Signals</button>
+  <button class="tab-btn" onclick="switchTab('signals')" id="signals-tab-btn">Wave Status</button>
   <button class="tab-btn" onclick="switchTab('history')">Trade History</button>
   <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
 </div>
@@ -148,11 +137,12 @@
         <th>SL</th>
         <th>TP</th>
         <th>Layers</th>
+        <th>Hold</th>
         <th onclick="sortTable('positions', 'opened_at')">Opened <span class="sort-arrow" id="pos-sort-opened_at"></span></th>
         <th></th>
       </tr>
     </thead>
-    <tbody id="positions-body"><tr><td colspan="12" class="empty">Loading...</td></tr></tbody>
+    <tbody id="positions-body"><tr><td colspan="14" class="empty">Loading...</td></tr></tbody>
   </table>
 </div>
 
@@ -164,41 +154,20 @@
   </div>
   <div class="settings-msg" id="scan-msg"></div>
 
-  <!-- Trend signals table -->
-  <table id="trend-signals-table">
+  <!-- Wave status table -->
+  <table id="wave-status-table">
     <thead>
       <tr>
         <th>Symbol</th>
         <th>Direction</th>
-        <th>Score</th>
-        <th>EMA Cross</th>
+        <th>Wave State</th>
         <th>RSI</th>
-        <th>MACD</th>
-        <th>Volume</th>
         <th>ATR</th>
+        <th>EMA Gap</th>
         <th>Price</th>
-        <th>Status</th>
-        <th>Detected</th>
       </tr>
     </thead>
-    <tbody id="trend-signals-body"><tr><td colspan="11" class="empty">Loading...</td></tr></tbody>
-  </table>
-
-  <!-- Pump signals table (hidden when trend strategy active) -->
-  <table id="pump-signals-table" style="display:none;">
-    <thead>
-      <tr>
-        <th>Symbol</th>
-        <th>Price Change</th>
-        <th>Volume</th>
-        <th>Peak Price</th>
-        <th>Current</th>
-        <th>Drop from Peak</th>
-        <th>Status</th>
-        <th>Detected</th>
-      </tr>
-    </thead>
-    <tbody id="pump-signals-body"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody>
+    <tbody id="wave-status-body"><tr><td colspan="7" class="empty">Loading...</td></tr></tbody>
   </table>
 </div>
 
@@ -282,10 +251,10 @@ function sortTable(table, key) {
   if (lastData) render(lastData);
 }
 
-function pnlClass(val) {
-  if (val > 0) return 'positive';
-  if (val < 0) return 'negative';
-  return 'neutral';
+function pnlColor(val) {
+  if (val > 0) return '#3fb950';
+  if (val < 0) return '#f85149';
+  return '#c9d1d9';
 }
 
 function pnlStr(val) {
@@ -305,7 +274,7 @@ function formatPrice(val) {
   if (abs >= 1) return sign + '$' + abs.toFixed(4);
   // For prices < 1, check for leading zeros after decimal
   const str = abs.toFixed(20).replace(/0+$/, '');
-  const zeros = (str.match(/^0\.(0+)/) || [, ''])[1].length;
+  const zeros = (str.match(/^0\.(0+)/) || [null, ''])[1].length;
   if (zeros >= 3) {
     // Subscript notation: 0.0₃160 means 0.000160
     const sigStart = zeros + 2; // skip "0."
@@ -326,12 +295,25 @@ function timeAgo(ts) {
   return Math.floor(diff / 86400) + 'd ago';
 }
 
+function holdTime(openedTs, expiresTs) {
+  if (!openedTs) return '-';
+  const now = Math.floor(Date.now() / 1000);
+  const held = Math.floor((now - openedTs) / 60);
+  let str = held + 'm';
+  if (expiresTs) {
+    const remaining = Math.max(0, Math.floor((expiresTs - now) / 60));
+    str += ` <span style="color:#8b949e;font-size:0.8em">(${remaining}m left)</span>`;
+  }
+  return str;
+}
+
 function reasonBadge(reason) {
   const colors = {
     take_profit: '#3fb950',
     stop_loss: '#f85149',
     expired: '#d29922',
     manual: '#8b949e',
+    wave_break: '#1f6feb',
   };
   const color = colors[reason] || '#8b949e';
   return `<span style="color:${color};font-weight:bold;font-size:0.85em">${reason.replace('_', ' ').toUpperCase()}</span>`;
@@ -365,13 +347,8 @@ async function closePosition(id, btn) {
 
 function sideBadge(side) {
   if (!side) return '';
-  const cls = side === 'LONG' ? 'side-long' : 'side-short';
-  return `<span class="${cls}">${side}</span>`;
-}
-
-function scoreBar(score) {
-  const color = score >= 70 ? '#3fb950' : score >= 50 ? '#d29922' : '#f85149';
-  return `<span class="score-bar"><span class="score-fill" style="width:${score}%;background:${color}"></span></span> ${score}`;
+  const color = side === 'LONG' ? '#3fb950' : '#f85149';
+  return `<span style="color:${color};font-weight:bold;font-size:0.75em">${side}</span>`;
 }
 
 function render(data) {
@@ -385,9 +362,14 @@ function render(data) {
     : '<span class="live-badge">LIVE</span>';
 
   // Strategy badge
-  document.getElementById('strategy-badge').innerHTML = strategy === 'trend'
-    ? '<span style="background:#1f6feb;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.55em;font-weight:bold;vertical-align:middle;">TREND</span>'
-    : '<span style="background:#8957e5;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.55em;font-weight:bold;vertical-align:middle;">PUMP</span>';
+  const stratBadges = {
+    wave: { bg: '#1f6feb', label: 'WAVE' },
+    trend: { bg: '#8957e5', label: 'TREND' },
+    pump: { bg: '#da3633', label: 'PUMP' },
+  };
+  const sb = stratBadges[strategy] || stratBadges.wave;
+  document.getElementById('strategy-badge').innerHTML =
+    `<span style="background:${sb.bg};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.55em;font-weight:bold;vertical-align:middle;">${sb.label}</span>`;
 
   // Subtitle
   document.getElementById('signals-count').textContent = s.active_signals;
@@ -399,24 +381,28 @@ function render(data) {
   document.getElementById('available-balance').textContent = '$' + s.available_balance.toFixed(2);
   document.getElementById('margin-in-use').textContent = '$' + s.margin_in_use.toFixed(2);
 
-  document.getElementById('combined').className = 'card-value ' + pnlClass(s.combined_pnl);
+  document.getElementById('combined').className = 'card-value';
+  document.getElementById('combined').style.color = pnlColor(s.combined_pnl);
   document.getElementById('combined').textContent = pnlStr(s.combined_pnl);
 
-  document.getElementById('realized').className = 'card-value ' + pnlClass(s.realized_pnl);
+  document.getElementById('realized').className = 'card-value';
+  document.getElementById('realized').style.color = pnlColor(s.realized_pnl);
   document.getElementById('realized').textContent = pnlStr(s.realized_pnl);
 
-  document.getElementById('unrealized').className = 'card-value ' + pnlClass(s.unrealized_pnl);
+  document.getElementById('unrealized').className = 'card-value';
+  document.getElementById('unrealized').style.color = pnlColor(s.unrealized_pnl);
   document.getElementById('unrealized').textContent = pnlStr(s.unrealized_pnl);
 
   document.getElementById('total-fees').textContent = '-$' + Math.abs(s.total_fees).toFixed(4);
 
-  document.getElementById('winrate').className = 'card-value ' + (s.win_rate >= 50 ? 'positive' : s.win_rate > 0 ? 'negative' : 'neutral');
+  document.getElementById('winrate').className = 'card-value';
+  document.getElementById('winrate').style.color = s.win_rate >= 50 ? '#3fb950' : s.win_rate > 0 ? '#f85149' : '#c9d1d9';
   document.getElementById('winrate').textContent = s.win_rate + '% (' + s.winning_trades + '/' + s.total_trades + ')';
 
   // Positions table
   const posBody = document.getElementById('positions-body');
   if (data.positions.length === 0) {
-    posBody.innerHTML = '<tr><td colspan="13" class="empty">No open positions</td></tr>';
+    posBody.innerHTML = '<tr><td colspan="14" class="empty">No open positions</td></tr>';
   } else {
     const sorted = sortData(data.positions.map(p => ({
       ...p,
@@ -428,61 +414,40 @@ function render(data) {
       <td>${formatPrice(p.entry_price)}</td>
       <td>${formatPrice(p.current_price)}</td>
       <td>$${p.position_size_usdt.toFixed(2)}</td>
-      <td class="${pnlClass(p.unrealized_pnl)}">$${p.current_value.toFixed(2)}</td>
-      <td class="${pnlClass(p.unrealized_pnl)}">${pnlStr(p.unrealized_pnl)}</td>
-      <td class="${pnlClass(p.pnl_pct)}">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</td>
+      <td style="color:${pnlColor(p.unrealized_pnl)}">$${p.current_value.toFixed(2)}</td>
+      <td style="color:${pnlColor(p.unrealized_pnl)}">${pnlStr(p.unrealized_pnl)}</td>
+      <td style="color:${pnlColor(p.pnl_pct)}">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</td>
       <td>${formatPrice(p.stop_loss_price)}</td>
       <td>${formatPrice(p.take_profit_price)}</td>
       <td>${p.layer_count || 1}${p.layer_count > 1 ? ' <span style="color:#d29922;font-size:0.75em">DCA</span>' : ''}</td>
+      <td>${holdTime(p.opened_at, p.expires_at)}</td>
       <td>${timeAgo(p.opened_at)}</td>
       <td><button class="btn-close-pos" onclick="closePosition(${p.id}, this)">Close</button></td>
     </tr>`).join('');
   }
 
-  // Signals tables — show the right one based on strategy
-  const isTrend = strategy === 'trend';
-  document.getElementById('trend-signals-table').style.display = isTrend ? '' : 'none';
-  document.getElementById('pump-signals-table').style.display = isTrend ? 'none' : '';
-  document.getElementById('signals-title').textContent = isTrend ? 'Active Trend Signals' : 'Active Pump Signals';
-  document.getElementById('signals-tab-btn').textContent = isTrend ? 'Trend Signals' : 'Pump Signals';
-
-  // Trend signals
-  const trendBody = document.getElementById('trend-signals-body');
-  const trendSignals = data.trend_signals || [];
-  if (trendSignals.length === 0) {
-    trendBody.innerHTML = '<tr><td colspan="11" class="empty">No active trend signals</td></tr>';
+  // Wave status
+  document.getElementById('signals-title').textContent = 'Wave Status';
+  const waveBody = document.getElementById('wave-status-body');
+  const waveStatus = data.wave_status || [];
+  if (waveStatus.length === 0) {
+    waveBody.innerHTML = '<tr><td colspan="7" class="empty">No wave data</td></tr>';
   } else {
-    trendBody.innerHTML = trendSignals.map(s => `<tr>
-      <td><strong>${s.symbol}</strong></td>
-      <td><span class="signal-status signal-${s.direction.toLowerCase()}">${s.direction}</span></td>
-      <td>${scoreBar(s.score)}</td>
-      <td>${s.ema_cross ? '✓ Fresh' : '—'}</td>
-      <td>${s.rsi_value !== null ? s.rsi_value.toFixed(1) : '—'}</td>
-      <td>${s.macd_histogram !== null ? s.macd_histogram.toFixed(6) : '—'}</td>
-      <td>${s.volume_ratio !== null ? s.volume_ratio.toFixed(1) + 'x' : '—'}</td>
-      <td>${s.atr_value !== null ? formatPrice(s.atr_value) : '—'}</td>
-      <td>${formatPrice(s.entry_price)}</td>
-      <td><span class="signal-status signal-detected">${s.status.replace('_', ' ').toUpperCase()}</span></td>
-      <td>${timeAgo(s.created_at)}</td>
-    </tr>`).join('');
-  }
-
-  // Pump signals
-  const pumpBody = document.getElementById('pump-signals-body');
-  const pumpSignals = data.pump_signals || [];
-  if (pumpSignals.length === 0) {
-    pumpBody.innerHTML = '<tr><td colspan="8" class="empty">No active pump signals</td></tr>';
-  } else {
-    pumpBody.innerHTML = pumpSignals.map(s => `<tr>
-      <td><strong>${s.symbol}</strong></td>
-      <td class="positive">+${s.price_change_pct.toFixed(2)}%</td>
-      <td>${s.volume_multiplier.toFixed(1)}x</td>
-      <td>${formatPrice(s.peak_price)}</td>
-      <td>${formatPrice(s.current_price)}</td>
-      <td class="${s.drop_from_peak_pct > 0 ? 'negative' : 'neutral'}">${s.drop_from_peak_pct.toFixed(2)}%</td>
-      <td><span class="signal-status ${s.status === 'reversal_confirmed' ? 'signal-reversal' : 'signal-detected'}">${s.status.replace('_', ' ').toUpperCase()}</span></td>
-      <td>${timeAgo(s.created_at)}</td>
-    </tr>`).join('');
+    waveBody.innerHTML = waveStatus.map(w => {
+      const dirColor = w.direction === 'LONG' ? '#3fb950' : (w.direction === 'SHORT' ? '#f85149' : '#8b949e');
+      const stateColors = { new_wave: '#3fb950', riding: '#58a6ff', weakening: '#d29922' };
+      const stateColor = stateColors[w.wave_state] || '#8b949e';
+      const stateLabel = (w.wave_state || 'none').replace('_', ' ').toUpperCase();
+      return `<tr>
+        <td><strong>${w.symbol}</strong></td>
+        <td><span style="color:${dirColor};font-weight:bold;font-size:0.75em">${w.direction || '—'}</span></td>
+        <td><span style="color:${stateColor};font-weight:bold;font-size:0.85em">${stateLabel}</span></td>
+        <td>${w.rsi !== null ? w.rsi.toFixed(1) : '—'}</td>
+        <td>${w.atr !== null ? formatPrice(w.atr) : '—'}</td>
+        <td>${w.ema_gap !== null ? w.ema_gap.toFixed(4) + '%' : '—'}</td>
+        <td>${w.price !== null ? formatPrice(w.price) : '—'}</td>
+      </tr>`;
+    }).join('');
   }
 
   // History table
@@ -497,8 +462,8 @@ function render(data) {
       <td>${formatPrice(t.entry_price)}</td>
       <td>${formatPrice(t.exit_price)}</td>
       <td>${t.quantity.toFixed(4)}</td>
-      <td class="${pnlClass(t.pnl)}">${pnlStr(t.pnl)}</td>
-      <td class="${pnlClass(t.pnl_pct)}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
+      <td style="color:${pnlColor(t.pnl)}">${pnlStr(t.pnl)}</td>
+      <td style="color:${pnlColor(t.pnl_pct)}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
       <td class="negative">$${(t.fees || 0).toFixed(4)}</td>
       <td>${reasonBadge(t.close_reason)}</td>
       <td>${timeAgo(t.created_at)}</td>
@@ -531,6 +496,7 @@ async function loadSettings() {
         html += `<div class="setting-item">
           <label>${meta.label}</label>
           <select data-key="${key}">
+            <option value="wave" ${meta.value === 'wave' ? 'selected' : ''}>Wave Rider</option>
             <option value="trend" ${meta.value === 'trend' ? 'selected' : ''}>Trend Following</option>
             <option value="pump" ${meta.value === 'pump' ? 'selected' : ''}>Pump &amp; Dump</option>
           </select>
@@ -608,9 +574,8 @@ async function scanNow(btn) {
     });
     const data = await res.json();
     if (data.ok) {
-      let text = `[${(data.strategy || 'pump').toUpperCase()}] Found ${data.signals} signal(s)`;
-      if (data.reversals !== undefined) text += `, ${data.reversals} reversal(s)`;
-      if (data.trades_opened.length > 0) {
+      let text = `[${(data.strategy || 'wave').toUpperCase()}] Found ${data.signals} wave(s)`;
+      if (data.trades_opened && data.trades_opened.length > 0) {
         text += ` — opened: ${data.trades_opened.join(', ')}`;
       }
       msg.style.color = '#3fb950';

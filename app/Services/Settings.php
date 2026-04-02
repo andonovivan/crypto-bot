@@ -37,9 +37,25 @@ class Settings
         'dca_max_layers' => ['config' => 'crypto.trading.dca_max_layers', 'type' => 'int', 'label' => 'DCA Max Layers'],
 
         // Strategy selection
-        'strategy' => ['config' => 'crypto.strategy', 'type' => 'string', 'label' => 'Strategy (pump or trend)'],
+        'strategy' => ['config' => 'crypto.strategy', 'type' => 'string', 'label' => 'Strategy'],
 
-        // Trend following settings
+        // Wave Rider settings
+        'wave_scan_interval' => ['config' => 'crypto.wave.scan_interval', 'type' => 'int', 'label' => 'Wave Scan Interval (seconds)'],
+        'wave_ema_fast' => ['config' => 'crypto.wave.ema_fast', 'type' => 'int', 'label' => 'Wave EMA Fast Period'],
+        'wave_ema_slow' => ['config' => 'crypto.wave.ema_slow', 'type' => 'int', 'label' => 'Wave EMA Slow Period'],
+        'wave_rsi_period' => ['config' => 'crypto.wave.rsi_period', 'type' => 'int', 'label' => 'Wave RSI Period'],
+        'wave_atr_period' => ['config' => 'crypto.wave.atr_period', 'type' => 'int', 'label' => 'Wave ATR Period'],
+        'wave_kline_limit' => ['config' => 'crypto.wave.kline_limit', 'type' => 'int', 'label' => 'Wave Kline Candles'],
+        'wave_tp_atr_multiplier' => ['config' => 'crypto.wave.tp_atr_multiplier', 'type' => 'float', 'label' => 'Wave TP (ATR multiplier)'],
+        'wave_sl_atr_multiplier' => ['config' => 'crypto.wave.sl_atr_multiplier', 'type' => 'float', 'label' => 'Wave SL (ATR multiplier)'],
+        'wave_trailing_activation_atr' => ['config' => 'crypto.wave.trailing_activation_atr', 'type' => 'float', 'label' => 'Wave Trailing Activation (ATR mult)'],
+        'wave_trailing_distance_atr' => ['config' => 'crypto.wave.trailing_distance_atr', 'type' => 'float', 'label' => 'Wave Trailing Distance (ATR mult)'],
+        'wave_max_hold_minutes' => ['config' => 'crypto.wave.max_hold_minutes', 'type' => 'int', 'label' => 'Wave Max Hold Time (minutes)'],
+        'wave_dca_trigger_atr' => ['config' => 'crypto.wave.dca_trigger_atr', 'type' => 'float', 'label' => 'Wave DCA Trigger (ATR mult per layer)'],
+        'wave_rsi_overbought' => ['config' => 'crypto.wave.rsi_overbought', 'type' => 'int', 'label' => 'Wave RSI Overbought'],
+        'wave_rsi_oversold' => ['config' => 'crypto.wave.rsi_oversold', 'type' => 'int', 'label' => 'Wave RSI Oversold'],
+
+        // Trend following settings (legacy)
         'trend_scan_interval' => ['config' => 'crypto.trend.scan_interval', 'type' => 'int', 'label' => 'Trend Scan Interval (seconds)'],
         'trend_min_score' => ['config' => 'crypto.trend.min_score', 'type' => 'int', 'label' => 'Trend Min Score (0-100)'],
         'trend_max_hold_hours' => ['config' => 'crypto.trend.max_hold_hours', 'type' => 'int', 'label' => 'Trend Max Hold Time (hours)'],

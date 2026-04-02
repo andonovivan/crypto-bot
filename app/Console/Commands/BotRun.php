@@ -2,29 +2,27 @@
 
 namespace App\Console\Commands;
 
-use App\Services\PumpScanner;
+use App\Enums\CloseReason;
+use App\Enums\PositionStatus;
+use App\Models\Position;
+use App\Services\Exchange\ExchangeInterface;
 use App\Services\Settings;
 use App\Services\TradingEngine;
-use App\Services\TrendScanner;
+use App\Services\WaveScanner;
+use App\Services\WaveSignal;
 use Illuminate\Console\Command;
 
 class BotRun extends Command
 {
-    protected $signature = 'bot:run {--interval= : Scan interval in seconds (overrides strategy default)} {--strategy= : Strategy: pump or trend (overrides settings)}';
-    protected $description = 'Run the bot in a continuous loop (scan + trade + monitor)';
+    protected $signature = 'bot:run {--interval= : Scan interval in seconds (overrides settings)}';
+    protected $description = 'Run the Wave Rider bot in a continuous loop';
 
     private bool $shouldStop = false;
 
-    public function handle(PumpScanner $pumpScanner, TrendScanner $trendScanner, TradingEngine $engine): int
+    public function handle(WaveScanner $waveScanner, TradingEngine $engine, ExchangeInterface $exchange): int
     {
-        $strategy = $this->option('strategy') ?: (string) Settings::get('strategy') ?: 'trend';
         $isDryRun = config('crypto.trading.dry_run');
-
-        // Default intervals based on strategy
-        $defaultInterval = $strategy === 'trend'
-            ? (int) Settings::get('trend_scan_interval')
-            : 300;
-        $interval = (int) ($this->option('interval') ?: $defaultInterval);
+        $scanInterval = (int) ($this->option('interval') ?: Settings::get('wave_scan_interval'));
 
         // Register signal handlers for graceful shutdown
         if (extension_loaded('pcntl')) {
@@ -33,59 +31,43 @@ class BotRun extends Command
             pcntl_signal(SIGINT, fn () => $this->shouldStop = true);
         }
 
-        $this->info('Starting Crypto Trading Bot');
-        $this->info("  Strategy: {$strategy}");
-        $this->info($isDryRun ? '  Mode: DRY RUN (no real trades)' : '  Mode: LIVE TRADING');
-        $this->info("  Scan interval: {$interval}s");
-        $this->info("  Position size: " . config('crypto.trading.position_size_usdt') . " USDT");
-        $this->info("  Max positions: " . config('crypto.trading.max_positions'));
+        $watchlist = $waveScanner->getWatchlist();
 
-        if ($strategy === 'trend') {
-            $watchlist = (string) Settings::get('watchlist') ?: config('crypto.trading.watchlist');
-            $this->info("  Watchlist: {$watchlist}");
-            $this->info("  Trend min score: " . Settings::get('trend_min_score'));
-            $this->info("  SL/TP: ATR-based (fallback: " . Settings::get('trend_stop_loss_pct') . "% / " . Settings::get('trend_take_profit_pct') . "%)");
-            $this->info("  DCA: " . (Settings::get('dca_enabled') ? 'enabled (max ' . Settings::get('dca_max_layers') . ' layers)' : 'disabled'));
-            $this->info("  Max position: " . Settings::get('max_position_usdt') . " USDT (incl. DCA)");
-        } else {
-            $this->info("  Stop-loss: " . config('crypto.trading.stop_loss_pct') . "%");
-            $this->info("  Take-profit: " . config('crypto.trading.take_profit_pct') . "%");
-        }
+        $this->info('Starting Wave Rider Bot');
+        $this->info($isDryRun ? '  Mode: DRY RUN (no real trades)' : '  Mode: LIVE TRADING');
+        $this->info("  Watchlist: " . implode(', ', $watchlist));
+        $this->info("  Scan interval: {$scanInterval}s");
+        $this->info("  EMA: " . Settings::get('wave_ema_fast') . "/" . Settings::get('wave_ema_slow'));
+        $this->info("  RSI: " . Settings::get('wave_rsi_period') . " (OB:" . Settings::get('wave_rsi_overbought') . " OS:" . Settings::get('wave_rsi_oversold') . ")");
+        $this->info("  SL: " . Settings::get('wave_sl_atr_multiplier') . "x ATR | TP: " . Settings::get('wave_tp_atr_multiplier') . "x ATR");
+        $this->info("  Trailing: activate " . Settings::get('wave_trailing_activation_atr') . "x ATR, trail " . Settings::get('wave_trailing_distance_atr') . "x ATR");
+        $this->info("  DCA: " . (Settings::get('dca_enabled') ? 'enabled (max ' . Settings::get('dca_max_layers') . ' layers, trigger ' . Settings::get('wave_dca_trigger_atr') . 'x ATR)' : 'disabled'));
+        $this->info("  Max hold: " . Settings::get('wave_max_hold_minutes') . " min | Position: $" . Settings::get('position_size_usdt'));
         $this->newLine();
 
-        $monitorInterval = 60;
-        $lastScanAt = 0;
-
         while (! $this->shouldStop) {
-            $now = time();
+            $loopStart = microtime(true);
 
-            // Scan + trade on the full interval
-            if ($now - $lastScanAt >= $interval) {
-                $this->line('[' . now()->toDateTimeString() . "] Scanning ({$strategy})...");
-
-                try {
-                    if ($strategy === 'trend') {
-                        $this->runTrendScan($trendScanner, $engine);
-                    } else {
-                        $this->runPumpScan($pumpScanner, $engine);
-                    }
-                } catch (\Throwable $e) {
-                    $this->error("  Scan error: {$e->getMessage()}");
+            foreach ($watchlist as $symbol) {
+                if ($this->shouldStop) {
+                    break;
                 }
 
-                $lastScanAt = $now;
+                try {
+                    $this->processSymbol($symbol, $waveScanner, $engine, $exchange);
+                } catch (\Throwable $e) {
+                    $this->error("  [{$symbol}] Error: {$e->getMessage()}");
+                }
             }
 
-            // Monitor positions every cycle (60s)
-            try {
-                $engine->monitorPositions();
-            } catch (\Throwable $e) {
-                $this->error("  Monitor error: {$e->getMessage()}");
-            }
-
-            // Sleep in 1-second increments so we can catch shutdown signals promptly
-            for ($i = 0; $i < $monitorInterval && ! $this->shouldStop; $i++) {
-                sleep(1);
+            // Sleep in sub-second chunks for responsive shutdown
+            $elapsed = microtime(true) - $loopStart;
+            $sleepTime = max(0, $scanInterval - $elapsed);
+            $sleptSoFar = 0;
+            while ($sleptSoFar < $sleepTime && ! $this->shouldStop) {
+                $chunk = min(1.0, $sleepTime - $sleptSoFar);
+                usleep((int) ($chunk * 1_000_000));
+                $sleptSoFar += $chunk;
             }
         }
 
@@ -94,60 +76,55 @@ class BotRun extends Command
         return self::SUCCESS;
     }
 
-    private function runPumpScan(PumpScanner $scanner, TradingEngine $engine): void
-    {
-        // 1. Scan for pumps
-        $signals = $scanner->scan();
+    /**
+     * Process a single symbol: analyze wave, manage position, or open new one.
+     */
+    private function processSymbol(
+        string $symbol,
+        WaveScanner $waveScanner,
+        TradingEngine $engine,
+        ExchangeInterface $exchange,
+    ): void {
+        // 1. Analyze current wave state (fetches klines, cached in-process)
+        $wave = $waveScanner->analyze($symbol);
 
-        if ($signals->isNotEmpty()) {
-            $this->info("  Pumps detected: {$signals->count()}");
-        }
+        // 2. Check for existing position
+        $position = Position::open()->where('symbol', $symbol)->first();
 
-        // 2. Check for reversals and auto-trade
-        $reversals = $scanner->checkReversals();
+        if ($position !== null) {
+            // --- MANAGE EXISTING POSITION ---
+            $currentPrice = $wave?->currentPrice ?? $exchange->getPrice($symbol);
 
-        foreach ($reversals as $signal) {
-            $this->warn("  Reversal: {$signal->symbol} (-{$signal->drop_from_peak_pct}% from peak)");
+            // Wave break check — EMA flipped against our position
+            if (! $waveScanner->isWaveIntact($symbol, $position->side)) {
+                $engine->closePosition($position, $currentPrice, CloseReason::WaveBreak);
+                $this->warn("  [{$symbol}] WAVE BREAK — closed {$position->side} @ {$currentPrice}");
+                return;
+            }
 
-            $position = $engine->openShort($signal);
+            // SL / TP / trailing / expiry checks
+            $engine->checkPosition($position, $currentPrice);
+
+            // DCA check (only if position survived above checks)
+            $position->refresh();
+            if ($position->status === PositionStatus::Open && (bool) Settings::get('dca_enabled')) {
+                $engine->checkDCA($position, $currentPrice);
+            }
+
+        } elseif ($wave !== null && $wave->waveState === 'new_wave') {
+            // --- NEW ENTRY ---
+            $signal = new WaveSignal(
+                symbol: $symbol,
+                direction: $wave->direction,
+                atr_value: $wave->atr,
+                currentPrice: $wave->currentPrice,
+                rsi: $wave->rsi,
+            );
+
+            $position = $engine->openPosition($signal, $wave->direction);
             if ($position) {
-                $this->info("  -> SHORT {$position->symbol} @ {$position->entry_price}");
+                $this->info("  [{$symbol}] ENTRY {$wave->direction} @ {$position->entry_price} (RSI:{$wave->rsi} ATR:" . round($wave->atr, 6) . " gap:{$wave->emaGap}%)");
             }
         }
-
-        // 2b. Retry confirmed signals
-        $retried = $engine->retryConfirmedSignals();
-        foreach ($retried as $position) {
-            $this->info("  -> RETRY SHORT {$position->symbol} @ {$position->entry_price}");
-        }
-
-        // 3. Clean up
-        $scanner->expireStaleSignals();
-    }
-
-    private function runTrendScan(TrendScanner $scanner, TradingEngine $engine): void
-    {
-        // 1. Scan for trend signals
-        $signals = $scanner->scan();
-
-        if ($signals->isNotEmpty()) {
-            $this->info("  Trend signals: {$signals->count()}");
-        }
-
-        // 2. Open positions for detected signals
-        foreach ($signals as $signal) {
-            if ($signal->status->value !== 'detected') {
-                continue; // Already traded or expired
-            }
-
-            $position = $engine->openPosition($signal, $signal->direction, 'trend_');
-            if ($position) {
-                $atrInfo = $position->atr_value ? ' ATR:' . round($position->atr_value, 6) : '';
-                $this->info("  -> {$position->side} {$position->symbol} @ {$position->entry_price} (score: {$signal->score}{$atrInfo})");
-            }
-        }
-
-        // 3. Clean up
-        $scanner->expireStaleSignals();
     }
 }

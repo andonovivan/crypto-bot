@@ -29,7 +29,7 @@ return [
     */
     'trading' => [
         'position_size_usdt' => (float) env('TRADE_POSITION_SIZE_USDT', 50),
-        'max_positions' => (int) env('TRADE_MAX_POSITIONS', 5),
+        'max_positions' => (int) env('TRADE_MAX_POSITIONS', 2),
         'stop_loss_pct' => (float) env('TRADE_STOP_LOSS_PCT', 8),
         'take_profit_pct' => (float) env('TRADE_TAKE_PROFIT_PCT', 15),
         'max_hold_hours' => (int) env('TRADE_MAX_HOLD_HOURS', 24),
@@ -40,7 +40,7 @@ return [
         'dry_run' => filter_var(env('DRY_RUN', true), FILTER_VALIDATE_BOOLEAN),
         'starting_balance' => (float) env('TRADE_STARTING_BALANCE', 10000),
         'dry_run_fee_rate' => (float) env('DRY_RUN_FEE_RATE', 0.0005),
-        'watchlist' => env('WATCHLIST', 'BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT'),
+        'watchlist' => env('WATCHLIST', 'BTCUSDT'),
         'max_position_usdt' => (float) env('MAX_POSITION_USDT', 150),
         'dca_enabled' => filter_var(env('DCA_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
         'dca_max_layers' => (int) env('DCA_MAX_LAYERS', 3),
@@ -51,7 +51,7 @@ return [
     | Strategy Selection
     |--------------------------------------------------------------------------
     */
-    'strategy' => env('TRADING_STRATEGY', 'trend'), // 'pump' or 'trend'
+    'strategy' => env('TRADING_STRATEGY', 'wave'), // 'wave', 'trend', or 'pump'
 
     /*
     |--------------------------------------------------------------------------
@@ -79,5 +79,27 @@ return [
         'take_profit_pct' => (float) env('TREND_TAKE_PROFIT_PCT', 5),
         'trailing_stop_activation_pct' => (float) env('TREND_TRAILING_STOP_ACTIVATION_PCT', 1.5),
         'trailing_stop_pct' => (float) env('TREND_TRAILING_STOP_PCT', 1.5),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Wave Rider Configuration
+    |--------------------------------------------------------------------------
+    */
+    'wave' => [
+        'scan_interval' => (int) env('WAVE_SCAN_INTERVAL', 5),
+        'ema_fast' => (int) env('WAVE_EMA_FAST', 5),
+        'ema_slow' => (int) env('WAVE_EMA_SLOW', 13),
+        'rsi_period' => (int) env('WAVE_RSI_PERIOD', 7),
+        'atr_period' => (int) env('WAVE_ATR_PERIOD', 14),
+        'kline_limit' => (int) env('WAVE_KLINE_LIMIT', 30),
+        'tp_atr_multiplier' => (float) env('WAVE_TP_ATR_MULTIPLIER', 0.5),
+        'sl_atr_multiplier' => (float) env('WAVE_SL_ATR_MULTIPLIER', 1.0),
+        'trailing_activation_atr' => (float) env('WAVE_TRAILING_ACTIVATION_ATR', 0.3),
+        'trailing_distance_atr' => (float) env('WAVE_TRAILING_DISTANCE_ATR', 0.3),
+        'max_hold_minutes' => (int) env('WAVE_MAX_HOLD_MINUTES', 30),
+        'dca_trigger_atr' => (float) env('WAVE_DCA_TRIGGER_ATR', 0.5),
+        'rsi_overbought' => (int) env('WAVE_RSI_OVERBOUGHT', 80),
+        'rsi_oversold' => (int) env('WAVE_RSI_OVERSOLD', 20),
     ],
 ];

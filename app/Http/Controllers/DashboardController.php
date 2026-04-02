@@ -8,10 +8,10 @@ use App\Models\PumpSignal;
 use App\Models\TrendSignal;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
-use App\Services\PumpScanner;
 use App\Services\Settings;
 use App\Services\TradingEngine;
-use App\Services\TrendScanner;
+use App\Services\WaveScanner;
+use App\Services\WaveSignal;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -22,31 +22,25 @@ class DashboardController extends Controller
         return view('dashboard');
     }
 
-    public function data(ExchangeInterface $exchange): JsonResponse
+    public function data(ExchangeInterface $exchange, WaveScanner $waveScanner): JsonResponse
     {
         $openPositions = Position::open()
-            ->with(['pumpSignal', 'trendSignal'])
             ->orderByDesc('opened_at')
             ->get();
 
-        // Refresh live prices for open positions (single batch API call)
+        // Refresh live prices for open positions (per-symbol, cached — 1 weight each vs 40 for getPrices)
         if ($openPositions->isNotEmpty()) {
             try {
-                $symbols = $openPositions->pluck('symbol')->unique()->toArray();
-                $prices = $exchange->getPrices($symbols);
-
                 foreach ($openPositions as $position) {
-                    $currentPrice = $prices[$position->symbol] ?? null;
-                    if ($currentPrice !== null) {
-                        $isLong = $position->side === 'LONG';
-                        $pnl = $isLong
-                            ? round(($currentPrice - $position->entry_price) * $position->quantity, 4)
-                            : round(($position->entry_price - $currentPrice) * $position->quantity, 4);
-                        $position->update([
-                            'current_price' => $currentPrice,
-                            'unrealized_pnl' => $pnl,
-                        ]);
-                    }
+                    $currentPrice = $exchange->getPrice($position->symbol);
+                    $isLong = $position->side === 'LONG';
+                    $pnl = $isLong
+                        ? round(($currentPrice - $position->entry_price) * $position->quantity, 4)
+                        : round(($position->entry_price - $currentPrice) * $position->quantity, 4);
+                    $position->update([
+                        'current_price' => $currentPrice,
+                        'unrealized_pnl' => $pnl,
+                    ]);
                 }
             } catch (\Throwable $e) {
                 // Use last known prices if API fails
@@ -69,18 +63,26 @@ class DashboardController extends Controller
         $totalFees = Trade::sum('fees');
 
         $accountData = $exchange->getAccountData();
-        $strategy = (string) Settings::get('strategy') ?: 'trend';
+        $strategy = (string) Settings::get('strategy') ?: 'wave';
 
-        // Active signals: both pump and trend
-        $pumpSignals = PumpSignal::whereIn('status', ['detected', 'reversal_confirmed'])
-            ->where('created_at', '>=', now()->subHours(24))
-            ->orderByDesc('price_change_pct')
-            ->get();
-
-        $trendSignals = TrendSignal::whereIn('status', ['detected'])
-            ->where('created_at', '>=', now()->subHours(4))
-            ->orderByDesc('score')
-            ->get();
+        // Wave status — analyze each watchlist symbol
+        $waveStatus = [];
+        try {
+            foreach ($waveScanner->getWatchlist() as $symbol) {
+                $wave = $waveScanner->analyze($symbol);
+                $waveStatus[] = [
+                    'symbol' => $symbol,
+                    'direction' => $wave?->direction,
+                    'wave_state' => $wave?->waveState,
+                    'rsi' => $wave?->rsi,
+                    'atr' => $wave ? round($wave->atr, 8) : null,
+                    'ema_gap' => $wave?->emaGap,
+                    'price' => $wave?->currentPrice,
+                ];
+            }
+        } catch (\Throwable $e) {
+            // Wave analysis failed, show empty
+        }
 
         return response()->json([
             'positions' => $openPositions->map(fn (Position $p) => [
@@ -121,53 +123,7 @@ class DashboardController extends Controller
                 'is_dry_run' => $t->is_dry_run,
                 'created_at' => $t->created_at->timestamp,
             ]),
-            'pump_signals' => $pumpSignals->map(fn (PumpSignal $s) => [
-                'id' => $s->id,
-                'symbol' => $s->symbol,
-                'price_change_pct' => $s->price_change_pct,
-                'volume_multiplier' => $s->volume_multiplier,
-                'drop_from_peak_pct' => $s->drop_from_peak_pct,
-                'status' => $s->status->value,
-                'current_price' => $s->current_price,
-                'peak_price' => $s->peak_price,
-                'created_at' => $s->created_at->timestamp,
-            ]),
-            'trend_signals' => $trendSignals->map(fn (TrendSignal $s) => [
-                'id' => $s->id,
-                'symbol' => $s->symbol,
-                'direction' => $s->direction,
-                'score' => $s->score,
-                'ema_cross' => $s->ema_cross,
-                'rsi_value' => $s->rsi_value,
-                'macd_histogram' => $s->macd_histogram,
-                'volume_ratio' => $s->volume_ratio,
-                'atr_value' => $s->atr_value,
-                'status' => $s->status->value,
-                'entry_price' => $s->entry_price,
-                'created_at' => $s->created_at->timestamp,
-            ]),
-            // Backward compat: 'signals' key returns whichever strategy is active
-            'signals' => $strategy === 'trend'
-                ? $trendSignals->map(fn (TrendSignal $s) => [
-                    'id' => $s->id,
-                    'symbol' => $s->symbol,
-                    'direction' => $s->direction,
-                    'score' => $s->score,
-                    'status' => $s->status->value,
-                    'entry_price' => $s->entry_price,
-                    'created_at' => $s->created_at->timestamp,
-                ])
-                : $pumpSignals->map(fn (PumpSignal $s) => [
-                    'id' => $s->id,
-                    'symbol' => $s->symbol,
-                    'price_change_pct' => $s->price_change_pct,
-                    'volume_multiplier' => $s->volume_multiplier,
-                    'drop_from_peak_pct' => $s->drop_from_peak_pct,
-                    'status' => $s->status->value,
-                    'current_price' => $s->current_price,
-                    'peak_price' => $s->peak_price,
-                    'created_at' => $s->created_at->timestamp,
-                ]),
+            'wave_status' => $waveStatus,
             'summary' => [
                 'balance' => round($accountData['walletBalance'], 2),
                 'wallet_balance' => round($accountData['walletBalance'], 2),
@@ -184,7 +140,7 @@ class DashboardController extends Controller
                 'winning_trades' => $winningTrades,
                 'losing_trades' => $losingTrades,
                 'win_rate' => $winRate,
-                'active_signals' => $strategy === 'trend' ? $trendSignals->count() : $pumpSignals->count(),
+                'active_signals' => count(array_filter($waveStatus, fn ($w) => $w['wave_state'] === 'new_wave')),
                 'dry_run' => (bool) Settings::get('dry_run'),
                 'strategy' => $strategy,
             ],
@@ -192,62 +148,43 @@ class DashboardController extends Controller
         ]);
     }
 
-    public function scanNow(PumpScanner $pumpScanner, TrendScanner $trendScanner, TradingEngine $engine, Request $request): JsonResponse
+    public function scanNow(WaveScanner $waveScanner, TradingEngine $engine, Request $request): JsonResponse
     {
         $autoTrade = $request->boolean('auto_trade', false);
-        $strategy = (string) Settings::get('strategy') ?: 'trend';
+        $trades = [];
+        $waves = [];
 
-        if ($strategy === 'trend') {
-            $signals = $trendScanner->scan();
-            $expired = $trendScanner->expireStaleSignals();
+        foreach ($waveScanner->getWatchlist() as $symbol) {
+            $wave = $waveScanner->analyze($symbol);
+            if ($wave) {
+                $waves[] = [
+                    'symbol' => $symbol,
+                    'direction' => $wave->direction,
+                    'state' => $wave->waveState,
+                    'rsi' => $wave->rsi,
+                ];
 
-            $trades = [];
-            if ($autoTrade) {
-                foreach ($signals as $signal) {
-                    if ($signal->status->value !== 'detected') {
-                        continue;
-                    }
-                    $position = $engine->openPosition($signal, $signal->direction, 'trend_');
+                if ($autoTrade && $wave->waveState === 'new_wave') {
+                    $signal = new WaveSignal(
+                        symbol: $symbol,
+                        direction: $wave->direction,
+                        atr_value: $wave->atr,
+                        currentPrice: $wave->currentPrice,
+                        rsi: $wave->rsi,
+                    );
+                    $position = $engine->openPosition($signal, $wave->direction);
                     if ($position) {
                         $trades[] = $position->symbol;
                     }
                 }
             }
-
-            return response()->json([
-                'ok' => true,
-                'strategy' => 'trend',
-                'signals' => $signals->count(),
-                'expired' => $expired,
-                'trades_opened' => $trades,
-            ]);
-        }
-
-        // Pump strategy
-        $signals = $pumpScanner->scan();
-        $reversals = $pumpScanner->checkReversals();
-        $expired = $pumpScanner->expireStaleSignals();
-
-        $trades = [];
-        if ($autoTrade) {
-            foreach ($reversals as $signal) {
-                $position = $engine->openShort($signal);
-                if ($position) {
-                    $trades[] = $position->symbol;
-                }
-            }
-
-            foreach ($engine->retryConfirmedSignals() as $position) {
-                $trades[] = $position->symbol;
-            }
         }
 
         return response()->json([
             'ok' => true,
-            'strategy' => 'pump',
-            'signals' => $signals->count(),
-            'reversals' => $reversals->count(),
-            'expired' => $expired,
+            'strategy' => 'wave',
+            'waves' => $waves,
+            'signals' => count($waves),
             'trades_opened' => $trades,
         ]);
     }
