@@ -57,16 +57,16 @@
   .pagination button:hover { background: #30363d; }
   .pagination button:disabled { opacity: 0.4; cursor: default; }
   .pagination .page-info { color: #8b949e; font-size: 0.8em; }
-  .settings-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .settings-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; overflow: hidden; }
   .setting-item { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px;
-    display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-  .setting-item label { color: #8b949e; font-size: 0.85em; flex-shrink: 0; }
+    display: flex; justify-content: space-between; align-items: center; gap: 12px; overflow: hidden; min-width: 0; }
+  .setting-item label { color: #8b949e; font-size: 0.85em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .setting-item input[type="number"], .setting-item input[type="text"] {
     background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9;
-    padding: 6px 10px; font-size: 0.9em; width: 120px; text-align: right; font-family: monospace; }
+    padding: 6px 10px; font-size: 0.9em; width: 100px; min-width: 80px; flex-shrink: 0; text-align: right; font-family: monospace; }
   .setting-item input:focus { border-color: #58a6ff; outline: none; }
   .setting-item select { background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
-    color: #c9d1d9; padding: 6px 10px; font-size: 0.9em; }
+    color: #c9d1d9; padding: 6px 10px; font-size: 0.9em; flex-shrink: 0; }
   .btn-save { background: #238636; color: #fff; border: none; border-radius: 6px;
     padding: 8px 24px; cursor: pointer; font-size: 0.9em; margin-top: 12px; }
   .btn-save:hover { background: #2ea043; }
