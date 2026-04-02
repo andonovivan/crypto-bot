@@ -90,23 +90,63 @@ class DryRunExchange implements ExchangeInterface
         ];
     }
 
-    public function setStopLoss(string $symbol, float $stopPrice, float $quantity): array
+    public function openLong(string $symbol, float $quantity): array
+    {
+        $price = $this->getPrice($symbol);
+        $orderId = 'dry_' . uniqid();
+
+        Log::info("[DRY RUN] Open long", [
+            'symbol' => $symbol,
+            'quantity' => $quantity,
+            'price' => $price,
+            'orderId' => $orderId,
+        ]);
+
+        return [
+            'orderId' => $orderId,
+            'price' => $price,
+            'quantity' => $quantity,
+        ];
+    }
+
+    public function closeLong(string $symbol, float $quantity): array
+    {
+        $price = $this->getPrice($symbol);
+        $orderId = 'dry_' . uniqid();
+
+        Log::info("[DRY RUN] Close long", [
+            'symbol' => $symbol,
+            'quantity' => $quantity,
+            'price' => $price,
+            'orderId' => $orderId,
+        ]);
+
+        return [
+            'orderId' => $orderId,
+            'price' => $price,
+            'quantity' => $quantity,
+        ];
+    }
+
+    public function setStopLoss(string $symbol, float $stopPrice, float $quantity, string $side = 'SHORT'): array
     {
         Log::info("[DRY RUN] Set stop-loss", [
             'symbol' => $symbol,
             'stopPrice' => $stopPrice,
             'quantity' => $quantity,
+            'side' => $side,
         ]);
 
         return ['orderId' => 'dry_sl_' . uniqid()];
     }
 
-    public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity): array
+    public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity, string $side = 'SHORT'): array
     {
         Log::info("[DRY RUN] Set take-profit", [
             'symbol' => $symbol,
             'takeProfitPrice' => $takeProfitPrice,
             'quantity' => $quantity,
+            'side' => $side,
         ]);
 
         return ['orderId' => 'dry_tp_' . uniqid()];

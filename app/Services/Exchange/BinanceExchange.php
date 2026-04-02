@@ -233,11 +233,47 @@ class BinanceExchange implements ExchangeInterface
         ];
     }
 
-    public function setStopLoss(string $symbol, float $stopPrice, float $quantity): array
+    public function openLong(string $symbol, float $quantity): array
     {
         $response = $this->signedRequest('POST', '/fapi/v1/order', [
             'symbol' => $symbol,
             'side' => 'BUY',
+            'type' => 'MARKET',
+            'quantity' => $this->formatQuantity($quantity, $symbol),
+        ]);
+
+        return [
+            'orderId' => (string) $response['orderId'],
+            'price' => (float) ($response['avgPrice'] ?? $response['price'] ?? 0),
+            'quantity' => (float) $response['executedQty'],
+        ];
+    }
+
+    public function closeLong(string $symbol, float $quantity): array
+    {
+        $response = $this->signedRequest('POST', '/fapi/v1/order', [
+            'symbol' => $symbol,
+            'side' => 'SELL',
+            'type' => 'MARKET',
+            'quantity' => $this->formatQuantity($quantity, $symbol),
+            'reduceOnly' => 'true',
+        ]);
+
+        return [
+            'orderId' => (string) $response['orderId'],
+            'price' => (float) ($response['avgPrice'] ?? $response['price'] ?? 0),
+            'quantity' => (float) $response['executedQty'],
+        ];
+    }
+
+    public function setStopLoss(string $symbol, float $stopPrice, float $quantity, string $side = 'SHORT'): array
+    {
+        // For SHORT: SL triggers a BUY to close. For LONG: SL triggers a SELL to close.
+        $closeSide = $side === 'LONG' ? 'SELL' : 'BUY';
+
+        $response = $this->signedRequest('POST', '/fapi/v1/order', [
+            'symbol' => $symbol,
+            'side' => $closeSide,
             'type' => 'STOP_MARKET',
             'stopPrice' => $this->formatPrice($stopPrice),
             'quantity' => $this->formatQuantity($quantity, $symbol),
@@ -247,11 +283,14 @@ class BinanceExchange implements ExchangeInterface
         return ['orderId' => (string) $response['orderId']];
     }
 
-    public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity): array
+    public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity, string $side = 'SHORT'): array
     {
+        // For SHORT: TP triggers a BUY to close. For LONG: TP triggers a SELL to close.
+        $closeSide = $side === 'LONG' ? 'SELL' : 'BUY';
+
         $response = $this->signedRequest('POST', '/fapi/v1/order', [
             'symbol' => $symbol,
-            'side' => 'BUY',
+            'side' => $closeSide,
             'type' => 'TAKE_PROFIT_MARKET',
             'stopPrice' => $this->formatPrice($takeProfitPrice),
             'quantity' => $this->formatQuantity($quantity, $symbol),

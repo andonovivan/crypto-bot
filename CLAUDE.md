@@ -1,8 +1,8 @@
-# CLAUDE.md — Crypto Pump & Dump Short Bot
+# CLAUDE.md — Crypto Trading Bot
 
 ## Project Overview
 
-Laravel 13 (PHP 8.4) auto-trading bot that detects pump & dump coins on Binance Futures and opens short positions to profit from the dump. Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
+Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: **Trend Following** (default) and **Pump & Dump**. Supports both LONG and SHORT positions. Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
 
 ## Architecture
 
@@ -19,10 +19,16 @@ Laravel 13 (PHP 8.4) auto-trading bot that detects pump & dump coins on Binance 
 - `DryRunExchange` — wraps real exchange for market data, simulates trades in DB
 - DryRun balance = `starting_balance - allocated_usdt + realized_pnl` (from Position/Trade tables)
 
-### Core Flow
+### Core Flow (Trend Strategy — default)
+1. **TrendScanner::scan()** — Pre-filters tickers by volume/range, fetches 5m klines for top candidates, computes EMA/RSI/MACD, scores signals 0-100
+2. **TradingEngine::openPosition()** — Opens LONG or SHORT based on signal direction
+3. **TradingEngine::monitorPositions()** — Checks SL/TP/trailing/expiry (direction-aware)
+4. **TradingEngine::closePosition()** — Closes position via closeLong()/closeShort(), records Trade
+
+### Core Flow (Pump Strategy — legacy)
 1. **PumpScanner::scan()** — Fetches all futures tickers, detects pumps
 2. **PumpScanner::checkReversals()** — Monitors detected signals for price drop from peak
-3. **TradingEngine::openShort()** — Opens short when reversal confirmed
+3. **TradingEngine::openShort()** — Opens short when reversal confirmed (wrapper around openPosition)
 4. **TradingEngine::monitorPositions()** — Checks SL/TP/expiry on open positions
 5. **TradingEngine::closePosition()** — Closes position, records Trade
 
@@ -38,21 +44,33 @@ Laravel 13 (PHP 8.4) auto-trading bot that detects pump & dump coins on Binance 
 - Reversal confirmed when drop from peak >= `reversal_drop_pct` (default 3%)
 - Peak price tracked and updated if price goes higher
 
-### Short Position Management
-- **Entry**: At current price when reversal confirmed
-- **Stop Loss**: entry_price * (1 + stop_loss_pct/100) — default 5% above entry
-- **Take Profit**: entry_price * (1 - take_profit_pct/100) — default 10% below entry
-- **Expiry**: `max_hold_hours` (default 24h)
-- **P&L for shorts**: `(entry_price - current_price) * quantity`
+### Trend Detection Logic (TrendScanner)
+- **Pre-filter**: Min 24h volume ($5M), tradable, min 2% intraday range
+- **Candidates**: Top 50 by absolute price change
+- **Data**: 5-minute klines (100 candles = ~8 hours)
+- **Indicators**: EMA(9/21/50), RSI(14), MACD(12,26,9), volume ratio
+- **Signal scoring** (0-100): EMA cross (30pts), RSI zone (20pts), MACD histogram (25pts), volume (15pts), trend alignment (10pts)
+- **Min score**: `trend_min_score` (default 60) to open a trade
+- **Direction**: LONG if EMA9 > EMA21, SHORT if EMA9 < EMA21
+- **Signal expiry**: 4 hours
+
+### Position Management (bidirectional)
+- **LONG entry**: `openLong()` — SL = entry * (1 - sl_pct/100), TP = entry * (1 + tp_pct/100)
+- **SHORT entry**: `openShort()` — SL = entry * (1 + sl_pct/100), TP = entry * (1 - tp_pct/100)
+- **P&L**: LONG = (current - entry) * qty, SHORT = (entry - current) * qty
+- **Trailing stop**: Direction-aware — tracks best price (highest for LONG, lowest for SHORT)
+- **Expiry**: `max_hold_hours` (default 24h for pump, 4h for trend)
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
+| `app/Services/TrendScanner.php` | Trend detection via technical indicators |
+| `app/Services/TechnicalAnalysis.php` | EMA, RSI, MACD, ATR calculations |
 | `app/Services/PumpScanner.php` | Pump detection + reversal checking |
-| `app/Services/TradingEngine.php` | Position open/close/monitor |
+| `app/Services/TradingEngine.php` | Position open/close/monitor (LONG + SHORT) |
 | `app/Services/Settings.php` | DB-first settings with config fallback |
-| `app/Services/Exchange/BinanceExchange.php` | Binance Futures API |
+| `app/Services/Exchange/BinanceExchange.php` | Binance Futures API (LONG + SHORT) |
 | `app/Services/Exchange/DryRunExchange.php` | Paper trading simulation |
 | `app/Http/Controllers/DashboardController.php` | All API endpoints |
 | `resources/views/dashboard.blade.php` | Single-page dark theme dashboard |
@@ -78,6 +96,14 @@ Laravel 13 (PHP 8.4) auto-trading bot that detects pump & dump coins on Binance 
 | `min_volume_multiplier` | 3 | Min volume vs 7-day average |
 | `reversal_drop_pct` | 3 | Min drop from peak to confirm reversal |
 | `min_volume_usdt` | 5000000 | Min 24h USDT volume to consider coin |
+| `strategy` | trend | Active strategy: 'pump' or 'trend' |
+| `trend_scan_interval` | 120 | Seconds between trend scans |
+| `trend_min_score` | 60 | Min score (0-100) to open a trend trade |
+| `trend_max_hold_hours` | 4 | Max hold time for trend trades |
+| `trend_stop_loss_pct` | 2.5 | Trend stop loss % |
+| `trend_take_profit_pct` | 5 | Trend take profit % |
+| `trend_trailing_stop_activation_pct` | 1.5 | Trend trailing stop activation % |
+| `trend_trailing_stop_pct` | 1.5 | Trend trailing stop distance % |
 
 ## API Endpoints
 
@@ -93,7 +119,7 @@ Laravel 13 (PHP 8.4) auto-trading bot that detects pump & dump coins on Binance 
 
 ## Database (MariaDB 11)
 
-**Tables**: `scanned_coins`, `pump_signals`, `positions`, `trades`, `bot_settings`, `cache`, `jobs`, `users`
+**Tables**: `scanned_coins`, `pump_signals`, `trend_signals`, `positions`, `trades`, `bot_settings`, `cache`, `jobs`, `users`
 
 **Enums**:
 - `PositionStatus`: Open, Closed, Expired, StoppedOut

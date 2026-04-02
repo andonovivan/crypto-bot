@@ -43,6 +43,13 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Strategy Selection
+    |--------------------------------------------------------------------------
+    */
+    'strategy' => env('TRADING_STRATEGY', 'trend'), // 'pump' or 'trend'
+
+    /*
+    |--------------------------------------------------------------------------
     | Pump Detection Configuration
     |--------------------------------------------------------------------------
     */
@@ -52,5 +59,20 @@ return [
         'reversal_drop_pct' => (float) env('PUMP_REVERSAL_DROP_PCT', 5),
         'scan_interval_minutes' => (int) env('PUMP_SCAN_INTERVAL_MINUTES', 5),
         'min_volume_usdt' => (float) env('PUMP_MIN_VOLUME_USDT', 5000000),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Trend Following Configuration
+    |--------------------------------------------------------------------------
+    */
+    'trend' => [
+        'scan_interval' => (int) env('TREND_SCAN_INTERVAL', 120),
+        'min_score' => (int) env('TREND_MIN_SCORE', 60),
+        'max_hold_hours' => (int) env('TREND_MAX_HOLD_HOURS', 4),
+        'stop_loss_pct' => (float) env('TREND_STOP_LOSS_PCT', 2.5),
+        'take_profit_pct' => (float) env('TREND_TAKE_PROFIT_PCT', 5),
+        'trailing_stop_activation_pct' => (float) env('TREND_TRAILING_STOP_ACTIVATION_PCT', 1.5),
+        'trailing_stop_pct' => (float) env('TREND_TRAILING_STOP_PCT', 1.5),
     ],
 ];

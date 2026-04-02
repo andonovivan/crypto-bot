@@ -11,6 +11,7 @@ class Position extends Model
 {
     protected $fillable = [
         'pump_signal_id',
+        'trend_signal_id',
         'symbol',
         'side',
         'entry_price',
@@ -51,6 +52,11 @@ class Position extends Model
     public function pumpSignal(): BelongsTo
     {
         return $this->belongsTo(PumpSignal::class);
+    }
+
+    public function trendSignal(): BelongsTo
+    {
+        return $this->belongsTo(TrendSignal::class);
     }
 
     public function trades(): HasMany

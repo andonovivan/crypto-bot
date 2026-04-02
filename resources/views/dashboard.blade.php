@@ -45,6 +45,12 @@
   .signal-status { padding: 2px 6px; border-radius: 3px; font-size: 0.75em; font-weight: bold; }
   .signal-detected { background: #d29922; color: #0d1117; }
   .signal-reversal { background: #f85149; color: #fff; }
+  .side-long { color: #3fb950; font-weight: bold; font-size: 0.75em; }
+  .side-short { color: #f85149; font-weight: bold; font-size: 0.75em; }
+  .score-bar { display: inline-block; height: 6px; border-radius: 3px; background: #30363d; width: 60px; vertical-align: middle; }
+  .score-fill { display: block; height: 100%; border-radius: 3px; }
+  .signal-long { background: #238636; color: #fff; }
+  .signal-short { background: #da3633; color: #fff; }
   .pagination { display: flex; align-items: center; gap: 8px; margin: 8px 0 20px; }
   .pagination button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
     border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 0.8em; }
@@ -76,7 +82,7 @@
 </style>
 </head>
 <body>
-<h1>Crypto Pump &amp; Dump Bot <span id="badge"></span></h1>
+<h1>Crypto Trading Bot <span id="badge"></span> <span id="strategy-badge"></span></h1>
 <p class="subtitle">
   <span id="signals-count">-</span> active signals &middot;
   <span id="positions-count-sub">-</span> open positions &middot;
@@ -85,7 +91,7 @@
 
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
-  <button class="tab-btn" onclick="switchTab('signals')">Pump Signals</button>
+  <button class="tab-btn" onclick="switchTab('signals')" id="signals-tab-btn">Signals</button>
   <button class="tab-btn" onclick="switchTab('history')">Trade History</button>
   <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
 </div>
@@ -128,6 +134,7 @@
     <thead>
       <tr>
         <th onclick="sortTable('positions', 'symbol')">Symbol <span class="sort-arrow" id="pos-sort-symbol"></span></th>
+        <th>Side</th>
         <th onclick="sortTable('positions', 'entry_price')">Entry <span class="sort-arrow" id="pos-sort-entry_price"></span></th>
         <th onclick="sortTable('positions', 'current_price')">Current <span class="sort-arrow" id="pos-sort-current_price"></span></th>
         <th onclick="sortTable('positions', 'position_size_usdt')">Invested <span class="sort-arrow" id="pos-sort-position_size_usdt"></span></th>
@@ -140,18 +147,39 @@
         <th></th>
       </tr>
     </thead>
-    <tbody id="positions-body"><tr><td colspan="11" class="empty">Loading...</td></tr></tbody>
+    <tbody id="positions-body"><tr><td colspan="12" class="empty">Loading...</td></tr></tbody>
   </table>
 </div>
 
 <!-- Signals Tab -->
 <div id="tab-signals" class="tab-pane">
   <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-    <h2 class="section-title" style="margin:0;">Active Pump Signals</h2>
+    <h2 class="section-title" style="margin:0;" id="signals-title">Active Signals</h2>
     <button class="btn-save" id="scan-btn" onclick="scanNow(this)">Scan Now</button>
   </div>
   <div class="settings-msg" id="scan-msg"></div>
-  <table>
+
+  <!-- Trend signals table -->
+  <table id="trend-signals-table">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th>Direction</th>
+        <th>Score</th>
+        <th>EMA Cross</th>
+        <th>RSI</th>
+        <th>MACD</th>
+        <th>Volume</th>
+        <th>Price</th>
+        <th>Status</th>
+        <th>Detected</th>
+      </tr>
+    </thead>
+    <tbody id="trend-signals-body"><tr><td colspan="10" class="empty">Loading...</td></tr></tbody>
+  </table>
+
+  <!-- Pump signals table (hidden when trend strategy active) -->
+  <table id="pump-signals-table" style="display:none;">
     <thead>
       <tr>
         <th>Symbol</th>
@@ -164,7 +192,7 @@
         <th>Detected</th>
       </tr>
     </thead>
-    <tbody id="signals-body"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody>
+    <tbody id="pump-signals-body"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody>
   </table>
 </div>
 
@@ -175,6 +203,7 @@
     <thead>
       <tr>
         <th onclick="sortTable('history', 'symbol')">Symbol <span class="sort-arrow" id="hist-sort-symbol"></span></th>
+        <th>Side</th>
         <th onclick="sortTable('history', 'entry_price')">Entry <span class="sort-arrow" id="hist-sort-entry_price"></span></th>
         <th onclick="sortTable('history', 'exit_price')">Exit <span class="sort-arrow" id="hist-sort-exit_price"></span></th>
         <th onclick="sortTable('history', 'quantity')">Qty <span class="sort-arrow" id="hist-sort-quantity"></span></th>
@@ -184,7 +213,7 @@
         <th onclick="sortTable('history', 'created_at')">Closed <span class="sort-arrow" id="hist-sort-created_at"></span></th>
       </tr>
     </thead>
-    <tbody id="history-body"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody>
+    <tbody id="history-body"><tr><td colspan="9" class="empty">Loading...</td></tr></tbody>
   </table>
   <div class="pagination" id="history-pagination"></div>
 </div>
@@ -327,14 +356,31 @@ async function closePosition(id, btn) {
   }
 }
 
+function sideBadge(side) {
+  if (!side) return '';
+  const cls = side === 'LONG' ? 'side-long' : 'side-short';
+  return `<span class="${cls}">${side}</span>`;
+}
+
+function scoreBar(score) {
+  const color = score >= 70 ? '#3fb950' : score >= 50 ? '#d29922' : '#f85149';
+  return `<span class="score-bar"><span class="score-fill" style="width:${score}%;background:${color}"></span></span> ${score}`;
+}
+
 function render(data) {
   lastData = data;
   const s = data.summary;
+  const strategy = s.strategy || 'pump';
 
   // Badge
   document.getElementById('badge').innerHTML = s.dry_run
     ? '<span class="dry-run-badge">DRY RUN</span>'
     : '<span class="live-badge">LIVE</span>';
+
+  // Strategy badge
+  document.getElementById('strategy-badge').innerHTML = strategy === 'trend'
+    ? '<span style="background:#1f6feb;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.55em;font-weight:bold;vertical-align:middle;">TREND</span>'
+    : '<span style="background:#8957e5;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.55em;font-weight:bold;vertical-align:middle;">PUMP</span>';
 
   // Subtitle
   document.getElementById('signals-count').textContent = s.active_signals;
@@ -362,7 +408,7 @@ function render(data) {
   // Positions table
   const posBody = document.getElementById('positions-body');
   if (data.positions.length === 0) {
-    posBody.innerHTML = '<tr><td colspan="11" class="empty">No open positions</td></tr>';
+    posBody.innerHTML = '<tr><td colspan="12" class="empty">No open positions</td></tr>';
   } else {
     const sorted = sortData(data.positions.map(p => ({
       ...p,
@@ -370,6 +416,7 @@ function render(data) {
     })), sortState.positions.key, sortState.positions.asc);
     posBody.innerHTML = sorted.map(p => `<tr>
       <td><strong>${p.symbol}</strong>${p.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.6em">DRY</span>' : ''}</td>
+      <td>${sideBadge(p.side)}</td>
       <td>${formatPrice(p.entry_price)}</td>
       <td>${formatPrice(p.current_price)}</td>
       <td>$${p.position_size_usdt.toFixed(2)}</td>
@@ -383,12 +430,40 @@ function render(data) {
     </tr>`).join('');
   }
 
-  // Signals table
-  const sigBody = document.getElementById('signals-body');
-  if (data.signals.length === 0) {
-    sigBody.innerHTML = '<tr><td colspan="8" class="empty">No active pump signals</td></tr>';
+  // Signals tables — show the right one based on strategy
+  const isTrend = strategy === 'trend';
+  document.getElementById('trend-signals-table').style.display = isTrend ? '' : 'none';
+  document.getElementById('pump-signals-table').style.display = isTrend ? 'none' : '';
+  document.getElementById('signals-title').textContent = isTrend ? 'Active Trend Signals' : 'Active Pump Signals';
+  document.getElementById('signals-tab-btn').textContent = isTrend ? 'Trend Signals' : 'Pump Signals';
+
+  // Trend signals
+  const trendBody = document.getElementById('trend-signals-body');
+  const trendSignals = data.trend_signals || [];
+  if (trendSignals.length === 0) {
+    trendBody.innerHTML = '<tr><td colspan="10" class="empty">No active trend signals</td></tr>';
   } else {
-    sigBody.innerHTML = data.signals.map(s => `<tr>
+    trendBody.innerHTML = trendSignals.map(s => `<tr>
+      <td><strong>${s.symbol}</strong></td>
+      <td><span class="signal-status signal-${s.direction.toLowerCase()}">${s.direction}</span></td>
+      <td>${scoreBar(s.score)}</td>
+      <td>${s.ema_cross ? '✓ Fresh' : '—'}</td>
+      <td>${s.rsi_value !== null ? s.rsi_value.toFixed(1) : '—'}</td>
+      <td>${s.macd_histogram !== null ? s.macd_histogram.toFixed(6) : '—'}</td>
+      <td>${s.volume_ratio !== null ? s.volume_ratio.toFixed(1) + 'x' : '—'}</td>
+      <td>${formatPrice(s.entry_price)}</td>
+      <td><span class="signal-status signal-detected">${s.status.replace('_', ' ').toUpperCase()}</span></td>
+      <td>${timeAgo(s.created_at)}</td>
+    </tr>`).join('');
+  }
+
+  // Pump signals
+  const pumpBody = document.getElementById('pump-signals-body');
+  const pumpSignals = data.pump_signals || [];
+  if (pumpSignals.length === 0) {
+    pumpBody.innerHTML = '<tr><td colspan="8" class="empty">No active pump signals</td></tr>';
+  } else {
+    pumpBody.innerHTML = pumpSignals.map(s => `<tr>
       <td><strong>${s.symbol}</strong></td>
       <td class="positive">+${s.price_change_pct.toFixed(2)}%</td>
       <td>${s.volume_multiplier.toFixed(1)}x</td>
@@ -403,11 +478,12 @@ function render(data) {
   // History table
   const histBody = document.getElementById('history-body');
   if (data.recent_trades.length === 0) {
-    histBody.innerHTML = '<tr><td colspan="8" class="empty">No closed trades yet</td></tr>';
+    histBody.innerHTML = '<tr><td colspan="9" class="empty">No closed trades yet</td></tr>';
   } else {
     const sorted = sortData(data.recent_trades, sortState.history.key, sortState.history.asc);
     histBody.innerHTML = sorted.map(t => `<tr>
       <td><strong>${t.symbol}</strong>${t.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.6em">DRY</span>' : ''}</td>
+      <td>${sideBadge(t.side)}</td>
       <td>${formatPrice(t.entry_price)}</td>
       <td>${formatPrice(t.exit_price)}</td>
       <td>${t.quantity.toFixed(4)}</td>
@@ -439,6 +515,19 @@ async function loadSettings() {
             <option value="true" ${meta.value ? 'selected' : ''}>Yes</option>
             <option value="false" ${!meta.value ? 'selected' : ''}>No</option>
           </select>
+        </div>`;
+      } else if (key === 'strategy') {
+        html += `<div class="setting-item">
+          <label>${meta.label}</label>
+          <select data-key="${key}">
+            <option value="trend" ${meta.value === 'trend' ? 'selected' : ''}>Trend Following</option>
+            <option value="pump" ${meta.value === 'pump' ? 'selected' : ''}>Pump &amp; Dump</option>
+          </select>
+        </div>`;
+      } else if (meta.type === 'string') {
+        html += `<div class="setting-item">
+          <label>${meta.label}</label>
+          <input type="text" data-key="${key}" value="${meta.value || ''}" />
         </div>`;
       } else {
         const step = meta.type === 'float' ? '0.1' : '1';
@@ -508,9 +597,10 @@ async function scanNow(btn) {
     });
     const data = await res.json();
     if (data.ok) {
-      let text = `Found ${data.signals} signal(s), ${data.reversals} reversal(s)`;
+      let text = `[${(data.strategy || 'pump').toUpperCase()}] Found ${data.signals} signal(s)`;
+      if (data.reversals !== undefined) text += `, ${data.reversals} reversal(s)`;
       if (data.trades_opened.length > 0) {
-        text += ` — opened shorts: ${data.trades_opened.join(', ')}`;
+        text += ` — opened: ${data.trades_opened.join(', ')}`;
       }
       msg.style.color = '#3fb950';
       msg.textContent = text;

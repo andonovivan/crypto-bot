@@ -5,7 +5,9 @@ namespace App\Console\Commands;
 use App\Enums\PositionStatus;
 use App\Models\Position;
 use App\Models\PumpSignal;
+use App\Models\TrendSignal;
 use App\Models\Trade;
+use App\Services\Settings;
 use Illuminate\Console\Command;
 
 class BotStatus extends Command
@@ -38,13 +40,19 @@ class BotStatus extends Command
         $this->info("Open Positions ({$openPositions->count()}):");
         if ($openPositions->isNotEmpty()) {
             $this->table(
-                ['Symbol', 'Entry', 'Current', 'P&L', 'P&L %', 'Opened'],
+                ['Symbol', 'Side', 'Entry', 'Current', 'P&L', 'P&L %', 'Opened'],
                 $openPositions->map(fn (Position $p) => [
                     $p->symbol,
+                    $p->side,
                     number_format($p->entry_price, 4),
                     number_format($p->current_price ?? 0, 4),
                     $this->formatPnl($p->unrealized_pnl),
-                    $p->entry_price > 0 ? round((($p->entry_price - ($p->current_price ?? $p->entry_price)) / $p->entry_price) * 100, 2) . '%' : '-',
+                    $p->entry_price > 0 ? round(
+                        $p->side === 'LONG'
+                            ? ((($p->current_price ?? $p->entry_price) - $p->entry_price) / $p->entry_price) * 100
+                            : (($p->entry_price - ($p->current_price ?? $p->entry_price)) / $p->entry_price) * 100,
+                        2
+                    ) . '%' : '-',
                     $p->opened_at->diffForHumans(),
                 ])->toArray()
             );
@@ -53,11 +61,17 @@ class BotStatus extends Command
         }
 
         // Active signals
-        $activeSignals = PumpSignal::whereIn('status', ['detected', 'reversal_confirmed'])
+        $strategy = (string) Settings::get('strategy') ?: 'trend';
+        $pumpSignals = PumpSignal::whereIn('status', ['detected', 'reversal_confirmed'])
             ->where('created_at', '>=', now()->subHours(24))
             ->count();
+        $trendSignals = TrendSignal::whereIn('status', ['detected'])
+            ->where('created_at', '>=', now()->subHours(4))
+            ->count();
         $this->newLine();
-        $this->line("Active pump signals: {$activeSignals}");
+        $this->line("Strategy: {$strategy}");
+        $this->line("Active pump signals: {$pumpSignals}");
+        $this->line("Active trend signals: {$trendSignals}");
         $this->line("Mode: " . (config('crypto.trading.dry_run') ? 'DRY RUN' : 'LIVE'));
 
         return self::SUCCESS;

@@ -51,18 +51,34 @@ interface ExchangeInterface
     public function closeShort(string $symbol, float $quantity): array;
 
     /**
-     * Set a stop-loss order for a short position.
+     * Open a long position (market buy).
      *
-     * @return array{orderId: string}
+     * @return array{orderId: string, price: float, quantity: float}
      */
-    public function setStopLoss(string $symbol, float $stopPrice, float $quantity): array;
+    public function openLong(string $symbol, float $quantity): array;
 
     /**
-     * Set a take-profit order for a short position.
+     * Close a long position (market sell).
      *
+     * @return array{orderId: string, price: float, quantity: float}
+     */
+    public function closeLong(string $symbol, float $quantity): array;
+
+    /**
+     * Set a stop-loss order.
+     *
+     * @param string $side Position side: 'LONG' or 'SHORT'
      * @return array{orderId: string}
      */
-    public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity): array;
+    public function setStopLoss(string $symbol, float $stopPrice, float $quantity, string $side = 'SHORT'): array;
+
+    /**
+     * Set a take-profit order.
+     *
+     * @param string $side Position side: 'LONG' or 'SHORT'
+     * @return array{orderId: string}
+     */
+    public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity, string $side = 'SHORT'): array;
 
     /**
      * Get account balance in USDT.

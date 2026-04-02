@@ -28,6 +28,18 @@ class Settings
         'min_volume_multiplier' => ['config' => 'crypto.pump_detection.min_volume_multiplier', 'type' => 'float', 'label' => 'Min Volume Multiplier'],
         'reversal_drop_pct' => ['config' => 'crypto.pump_detection.reversal_drop_pct', 'type' => 'float', 'label' => 'Reversal Drop (%)'],
         'min_volume_usdt' => ['config' => 'crypto.pump_detection.min_volume_usdt', 'type' => 'float', 'label' => 'Min 24h Volume (USDT)'],
+
+        // Strategy selection
+        'strategy' => ['config' => 'crypto.strategy', 'type' => 'string', 'label' => 'Strategy (pump or trend)'],
+
+        // Trend following settings
+        'trend_scan_interval' => ['config' => 'crypto.trend.scan_interval', 'type' => 'int', 'label' => 'Trend Scan Interval (seconds)'],
+        'trend_min_score' => ['config' => 'crypto.trend.min_score', 'type' => 'int', 'label' => 'Trend Min Score (0-100)'],
+        'trend_max_hold_hours' => ['config' => 'crypto.trend.max_hold_hours', 'type' => 'int', 'label' => 'Trend Max Hold Time (hours)'],
+        'trend_stop_loss_pct' => ['config' => 'crypto.trend.stop_loss_pct', 'type' => 'float', 'label' => 'Trend Stop Loss (%)'],
+        'trend_take_profit_pct' => ['config' => 'crypto.trend.take_profit_pct', 'type' => 'float', 'label' => 'Trend Take Profit (%)'],
+        'trend_trailing_stop_activation_pct' => ['config' => 'crypto.trend.trailing_stop_activation_pct', 'type' => 'float', 'label' => 'Trend Trailing Stop Activation (%)'],
+        'trend_trailing_stop_pct' => ['config' => 'crypto.trend.trailing_stop_pct', 'type' => 'float', 'label' => 'Trend Trailing Stop Distance (%)'],
     ];
 
     /**
