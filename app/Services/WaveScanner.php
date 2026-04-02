@@ -27,7 +27,7 @@ class WaveScanner
     /**
      * Analyze a symbol for wave state. Returns null if data insufficient or market dead.
      */
-    public function analyze(string $symbol): ?WaveAnalysis
+    public function analyze(string $symbol, bool $skipRsiFilter = false): ?WaveAnalysis
     {
         $emaFast = (int) Settings::get('wave_ema_fast');
         $emaSlow = (int) Settings::get('wave_ema_slow');
@@ -78,11 +78,13 @@ class WaveScanner
             || ($emaFastNow < $emaSlowNow && $emaFastPrev >= $emaSlowPrev);
 
         // RSI filter — reject overbought for LONG, oversold for SHORT
-        if ($direction === 'LONG' && $rsiValue > $rsiOverbought) {
-            return null;
-        }
-        if ($direction === 'SHORT' && $rsiValue < $rsiOversold) {
-            return null;
+        if (! $skipRsiFilter) {
+            if ($direction === 'LONG' && $rsiValue > $rsiOverbought) {
+                return null;
+            }
+            if ($direction === 'SHORT' && $rsiValue < $rsiOversold) {
+                return null;
+            }
         }
 
         // Classify wave state

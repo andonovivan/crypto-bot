@@ -371,6 +371,7 @@ function render(data) {
   // Strategy badge
   const stratBadges = {
     wave: { bg: '#1f6feb', label: 'WAVE' },
+    staircase: { bg: '#3fb950', label: 'STAIRCASE' },
     trend: { bg: '#8957e5', label: 'TREND' },
     pump: { bg: '#da3633', label: 'PUMP' },
   };
@@ -509,6 +510,7 @@ async function loadSettings() {
           <label>${meta.label}</label>
           <select data-key="${key}">
             <option value="wave" ${meta.value === 'wave' ? 'selected' : ''}>Wave Rider</option>
+            <option value="staircase" ${meta.value === 'staircase' ? 'selected' : ''}>Staircase</option>
             <option value="trend" ${meta.value === 'trend' ? 'selected' : ''}>Trend Following</option>
             <option value="pump" ${meta.value === 'pump' ? 'selected' : ''}>Pump &amp; Dump</option>
           </select>

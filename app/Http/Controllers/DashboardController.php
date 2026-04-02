@@ -66,10 +66,11 @@ class DashboardController extends Controller
         $strategy = (string) Settings::get('strategy') ?: 'wave';
 
         // Wave status — analyze each watchlist symbol
+        $skipRsi = ($strategy === 'staircase' && ! Settings::get('staircase_rsi_filter'));
         $waveStatus = [];
         try {
             foreach ($waveScanner->getWatchlist() as $symbol) {
-                $wave = $waveScanner->analyze($symbol);
+                $wave = $waveScanner->analyze($symbol, skipRsiFilter: $skipRsi);
                 $waveStatus[] = [
                     'symbol' => $symbol,
                     'direction' => $wave?->direction,
@@ -176,11 +177,13 @@ class DashboardController extends Controller
     public function scanNow(WaveScanner $waveScanner, TradingEngine $engine, Request $request): JsonResponse
     {
         $autoTrade = $request->boolean('auto_trade', false);
+        $strategy = (string) Settings::get('strategy') ?: 'wave';
+        $skipRsi = ($strategy === 'staircase' && ! Settings::get('staircase_rsi_filter'));
         $trades = [];
         $waves = [];
 
         foreach ($waveScanner->getWatchlist() as $symbol) {
-            $wave = $waveScanner->analyze($symbol);
+            $wave = $waveScanner->analyze($symbol, skipRsiFilter: $skipRsi);
             if ($wave) {
                 $waves[] = [
                     'symbol' => $symbol,
@@ -189,7 +192,12 @@ class DashboardController extends Controller
                     'rsi' => $wave->rsi,
                 ];
 
-                if ($autoTrade && $wave->waveState === 'new_wave') {
+                $canEnter = match ($strategy) {
+                    'staircase' => in_array($wave->waveState, ['new_wave', 'riding']),
+                    default => $wave->waveState === 'new_wave',
+                };
+
+                if ($autoTrade && $canEnter) {
                     $signal = new WaveSignal(
                         symbol: $symbol,
                         direction: $wave->direction,
@@ -207,7 +215,7 @@ class DashboardController extends Controller
 
         return response()->json([
             'ok' => true,
-            'strategy' => 'wave',
+            'strategy' => $strategy,
             'waves' => $waves,
             'signals' => count($waves),
             'trades_opened' => $trades,

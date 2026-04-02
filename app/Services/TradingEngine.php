@@ -36,6 +36,9 @@ class TradingEngine
         if ($strategy === 'wave') {
             $maxHoldMinutes = (int) Settings::get('wave_max_hold_minutes');
             $expiresAt = now()->addMinutes($maxHoldMinutes);
+        } elseif ($strategy === 'staircase') {
+            $maxHoldMinutes = (int) Settings::get('staircase_max_hold_minutes') ?: 1440;
+            $expiresAt = now()->addMinutes($maxHoldMinutes);
         } else {
             $maxHoldHours = (int) Settings::get($settingsPrefix . 'max_hold_hours');
             $expiresAt = now()->addHours($maxHoldHours);
@@ -265,9 +268,10 @@ class TradingEngine
             }
         }
 
-        // ATR-based trailing stop
+        // ATR-based trailing stop (Wave only — Staircase uses fixed TP, no trailing)
+        $strategy = (string) Settings::get('strategy') ?: 'wave';
         $atr = $position->atr_value;
-        if ($atr > 0) {
+        if ($strategy !== 'staircase' && $atr > 0) {
             $activationAtr = (float) Settings::get('wave_trailing_activation_atr') ?: 0.3;
             $trailDistAtr = (float) Settings::get('wave_trailing_distance_atr') ?: 0.3;
 
@@ -544,6 +548,25 @@ class TradingEngine
      */
     private function calculateSlTp(float $entryPrice, string $direction, ?float $atr, string $settingsPrefix, int $score, string $symbol = ''): array
     {
+        // Staircase: fixed-percentage SL/TP (not ATR-based)
+        $strategy = (string) Settings::get('strategy') ?: 'wave';
+        if ($strategy === 'staircase') {
+            $tpPct = (float) Settings::get('staircase_take_profit_pct') ?: 1.68;
+            $slPct = (float) Settings::get('staircase_stop_loss_pct') ?: 5.0;
+
+            if ($direction === 'LONG') {
+                return [
+                    'sl' => round($entryPrice * (1 - $slPct / 100), 8),
+                    'tp' => round($entryPrice * (1 + $tpPct / 100), 8),
+                ];
+            }
+
+            return [
+                'sl' => round($entryPrice * (1 + $slPct / 100), 8),
+                'tp' => round($entryPrice * (1 - $tpPct / 100), 8),
+            ];
+        }
+
         // ATR-based SL/TP from wave settings
         if ($atr > 0) {
             $atrPctOfPrice = ($atr / $entryPrice) * 100;

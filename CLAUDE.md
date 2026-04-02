@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider** scalping strategy. Supports both LONG and SHORT positions. Scans every 30 seconds on 15-minute candles (configurable). Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
+Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: **Wave Rider** (ATR-based scalping) and **Staircase** (fixed-% TP trend riding). Supports both LONG and SHORT positions. Scans every 30 seconds on 15-minute candles (configurable). Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
 
 ## Architecture
 
@@ -49,6 +49,20 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 - **Signals are ephemeral** — WaveSignal DTOs, never stored in DB
 - **In-memory kline cache** — 15-second TTL prevents duplicate API calls within same loop iteration
 - **isWaveIntact()** — Checks EMA alignment still matches position direction (used for DCA validation and wave-break exit)
+
+### Staircase Strategy (alternative to Wave Rider)
+- **Concept**: Fixed-% TP scalping that rides trends in "steps" — TP hit → close → immediately re-enter if trend intact → repeat
+- **Entry**: Opens when EMAs are aligned (`new_wave` OR `riding` state), not just on fresh crosses
+- **TP**: Fixed percentage of entry price (default 1.68%) — not ATR-based
+- **SL**: Fixed percentage of entry price (default 5.0%) — hard stop to prevent catastrophic losses
+- **No DCA**: DCA is disabled — avoids "averaging down" into losing positions
+- **No trailing stop**: Fixed TP is the sole exit mechanism (plus breakeven protection)
+- **RSI filter**: Off by default (configurable via `staircase_rsi_filter`)
+- **Breakeven protection**: Still active — moves SL to entry once fees are covered
+- **Wave break exit**: Still active — closes if EMAs flip against position
+- **Re-entry**: Immediate on next scan loop after TP hit, if EMAs still aligned
+- **Max hold**: 1440 minutes (24h) by default
+- **Origin**: Reverse-engineered from OKX position history (149 trades, 89.9% win rate, ~1.68% TP target)
 
 ### Legacy Strategies (kept for backward compatibility)
 - **Trend Following** (`TrendScanner`) — EMA(9/21/50), RSI(14), MACD, ATR on 5m klines. Not actively used.
@@ -120,7 +134,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 | `max_position_usdt` | 150 | Max total USDT per coin incl. DCA layers |
 | `dca_enabled` | true | Enable/disable DCA layers |
 | `dca_max_layers` | 3 | Max DCA layers per position |
-| `strategy` | wave | Active strategy: 'wave', 'trend', or 'pump' |
+| `strategy` | wave | Active strategy: 'wave', 'staircase', 'trend', or 'pump' |
 
 ### Wave Settings
 | Key | Default | Description |
@@ -142,6 +156,15 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 | `wave_dca_trigger_atr` | 0.5 | DCA trigger distance in ATR multiples |
 | `wave_rsi_overbought` | 80 | RSI overbought threshold (reject LONG above) |
 | `wave_rsi_oversold` | 20 | RSI oversold threshold (reject SHORT below) |
+
+### Staircase Settings
+| Key | Default | Description |
+|-----|---------|-------------|
+| `staircase_take_profit_pct` | 1.68 | Fixed TP as % of entry price |
+| `staircase_stop_loss_pct` | 5.0 | Fixed SL as % of entry price |
+| `staircase_max_hold_minutes` | 1440 | Max hold time (24h default) |
+| `staircase_rsi_filter` | false | Whether to apply RSI overbought/oversold filter |
+| `staircase_scan_interval` | 30 | Scan interval in seconds |
 
 ### Legacy Settings (pump/trend — kept for backward compat)
 | Key | Default | Description |

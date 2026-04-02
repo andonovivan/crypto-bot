@@ -58,6 +58,13 @@ class Settings
         'wave_rsi_overbought' => ['config' => 'crypto.wave.rsi_overbought', 'type' => 'int', 'label' => 'Wave RSI Overbought'],
         'wave_rsi_oversold' => ['config' => 'crypto.wave.rsi_oversold', 'type' => 'int', 'label' => 'Wave RSI Oversold'],
 
+        // Staircase strategy settings
+        'staircase_take_profit_pct' => ['config' => 'crypto.staircase.take_profit_pct', 'type' => 'float', 'label' => 'Staircase TP (%)'],
+        'staircase_stop_loss_pct' => ['config' => 'crypto.staircase.stop_loss_pct', 'type' => 'float', 'label' => 'Staircase SL (%)'],
+        'staircase_max_hold_minutes' => ['config' => 'crypto.staircase.max_hold_minutes', 'type' => 'int', 'label' => 'Staircase Max Hold (min)'],
+        'staircase_rsi_filter' => ['config' => 'crypto.staircase.rsi_filter', 'type' => 'bool', 'label' => 'Staircase RSI Filter'],
+        'staircase_scan_interval' => ['config' => 'crypto.staircase.scan_interval', 'type' => 'int', 'label' => 'Staircase Scan Interval (s)'],
+
         // Trend following settings (legacy)
         'trend_scan_interval' => ['config' => 'crypto.trend.scan_interval', 'type' => 'int', 'label' => 'Trend Scan Interval (seconds)'],
         'trend_min_score' => ['config' => 'crypto.trend.min_score', 'type' => 'int', 'label' => 'Trend Min Score (0-100)'],

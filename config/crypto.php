@@ -51,7 +51,7 @@ return [
     | Strategy Selection
     |--------------------------------------------------------------------------
     */
-    'strategy' => env('TRADING_STRATEGY', 'wave'), // 'wave', 'trend', or 'pump'
+    'strategy' => env('TRADING_STRATEGY', 'wave'), // 'wave', 'staircase', 'trend', or 'pump'
 
     /*
     |--------------------------------------------------------------------------
@@ -104,5 +104,21 @@ return [
         'dca_trigger_atr' => (float) env('WAVE_DCA_TRIGGER_ATR', 0.5),
         'rsi_overbought' => (int) env('WAVE_RSI_OVERBOUGHT', 80),
         'rsi_oversold' => (int) env('WAVE_RSI_OVERSOLD', 20),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Staircase Strategy Configuration
+    |--------------------------------------------------------------------------
+    | Fixed-% TP scalping: ride trends in steps by re-entering after each TP hit.
+    | Uses EMA alignment from WaveScanner for direction, but enters on any
+    | aligned state (not just fresh crosses). No DCA, no trailing stop.
+    */
+    'staircase' => [
+        'take_profit_pct' => (float) env('STAIRCASE_TAKE_PROFIT_PCT', 1.68),
+        'stop_loss_pct' => (float) env('STAIRCASE_STOP_LOSS_PCT', 5.0),
+        'max_hold_minutes' => (int) env('STAIRCASE_MAX_HOLD_MINUTES', 1440),
+        'rsi_filter' => filter_var(env('STAIRCASE_RSI_FILTER', false), FILTER_VALIDATE_BOOLEAN),
+        'scan_interval' => (int) env('STAIRCASE_SCAN_INTERVAL', 30),
     ],
 ];
