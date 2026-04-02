@@ -253,6 +253,10 @@ function sortTable(table, key) {
   if (lastData) render(lastData);
 }
 
+function fmtNum(val, decimals) {
+  return val.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
 function pnlColor(val) {
   if (val > 0) return '#3fb950';
   if (val < 0) return '#f85149';
@@ -262,7 +266,7 @@ function pnlColor(val) {
 function pnlStr(val) {
   if (val === null || val === undefined) return '-';
   const prefix = val >= 0 ? '+$' : '-$';
-  return prefix + Math.abs(val).toFixed(2);
+  return prefix + fmtNum(Math.abs(val), 2);
 }
 
 function formatPrice(val) {
@@ -271,9 +275,9 @@ function formatPrice(val) {
   const abs = Math.abs(val);
   const sign = val < 0 ? '-' : '';
   // For prices >= 100, use 2 decimal places
-  if (abs >= 100) return sign + '$' + abs.toFixed(2);
+  if (abs >= 100) return sign + '$' + fmtNum(abs, 2);
   // For prices >= 1, use 4 decimal places
-  if (abs >= 1) return sign + '$' + abs.toFixed(4);
+  if (abs >= 1) return sign + '$' + fmtNum(abs, 4);
   // For prices < 1, check for leading zeros after decimal
   const str = abs.toFixed(20).replace(/0+$/, '');
   const zeros = (str.match(/^0\.(0+)/) || [null, ''])[1].length;
@@ -379,9 +383,9 @@ function render(data) {
   document.getElementById('updated').textContent = new Date(data.ts * 1000).toLocaleTimeString();
 
   // Cards
-  document.getElementById('balance').textContent = '$' + s.wallet_balance.toFixed(2);
-  document.getElementById('available-balance').textContent = '$' + s.available_balance.toFixed(2);
-  document.getElementById('margin-in-use').textContent = '$' + s.margin_in_use.toFixed(2);
+  document.getElementById('balance').textContent = '$' + fmtNum(s.wallet_balance, 2);
+  document.getElementById('available-balance').textContent = '$' + fmtNum(s.available_balance, 2);
+  document.getElementById('margin-in-use').textContent = '$' + fmtNum(s.margin_in_use, 2);
 
   document.getElementById('combined').className = 'card-value';
   document.getElementById('combined').style.color = pnlColor(s.combined_pnl);
@@ -395,7 +399,7 @@ function render(data) {
   document.getElementById('unrealized').style.color = pnlColor(s.unrealized_pnl);
   document.getElementById('unrealized').textContent = pnlStr(s.unrealized_pnl);
 
-  document.getElementById('total-fees').textContent = '-$' + Math.abs(s.total_fees).toFixed(4);
+  document.getElementById('total-fees').textContent = '-$' + fmtNum(Math.abs(s.total_fees), 4);
 
   document.getElementById('winrate').className = 'card-value';
   document.getElementById('winrate').style.color = s.win_rate >= 50 ? '#3fb950' : s.win_rate > 0 ? '#f85149' : '#c9d1d9';
@@ -415,11 +419,11 @@ function render(data) {
       <td>${sideBadge(p.side)}</td>
       <td>${formatPrice(p.entry_price)}</td>
       <td>${formatPrice(p.current_price)}</td>
-      <td>$${p.position_size_usdt.toFixed(2)}</td>
-      <td style="color:${pnlColor(p.unrealized_pnl)}">$${p.current_value.toFixed(2)}</td>
+      <td>$${fmtNum(p.position_size_usdt, 2)}</td>
+      <td style="color:${pnlColor(p.unrealized_pnl)}">$${fmtNum(p.current_value, 2)}</td>
       <td style="color:${pnlColor(p.unrealized_pnl)}">${pnlStr(p.unrealized_pnl)}</td>
       <td style="color:${pnlColor(p.pnl_pct)}">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</td>
-      <td style="color:${pnlColor(p.net_pnl)};font-weight:bold">${pnlStr(p.net_pnl)} <span style="color:#8b949e;font-weight:normal;font-size:0.75em">(-$${(p.estimated_fees || 0).toFixed(4)} fees)</span></td>
+      <td style="color:${pnlColor(p.net_pnl)};font-weight:bold">${pnlStr(p.net_pnl)} <span style="color:#8b949e;font-weight:normal;font-size:0.75em">(-$${fmtNum(p.estimated_fees || 0, 4)} fees)</span></td>
       <td>${formatPrice(p.stop_loss_price)}</td>
       <td>${formatPrice(p.take_profit_price)}</td>
       <td>${p.layer_count || 1}${p.layer_count > 1 ? ' <span style="color:#d29922;font-size:0.75em">DCA</span>' : ''}</td>
@@ -469,7 +473,7 @@ function render(data) {
       <td>${t.quantity.toFixed(4)}</td>
       <td style="color:${pnlColor(t.gross_pnl)}">${pnlStr(t.gross_pnl)}</td>
       <td style="color:${pnlColor(t.pnl_pct)}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
-      <td class="negative">$${(t.fees || 0).toFixed(4)}</td>
+      <td class="negative">$${fmtNum(t.fees || 0, 4)}</td>
       <td style="color:${pnlColor(t.net_pnl)};font-weight:bold">${pnlStr(t.net_pnl)}</td>
       <td>${reasonBadge(t.close_reason)}</td>
       <td>${timeAgo(t.created_at)}</td>
