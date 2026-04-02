@@ -18,6 +18,7 @@ class TrendSignal extends Model
         'rsi_value',
         'macd_histogram',
         'volume_ratio',
+        'atr_value',
         'status',
         'notes',
         'expires_at',
@@ -33,6 +34,7 @@ class TrendSignal extends Model
             'rsi_value' => 'float',
             'macd_histogram' => 'float',
             'volume_ratio' => 'float',
+            'atr_value' => 'float',
             'status' => SignalStatus::class,
             'expires_at' => 'datetime',
         ];

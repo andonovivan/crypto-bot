@@ -41,8 +41,12 @@ class BotRun extends Command
         $this->info("  Max positions: " . config('crypto.trading.max_positions'));
 
         if ($strategy === 'trend') {
+            $watchlist = (string) Settings::get('watchlist') ?: config('crypto.trading.watchlist');
+            $this->info("  Watchlist: {$watchlist}");
             $this->info("  Trend min score: " . Settings::get('trend_min_score'));
-            $this->info("  Trend SL: " . Settings::get('trend_stop_loss_pct') . "% / TP: " . Settings::get('trend_take_profit_pct') . "%");
+            $this->info("  SL/TP: ATR-based (fallback: " . Settings::get('trend_stop_loss_pct') . "% / " . Settings::get('trend_take_profit_pct') . "%)");
+            $this->info("  DCA: " . (Settings::get('dca_enabled') ? 'enabled (max ' . Settings::get('dca_max_layers') . ' layers)' : 'disabled'));
+            $this->info("  Max position: " . Settings::get('max_position_usdt') . " USDT (incl. DCA)");
         } else {
             $this->info("  Stop-loss: " . config('crypto.trading.stop_loss_pct') . "%");
             $this->info("  Take-profit: " . config('crypto.trading.take_profit_pct') . "%");
@@ -138,7 +142,8 @@ class BotRun extends Command
 
             $position = $engine->openPosition($signal, $signal->direction, 'trend_');
             if ($position) {
-                $this->info("  -> {$position->side} {$position->symbol} @ {$position->entry_price} (score: {$signal->score})");
+                $atrInfo = $position->atr_value ? ' ATR:' . round($position->atr_value, 6) : '';
+                $this->info("  -> {$position->side} {$position->symbol} @ {$position->entry_price} (score: {$signal->score}{$atrInfo})");
             }
         }
 

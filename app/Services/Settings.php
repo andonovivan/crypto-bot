@@ -30,6 +30,12 @@ class Settings
         'reversal_drop_pct' => ['config' => 'crypto.pump_detection.reversal_drop_pct', 'type' => 'float', 'label' => 'Reversal Drop (%)'],
         'min_volume_usdt' => ['config' => 'crypto.pump_detection.min_volume_usdt', 'type' => 'float', 'label' => 'Min 24h Volume (USDT)'],
 
+        // Watchlist & DCA
+        'watchlist' => ['config' => 'crypto.trading.watchlist', 'type' => 'string', 'label' => 'Watchlist (comma-separated symbols)'],
+        'max_position_usdt' => ['config' => 'crypto.trading.max_position_usdt', 'type' => 'float', 'label' => 'Max Position Size incl. DCA (USDT)'],
+        'dca_enabled' => ['config' => 'crypto.trading.dca_enabled', 'type' => 'bool', 'label' => 'DCA Enabled'],
+        'dca_max_layers' => ['config' => 'crypto.trading.dca_max_layers', 'type' => 'int', 'label' => 'DCA Max Layers'],
+
         // Strategy selection
         'strategy' => ['config' => 'crypto.strategy', 'type' => 'string', 'label' => 'Strategy (pump or trend)'],
 

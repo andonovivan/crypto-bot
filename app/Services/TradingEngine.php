@@ -16,6 +16,7 @@ class TradingEngine
 {
     public function __construct(
         private ExchangeInterface $exchange,
+        private ?TrendScanner $trendScanner = null,
     ) {}
 
     /**
@@ -27,10 +28,6 @@ class TradingEngine
         $leverage = (int) Settings::get('leverage');
         $positionSizeUsdt = (float) Settings::get('position_size_usdt');
         $isDryRun = (bool) Settings::get('dry_run');
-
-        // Use strategy-specific settings if prefix provided, else global
-        $stopLossPct = (float) Settings::get($settingsPrefix . 'stop_loss_pct');
-        $takeProfitPct = (float) Settings::get($settingsPrefix . 'take_profit_pct');
         $maxHoldHours = (int) Settings::get($settingsPrefix . 'max_hold_hours');
 
         // Check if we've hit max positions
@@ -90,19 +87,14 @@ class TradingEngine
 
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
-            // Calculate SL/TP based on direction
-            if ($direction === 'LONG') {
-                $stopLossPrice = $entryPrice * (1 - $stopLossPct / 100);
-                $takeProfitPrice = $entryPrice * (1 + $takeProfitPct / 100);
-            } else {
-                $stopLossPrice = $entryPrice * (1 + $stopLossPct / 100);
-                $takeProfitPrice = $entryPrice * (1 - $takeProfitPct / 100);
-            }
+            // Calculate SL/TP — ATR-based if available, fixed % fallback
+            $atrValue = $signal->atr_value ?? null;
+            $slTp = $this->calculateSlTp($entryPrice, $direction, $atrValue, $settingsPrefix, $signal->score ?? 0);
 
             // Place stop-loss and take-profit orders
             try {
-                $this->exchange->setStopLoss($signal->symbol, $stopLossPrice, $quantity, $direction);
-                $this->exchange->setTakeProfit($signal->symbol, $takeProfitPrice, $quantity, $direction);
+                $this->exchange->setStopLoss($signal->symbol, $slTp['sl'], $quantity, $direction);
+                $this->exchange->setTakeProfit($signal->symbol, $slTp['tp'], $quantity, $direction);
             } catch (\Throwable $e) {
                 Log::warning('Failed to set SL/TP orders', [
                     'symbol' => $signal->symbol,
@@ -121,11 +113,13 @@ class TradingEngine
                 'entry_price' => $entryPrice,
                 'quantity' => $order['quantity'],
                 'position_size_usdt' => $positionSizeUsdt,
-                'stop_loss_price' => $stopLossPrice,
-                'take_profit_price' => $takeProfitPrice,
+                'stop_loss_price' => $slTp['sl'],
+                'take_profit_price' => $slTp['tp'],
                 'current_price' => $entryPrice,
                 'best_price' => $entryPrice,
                 'leverage' => $leverage,
+                'layer_count' => 1,
+                'atr_value' => $atrValue,
                 'status' => PositionStatus::Open,
                 'exchange_order_id' => $order['orderId'],
                 'is_dry_run' => $isDryRun,
@@ -140,8 +134,9 @@ class TradingEngine
                 'side' => $direction,
                 'entry_price' => $entryPrice,
                 'quantity' => $order['quantity'],
-                'stop_loss' => $stopLossPrice,
-                'take_profit' => $takeProfitPrice,
+                'stop_loss' => $slTp['sl'],
+                'take_profit' => $slTp['tp'],
+                'atr' => $atrValue,
                 'leverage' => $leverage,
                 'dry_run' => $isDryRun,
             ]);
@@ -169,11 +164,6 @@ class TradingEngine
 
     /**
      * Retry trading on reversal_confirmed signals that don't have active positions.
-     * This catches cases where a previous position was stopped out or closed,
-     * but the coin is still in a confirmed reversal state.
-     *
-     * Skips symbols that had a stop-loss within the last 24 hours to avoid
-     * compounding losses on the same pump.
      *
      * @return array<int, Position> Positions opened
      */
@@ -185,7 +175,6 @@ class TradingEngine
             ->where('created_at', '>=', now()->subHours(24))
             ->get();
 
-        // Get symbols that were stopped out within the cooldown window — skip these
         $cooldownHours = (int) Settings::get('retry_cooldown_hours');
         $recentStopLossSymbols = Trade::where('close_reason', CloseReason::StopLoss)
             ->where('created_at', '>=', now()->subHours($cooldownHours))
@@ -210,7 +199,7 @@ class TradingEngine
 
     /**
      * Monitor all open positions and close if conditions are met.
-     * Uses batch price fetching for efficiency.
+     * Also checks DCA opportunities.
      */
     public function monitorPositions(): void
     {
@@ -242,19 +231,39 @@ class TradingEngine
                 ]);
             }
         }
+
+        // DCA check — separate pass after SL/TP to avoid adding to positions about to close
+        if ((bool) Settings::get('dca_enabled')) {
+            foreach ($positions->fresh() as $position) {
+                if ($position->status !== PositionStatus::Open) {
+                    continue; // Was closed in the check above
+                }
+
+                try {
+                    $currentPrice = $prices[$position->symbol] ?? null;
+                    if ($currentPrice !== null) {
+                        $this->checkDCA($position, $currentPrice);
+                    }
+                } catch (\Throwable $e) {
+                    Log::warning('Failed DCA check', [
+                        'position_id' => $position->id,
+                        'symbol' => $position->symbol,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+        }
     }
 
     /**
      * Check a single position and close if SL/TP/expiry hit.
-     * Applies trailing stop when position is profitable enough.
-     * Supports both LONG and SHORT positions.
      */
     private function checkPosition(Position $position, float $currentPrice): void
     {
         $isLong = $position->side === 'LONG';
         $unrealizedPnl = $this->calculatePnl($position, $currentPrice);
 
-        // Track best price: highest for LONG (most profitable), lowest for SHORT
+        // Track best price
         $bestPrice = $position->best_price ?? $position->entry_price;
         if ($isLong) {
             if ($currentPrice > $bestPrice) {
@@ -272,36 +281,83 @@ class TradingEngine
             'unrealized_pnl' => $unrealizedPnl,
         ]);
 
-        // Trailing stop: once profit exceeds activation threshold, tighten stop loss
+        // Breakeven stop: once profit >= 0.5x ATR, move SL to entry
+        $atr = $position->atr_value;
+        if ($atr > 0) {
+            $breakevenThreshold = 0.5 * $atr * $position->quantity;
+            if ($unrealizedPnl >= $breakevenThreshold) {
+                $shouldMoveToBreakeven = $isLong
+                    ? $position->stop_loss_price < $position->entry_price
+                    : $position->stop_loss_price > $position->entry_price;
+
+                if ($shouldMoveToBreakeven) {
+                    $position->update(['stop_loss_price' => $position->entry_price]);
+                    Log::info('Breakeven stop activated', [
+                        'symbol' => $position->symbol,
+                        'side' => $position->side,
+                        'entry_price' => $position->entry_price,
+                    ]);
+                }
+            }
+        }
+
+        // Trailing stop: ATR-based if available, else percentage-based
         $settingsPrefix = $position->trend_signal_id ? 'trend_' : '';
-        $trailingActivationPct = (float) Settings::get($settingsPrefix . 'trailing_stop_activation_pct');
-        $trailingStopPct = (float) Settings::get($settingsPrefix . 'trailing_stop_pct');
 
-        if ($trailingActivationPct > 0 && $trailingStopPct > 0 && $position->entry_price > 0) {
-            $profitPct = $isLong
-                ? (($bestPrice - $position->entry_price) / $position->entry_price) * 100
-                : (($position->entry_price - $bestPrice) / $position->entry_price) * 100;
+        if ($atr > 0) {
+            // ATR-based trailing: activate at 1x ATR profit, trail at 0.5x ATR
+            $profitDistance = $isLong
+                ? $bestPrice - $position->entry_price
+                : $position->entry_price - $bestPrice;
 
-            if ($profitPct >= $trailingActivationPct) {
+            if ($profitDistance >= $atr) {
                 $trailingStopPrice = $isLong
-                    ? $bestPrice * (1 - $trailingStopPct / 100)  // Below best for LONG
-                    : $bestPrice * (1 + $trailingStopPct / 100); // Above best for SHORT
+                    ? $bestPrice - (0.5 * $atr)
+                    : $bestPrice + (0.5 * $atr);
 
-                // Only tighten — never loosen the stop loss
                 $shouldUpdate = $isLong
                     ? $trailingStopPrice > $position->stop_loss_price
                     : $trailingStopPrice < $position->stop_loss_price;
 
                 if ($shouldUpdate) {
                     $position->update(['stop_loss_price' => $trailingStopPrice]);
-
-                    Log::info('Trailing stop updated', [
+                    Log::info('ATR trailing stop updated', [
                         'symbol' => $position->symbol,
                         'side' => $position->side,
                         'best_price' => $bestPrice,
                         'new_stop_loss' => $trailingStopPrice,
-                        'profit_pct' => round($profitPct, 2),
                     ]);
+                }
+            }
+        } else {
+            // Fallback: percentage-based trailing
+            $trailingActivationPct = (float) Settings::get($settingsPrefix . 'trailing_stop_activation_pct');
+            $trailingStopPct = (float) Settings::get($settingsPrefix . 'trailing_stop_pct');
+
+            if ($trailingActivationPct > 0 && $trailingStopPct > 0 && $position->entry_price > 0) {
+                $profitPct = $isLong
+                    ? (($bestPrice - $position->entry_price) / $position->entry_price) * 100
+                    : (($position->entry_price - $bestPrice) / $position->entry_price) * 100;
+
+                if ($profitPct >= $trailingActivationPct) {
+                    $trailingStopPrice = $isLong
+                        ? $bestPrice * (1 - $trailingStopPct / 100)
+                        : $bestPrice * (1 + $trailingStopPct / 100);
+
+                    $shouldUpdate = $isLong
+                        ? $trailingStopPrice > $position->stop_loss_price
+                        : $trailingStopPrice < $position->stop_loss_price;
+
+                    if ($shouldUpdate) {
+                        $position->update(['stop_loss_price' => $trailingStopPrice]);
+                        Log::info('Trailing stop updated', [
+                            'symbol' => $position->symbol,
+                            'side' => $position->side,
+                            'best_price' => $bestPrice,
+                            'new_stop_loss' => $trailingStopPrice,
+                            'profit_pct' => round($profitPct, 2),
+                        ]);
+                    }
                 }
             }
         }
@@ -334,6 +390,141 @@ class TradingEngine
     }
 
     /**
+     * Check if a DCA layer should be added to a position.
+     */
+    private function checkDCA(Position $position, float $currentPrice): void
+    {
+        $maxLayers = (int) Settings::get('dca_max_layers');
+        $maxPositionUsdt = (float) Settings::get('max_position_usdt');
+        $positionSizeUsdt = (float) Settings::get('position_size_usdt');
+        $isDryRun = (bool) Settings::get('dry_run');
+        $atr = $position->atr_value;
+
+        // Skip if no ATR (can't calculate DCA trigger)
+        if ($atr <= 0) {
+            return;
+        }
+
+        // Skip if at max layers
+        if ($position->layer_count >= $maxLayers) {
+            return;
+        }
+
+        // Skip if at max exposure
+        if ($position->position_size_usdt >= $maxPositionUsdt) {
+            return;
+        }
+
+        $isLong = $position->side === 'LONG';
+
+        // DCA trigger: price moved N x ATR against current avg entry (N = layer_count)
+        $layerDistance = $atr * $position->layer_count;
+        $triggerPrice = $isLong
+            ? $position->entry_price - $layerDistance
+            : $position->entry_price + $layerDistance;
+
+        $triggered = $isLong
+            ? $currentPrice <= $triggerPrice
+            : $currentPrice >= $triggerPrice;
+
+        if (! $triggered) {
+            return;
+        }
+
+        // Validate trend is still aligned before DCA
+        if ($this->trendScanner && ! $this->trendScanner->isAlignmentValid($position->symbol, $position->side)) {
+            Log::info('DCA skipped — trend alignment lost', [
+                'symbol' => $position->symbol,
+                'side' => $position->side,
+                'layer' => $position->layer_count + 1,
+            ]);
+            return;
+        }
+
+        // Check margin
+        $leverage = $position->leverage > 0 ? $position->leverage : 1;
+        // Layer sizing: 75% for layer 2, 50% for layer 3
+        $layerMultiplier = $position->layer_count === 1 ? 0.75 : 0.50;
+        $layerSizeUsdt = $positionSizeUsdt * $layerMultiplier;
+
+        // Cap at max exposure
+        $remainingBudget = $maxPositionUsdt - $position->position_size_usdt;
+        $layerSizeUsdt = min($layerSizeUsdt, $remainingBudget);
+
+        if ($layerSizeUsdt < 1) {
+            return;
+        }
+
+        $requiredMargin = $layerSizeUsdt / $leverage;
+        $accountData = $this->exchange->getAccountData();
+        if ($accountData['availableBalance'] < $requiredMargin) {
+            return;
+        }
+
+        try {
+            $quantity = $this->exchange->calculateQuantity($position->symbol, $layerSizeUsdt, $currentPrice);
+            if ($quantity <= 0) {
+                return;
+            }
+
+            // Open DCA order
+            $order = $isLong
+                ? $this->exchange->openLong($position->symbol, $quantity)
+                : $this->exchange->openShort($position->symbol, $quantity);
+
+            $fillPrice = $order['price'] > 0 ? $order['price'] : $currentPrice;
+            $fillQty = $order['quantity'] > 0 ? $order['quantity'] : $quantity;
+
+            // Calculate new weighted average entry
+            $oldNotional = $position->entry_price * $position->quantity;
+            $newNotional = $fillPrice * $fillQty;
+            $totalQty = $position->quantity + $fillQty;
+            $avgEntry = ($oldNotional + $newNotional) / $totalQty;
+
+            // Recalculate SL/TP from new average entry
+            $slTp = $this->calculateSlTp($avgEntry, $position->side, $atr, 'trend_', 0);
+
+            // Cancel old SL/TP orders and set new ones
+            try {
+                $this->exchange->cancelOrders($position->symbol);
+                $this->exchange->setStopLoss($position->symbol, $slTp['sl'], $totalQty, $position->side);
+                $this->exchange->setTakeProfit($position->symbol, $slTp['tp'], $totalQty, $position->side);
+            } catch (\Throwable $e) {
+                Log::warning('Failed to update SL/TP after DCA', ['error' => $e->getMessage()]);
+            }
+
+            $position->update([
+                'entry_price' => round($avgEntry, 8),
+                'quantity' => $totalQty,
+                'position_size_usdt' => $position->position_size_usdt + $layerSizeUsdt,
+                'stop_loss_price' => $slTp['sl'],
+                'take_profit_price' => $slTp['tp'],
+                'layer_count' => $position->layer_count + 1,
+                'best_price' => $avgEntry, // Reset best price to new avg entry
+            ]);
+
+            Log::info('DCA layer added', [
+                'symbol' => $position->symbol,
+                'side' => $position->side,
+                'layer' => $position->layer_count,
+                'fill_price' => $fillPrice,
+                'new_avg_entry' => round($avgEntry, 8),
+                'total_qty' => $totalQty,
+                'total_size_usdt' => $position->position_size_usdt,
+                'new_sl' => $slTp['sl'],
+                'new_tp' => $slTp['tp'],
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::error('DCA order failed', [
+                'symbol' => $position->symbol,
+                'layer' => $position->layer_count + 1,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
      * Close a position. Supports both LONG and SHORT.
      */
     public function closePosition(Position $position, ?float $exitPrice = null, CloseReason $reason = CloseReason::Manual): Trade
@@ -359,7 +550,7 @@ class TradingEngine
         $rawPnl = $this->calculatePnl($position, $actualExitPrice);
         $pnlPct = $this->calculatePnlPct($position, $actualExitPrice);
 
-        // Calculate trading fees (entry + exit, both taker since market orders)
+        // Calculate trading fees
         $rates = $this->exchange->getCommissionRate($position->symbol);
         $takerRate = $rates['taker'];
         $entryFee = $position->entry_price * $position->quantity * $takerRate;
@@ -401,6 +592,7 @@ class TradingEngine
             'reason' => $reason->value,
             'entry' => $position->entry_price,
             'exit' => $actualExitPrice,
+            'layers' => $position->layer_count,
             'pnl' => $pnl,
             'fees' => $totalFees,
             'pnl_pct' => round($pnlPct, 2) . '%',
@@ -410,9 +602,55 @@ class TradingEngine
     }
 
     /**
+     * Calculate SL/TP prices. ATR-based if available, fixed % fallback.
+     *
+     * @return array{sl: float, tp: float}
+     */
+    private function calculateSlTp(float $entryPrice, string $direction, ?float $atr, string $settingsPrefix, int $score): array
+    {
+        // ATR-based SL/TP
+        if ($atr > 0) {
+            $atrPctOfPrice = ($atr / $entryPrice) * 100;
+
+            // Sanity check: ATR should be at least 0.1% of price
+            if ($atrPctOfPrice >= 0.1) {
+                $slDistance = 1.5 * $atr;
+                // Strong signals get wider TP (2x ATR), normal signals 1x ATR
+                $tpDistance = $score >= 90 ? (2.0 * $atr) : (1.0 * $atr);
+
+                if ($direction === 'LONG') {
+                    return [
+                        'sl' => round($entryPrice - $slDistance, 8),
+                        'tp' => round($entryPrice + $tpDistance, 8),
+                    ];
+                }
+
+                return [
+                    'sl' => round($entryPrice + $slDistance, 8),
+                    'tp' => round($entryPrice - $tpDistance, 8),
+                ];
+            }
+        }
+
+        // Fallback: fixed percentage
+        $stopLossPct = (float) Settings::get($settingsPrefix . 'stop_loss_pct');
+        $takeProfitPct = (float) Settings::get($settingsPrefix . 'take_profit_pct');
+
+        if ($direction === 'LONG') {
+            return [
+                'sl' => $entryPrice * (1 - $stopLossPct / 100),
+                'tp' => $entryPrice * (1 + $takeProfitPct / 100),
+            ];
+        }
+
+        return [
+            'sl' => $entryPrice * (1 + $stopLossPct / 100),
+            'tp' => $entryPrice * (1 - $takeProfitPct / 100),
+        ];
+    }
+
+    /**
      * Calculate P&L for a position based on its direction.
-     * LONG: (current - entry) * quantity
-     * SHORT: (entry - current) * quantity
      */
     private function calculatePnl(Position $position, float $currentPrice): float
     {

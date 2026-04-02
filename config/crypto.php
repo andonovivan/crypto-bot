@@ -40,6 +40,10 @@ return [
         'dry_run' => filter_var(env('DRY_RUN', true), FILTER_VALIDATE_BOOLEAN),
         'starting_balance' => (float) env('TRADE_STARTING_BALANCE', 10000),
         'dry_run_fee_rate' => (float) env('DRY_RUN_FEE_RATE', 0.0005),
+        'watchlist' => env('WATCHLIST', 'BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT'),
+        'max_position_usdt' => (float) env('MAX_POSITION_USDT', 150),
+        'dca_enabled' => filter_var(env('DCA_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+        'dca_max_layers' => (int) env('DCA_MAX_LAYERS', 3),
     ],
 
     /*
@@ -69,8 +73,8 @@ return [
     */
     'trend' => [
         'scan_interval' => (int) env('TREND_SCAN_INTERVAL', 120),
-        'min_score' => (int) env('TREND_MIN_SCORE', 60),
-        'max_hold_hours' => (int) env('TREND_MAX_HOLD_HOURS', 4),
+        'min_score' => (int) env('TREND_MIN_SCORE', 75),
+        'max_hold_hours' => (int) env('TREND_MAX_HOLD_HOURS', 2),
         'stop_loss_pct' => (float) env('TREND_STOP_LOSS_PCT', 2.5),
         'take_profit_pct' => (float) env('TREND_TAKE_PROFIT_PCT', 5),
         'trailing_stop_activation_pct' => (float) env('TREND_TRAILING_STOP_ACTIVATION_PCT', 1.5),

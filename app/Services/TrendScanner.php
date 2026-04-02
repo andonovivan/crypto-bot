@@ -10,7 +10,6 @@ use Illuminate\Support\Facades\Log;
 
 class TrendScanner
 {
-    private const MAX_CANDIDATES = 50;
     private const KLINE_INTERVAL = '5m';
     private const KLINE_LIMIT = 100; // ~8 hours of 5m candles
 
@@ -20,39 +19,35 @@ class TrendScanner
     ) {}
 
     /**
-     * Scan futures pairs for trend signals.
+     * Scan watchlist symbols for trend signals.
      *
      * @return Collection<int, TrendSignal>
      */
     public function scan(): Collection
     {
         $minScore = (int) Settings::get('trend_min_score');
-        $minVolumeUsdt = (float) Settings::get('min_volume_usdt');
         $signals = collect();
 
-        Log::info('Starting trend scan', ['min_score' => $minScore]);
+        $watchlist = $this->getWatchlist();
 
-        $tickers = $this->exchange->getFuturesTickers();
+        Log::info('Starting trend scan', ['min_score' => $minScore, 'watchlist' => $watchlist]);
 
-        // Pre-filter: volume, tradability, and minimum intraday range
-        $candidates = $this->preFilter($tickers, $minVolumeUsdt);
-
-        Log::info('Trend scan candidates after pre-filter', ['count' => count($candidates)]);
-
-        // Sort by absolute price change (most volatile first) and take top N
-        usort($candidates, fn ($a, $b) => abs($b['priceChangePct']) <=> abs($a['priceChangePct']));
-        $candidates = array_slice($candidates, 0, self::MAX_CANDIDATES);
-
-        foreach ($candidates as $ticker) {
+        foreach ($watchlist as $symbol) {
             try {
-                $result = $this->evaluateSymbol($ticker['symbol']);
+                if (! $this->exchange->isTradable($symbol)) {
+                    continue;
+                }
+
+                $result = $this->evaluateSymbol($symbol);
 
                 if ($result === null || $result['score'] < $minScore) {
                     continue;
                 }
 
+                $price = $this->exchange->getPrice($symbol);
+
                 // Check for existing active signal on this symbol
-                $existing = TrendSignal::where('symbol', $ticker['symbol'])
+                $existing = TrendSignal::where('symbol', $symbol)
                     ->whereIn('status', [SignalStatus::Detected, SignalStatus::ReversalConfirmed])
                     ->where('created_at', '>=', now()->subHours(4))
                     ->first();
@@ -62,11 +57,12 @@ class TrendScanner
                     if ($result['score'] > $existing->score) {
                         $existing->update([
                             'score' => $result['score'],
-                            'current_price' => $ticker['price'],
+                            'current_price' => $price,
                             'ema_cross' => $result['ema_cross'],
                             'rsi_value' => $result['rsi'],
                             'macd_histogram' => $result['macd_histogram'],
                             'volume_ratio' => $result['volume_ratio'],
+                            'atr_value' => $result['atr_value'],
                         ]);
                     }
                     $signals->push($existing->fresh());
@@ -74,32 +70,34 @@ class TrendScanner
                 }
 
                 $signal = TrendSignal::create([
-                    'symbol' => $ticker['symbol'],
+                    'symbol' => $symbol,
                     'direction' => $result['direction'],
                     'score' => $result['score'],
-                    'entry_price' => $ticker['price'],
-                    'current_price' => $ticker['price'],
+                    'entry_price' => $price,
+                    'current_price' => $price,
                     'ema_cross' => $result['ema_cross'],
                     'rsi_value' => $result['rsi'],
                     'macd_histogram' => $result['macd_histogram'],
                     'volume_ratio' => $result['volume_ratio'],
+                    'atr_value' => $result['atr_value'],
                     'status' => SignalStatus::Detected,
                     'expires_at' => now()->addHours((int) Settings::get('trend_max_hold_hours')),
                 ]);
 
                 Log::info('Trend signal detected', [
-                    'symbol' => $ticker['symbol'],
+                    'symbol' => $symbol,
                     'direction' => $result['direction'],
                     'score' => $result['score'],
                     'rsi' => round($result['rsi'], 2),
                     'macd_h' => round($result['macd_histogram'], 8),
                     'volume_ratio' => round($result['volume_ratio'], 2),
+                    'atr' => round($result['atr_value'], 8),
                 ]);
 
                 $signals->push($signal);
             } catch (\Throwable $e) {
                 Log::warning('Failed to evaluate symbol for trend', [
-                    'symbol' => $ticker['symbol'],
+                    'symbol' => $symbol,
                     'error' => $e->getMessage(),
                 ]);
             }
@@ -113,14 +111,14 @@ class TrendScanner
     /**
      * Evaluate a single symbol for trend signal.
      *
-     * @return array{direction: string, score: int, ema_cross: bool, rsi: float, macd_histogram: float, volume_ratio: float}|null
+     * @return array{direction: string, score: int, ema_cross: bool, rsi: float, macd_histogram: float, volume_ratio: float, atr_value: float}|null
      */
     public function evaluateSymbol(string $symbol): ?array
     {
         $klines = $this->exchange->getKlines($symbol, self::KLINE_INTERVAL, self::KLINE_LIMIT);
 
         if (count($klines) < 50) {
-            return null; // Not enough data for reliable indicators
+            return null;
         }
 
         $closes = array_column($klines, 'close');
@@ -132,9 +130,16 @@ class TrendScanner
         $ema50 = $this->ta->calculateEMA($closes, 50);
         $rsi = $this->ta->calculateRSI($closes);
         $macd = $this->ta->calculateMACD($closes);
+        $atr = $this->ta->calculateATR($klines);
 
         $last = count($closes) - 1;
         $prev = $last - 1;
+
+        // ATR value for SL/TP calculation
+        $atrValue = $atr[$last] > 0 ? $atr[$last] : $atr[$prev];
+        if ($atrValue <= 0) {
+            return null; // Can't calculate volatility-based stops
+        }
 
         // Determine direction from EMA cross
         $ema9Now = $ema9[$last];
@@ -162,10 +167,30 @@ class TrendScanner
         $avgVolume = count($recentVolumes) > 0 ? array_sum($recentVolumes) / count($recentVolumes) : 1;
         $volumeRatio = $avgVolume > 0 ? $volumes[$last] / $avgVolume : 1.0;
 
-        // Score the signal
+        // === HARD REQUIREMENTS (must pass all) ===
+
+        // Reject extreme RSI — likely to reverse
+        if ($rsiValue > 85 || $rsiValue < 15) {
+            return null;
+        }
+
+        // MACD must confirm direction
+        if ($direction === 'LONG' && $histogramNow <= 0) {
+            return null;
+        }
+        if ($direction === 'SHORT' && $histogramNow >= 0) {
+            return null;
+        }
+
+        // Volume must show participation
+        if ($volumeRatio < 1.2) {
+            return null;
+        }
+
+        // === SCORING ===
         $score = 0;
 
-        // 1. EMA Cross (30 pts) — fresh cross gets full points, existing alignment gets partial
+        // 1. EMA Cross (30 pts)
         if ($freshCross) {
             $score += 30;
         } elseif ($emaCrossLong || $emaCrossShort) {
@@ -177,47 +202,42 @@ class TrendScanner
             if ($rsiValue >= 40 && $rsiValue <= 70) {
                 $score += 20;
             } elseif ($rsiValue > 70 && $rsiValue <= 80) {
-                $score += 10; // Partial — getting overbought
+                $score += 10;
             }
         } else {
             if ($rsiValue >= 30 && $rsiValue <= 60) {
                 $score += 20;
             } elseif ($rsiValue >= 20 && $rsiValue < 30) {
-                $score += 10; // Partial — getting oversold
+                $score += 10;
             }
         }
 
-        // Reject extreme RSI — likely to reverse
-        if ($rsiValue > 85 || $rsiValue < 15) {
-            return null;
-        }
-
-        // 3. MACD histogram confirmation (25 pts)
+        // 3. MACD histogram strength (25 pts)
         if ($direction === 'LONG') {
-            if ($histogramNow > 0 && $histogramNow > $histogramPrev) {
-                $score += 25; // Positive and increasing
-            } elseif ($histogramNow > 0) {
-                $score += 12; // Positive but not increasing
-            } elseif ($histogramNow > $histogramPrev && $histogramPrev > $histogramPrev2) {
-                $score += 15; // Accelerating toward positive
+            if ($histogramNow > $histogramPrev && $histogramPrev > $histogramPrev2) {
+                $score += 25; // Multi-bar growing momentum
+            } elseif ($histogramNow > $histogramPrev) {
+                $score += 15; // Growing momentum
+            } else {
+                $score += 12; // Positive but weakening (still passed hard req)
             }
         } else {
-            if ($histogramNow < 0 && $histogramNow < $histogramPrev) {
-                $score += 25; // Negative and decreasing
-            } elseif ($histogramNow < 0) {
-                $score += 12; // Negative but not decreasing
-            } elseif ($histogramNow < $histogramPrev && $histogramPrev < $histogramPrev2) {
-                $score += 15; // Accelerating toward negative
+            if ($histogramNow < $histogramPrev && $histogramPrev < $histogramPrev2) {
+                $score += 25; // Multi-bar growing momentum
+            } elseif ($histogramNow < $histogramPrev) {
+                $score += 15; // Growing momentum
+            } else {
+                $score += 12; // Negative but weakening (still passed hard req)
             }
         }
 
-        // 4. Volume confirmation (15 pts)
+        // 4. Volume strength (15 pts)
         if ($volumeRatio >= 2.0) {
             $score += 15;
         } elseif ($volumeRatio >= 1.5) {
             $score += 10;
-        } elseif ($volumeRatio >= 1.2) {
-            $score += 5;
+        } else {
+            $score += 5; // Already passed 1.2 hard requirement
         }
 
         // 5. Price vs EMA(50) trend alignment (10 pts)
@@ -238,13 +258,41 @@ class TrendScanner
             'rsi' => $rsiValue,
             'macd_histogram' => $histogramNow,
             'volume_ratio' => $volumeRatio,
+            'atr_value' => $atrValue,
         ];
+    }
+
+    /**
+     * Quick check if EMA alignment still holds for a symbol in a given direction.
+     * Used by DCA logic to validate before adding layers.
+     */
+    public function isAlignmentValid(string $symbol, string $direction): bool
+    {
+        try {
+            $klines = $this->exchange->getKlines($symbol, self::KLINE_INTERVAL, 30);
+            if (count($klines) < 21) {
+                return false;
+            }
+
+            $closes = array_column($klines, 'close');
+            $ema9 = $this->ta->calculateEMA($closes, 9);
+            $ema21 = $this->ta->calculateEMA($closes, 21);
+            $last = count($closes) - 1;
+
+            if ($direction === 'LONG') {
+                return $ema9[$last] > $ema21[$last];
+            }
+
+            return $ema9[$last] < $ema21[$last];
+        } catch (\Throwable $e) {
+            return false;
+        }
     }
 
     /**
      * Re-evaluate open positions for trend reversal (early exit signal).
      *
-     * @return array<string, string> Symbol => 'exit' if trend reversed
+     * @return array<string, string> Symbol => new direction if flipped
      */
     public function checkForReversals(array $symbols): array
     {
@@ -258,8 +306,6 @@ class TrendScanner
                     continue;
                 }
 
-                // If the signal direction flipped, flag for exit
-                // (caller checks against position direction)
                 $reversals[$symbol] = $result['direction'];
             } catch (\Throwable $e) {
                 Log::warning('Failed to check trend reversal', [
@@ -286,34 +332,18 @@ class TrendScanner
     }
 
     /**
-     * Pre-filter tickers for trend analysis candidates.
+     * Get the watchlist of symbols to scan.
+     *
+     * @return array<string>
      */
-    private function preFilter(array $tickers, float $minVolumeUsdt): array
+    private function getWatchlist(): array
     {
-        $candidates = [];
+        $raw = (string) Settings::get('watchlist');
 
-        foreach ($tickers as $ticker) {
-            // Skip low-liquidity coins
-            if ($minVolumeUsdt > 0 && $ticker['volume'] < $minVolumeUsdt) {
-                continue;
-            }
-
-            // Skip non-tradable symbols
-            if (!$this->exchange->isTradable($ticker['symbol'])) {
-                continue;
-            }
-
-            // Require minimum intraday range (skip dead coins)
-            if ($ticker['high'] > 0) {
-                $range = ($ticker['high'] - $ticker['low']) / $ticker['high'] * 100;
-                if ($range < 2.0) {
-                    continue;
-                }
-            }
-
-            $candidates[] = $ticker;
+        if (empty($raw)) {
+            return ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'];
         }
 
-        return $candidates;
+        return array_filter(array_map('trim', explode(',', strtoupper($raw))));
     }
 }

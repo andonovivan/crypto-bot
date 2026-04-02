@@ -25,11 +25,12 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
   - DryRunExchange: uses `dry_run_fee_rate` setting (default 0.05%)
 - `getBalance()` delegates to `getAccountData()['availableBalance']` in both implementations
 
-### Core Flow (Trend Strategy — default)
-1. **TrendScanner::scan()** — Pre-filters tickers by volume/range, fetches 5m klines for top candidates, computes EMA/RSI/MACD, scores signals 0-100
-2. **TradingEngine::openPosition()** — Opens LONG or SHORT based on signal direction
-3. **TradingEngine::monitorPositions()** — Checks SL/TP/trailing/expiry (direction-aware)
-4. **TradingEngine::closePosition()** — Closes position via closeLong()/closeShort(), records Trade
+### Core Flow (Trend Strategy — default, "Focused DCA Trend")
+1. **TrendScanner::scan()** — Scans watchlist (5-10 liquid coins), fetches 5m klines, computes EMA/RSI/MACD/ATR, scores signals with hard requirements
+2. **TradingEngine::openPosition()** — Opens LONG or SHORT with ATR-based SL/TP, stores `atr_value` and `layer_count`
+3. **TradingEngine::monitorPositions()** — Checks SL/TP/breakeven/trailing/expiry, then runs DCA check for eligible positions
+4. **TradingEngine::checkDCA()** — Adds layers when price moves against entry by ATR multiples (up to 3 layers)
+5. **TradingEngine::closePosition()** — Closes position via closeLong()/closeShort(), records Trade with fees
 
 ### Core Flow (Pump Strategy — legacy)
 1. **PumpScanner::scan()** — Fetches all futures tickers, detects pumps
@@ -50,24 +51,47 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - Reversal confirmed when drop from peak >= `reversal_drop_pct` (default 3%)
 - Peak price tracked and updated if price goes higher
 
-### Trend Detection Logic (TrendScanner)
-- **Pre-filter**: Min 24h volume ($5M), tradable, min 2% intraday range
-- **Candidates**: Top 50 by absolute price change
+### Trend Detection Logic (TrendScanner — "Focused DCA Trend")
+- **Watchlist-based**: Scans only pre-selected liquid coins (default: BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, DOGEUSDT)
 - **Data**: 5-minute klines (100 candles = ~8 hours)
-- **Indicators**: EMA(9/21/50), RSI(14), MACD(12,26,9), volume ratio
+- **Indicators**: EMA(9/21/50), RSI(14), MACD(12,26,9), ATR(14), volume ratio
+- **Hard requirements** (must all pass):
+  - RSI not extreme (15-85 range)
+  - MACD histogram must confirm direction (positive for LONG, negative for SHORT)
+  - Volume ratio >= 1.2x average
 - **Signal scoring** (0-100): EMA cross (30pts), RSI zone (20pts), MACD histogram (25pts), volume (15pts), trend alignment (10pts)
-- **Min score**: `trend_min_score` (default 60) to open a trade
+- **Min score**: `trend_min_score` (default 75) to open a trade
 - **Direction**: LONG if EMA9 > EMA21, SHORT if EMA9 < EMA21
+- **ATR**: Returned with each signal for volatility-based SL/TP
 - **Signal expiry**: 4 hours
+- **Alignment check**: `isAlignmentValid()` verifies EMA alignment before DCA layers
 
 ### Position Management (bidirectional)
-- **LONG entry**: `openLong()` — SL = entry * (1 - sl_pct/100), TP = entry * (1 + tp_pct/100)
-- **SHORT entry**: `openShort()` — SL = entry * (1 + sl_pct/100), TP = entry * (1 - tp_pct/100)
+- **LONG entry**: `openLong()` — ATR-based SL/TP (see below), fallback to fixed %
+- **SHORT entry**: `openShort()` — ATR-based SL/TP (see below), fallback to fixed %
 - **Margin check**: Before opening, verifies `availableBalance >= positionSize / leverage`
 - **P&L**: LONG = (current - entry) * qty, SHORT = (entry - current) * qty
 - **Fees**: Deducted from P&L on close — entry fee + exit fee (taker rate on notional). Stored in `Trade.fees` column.
-- **Trailing stop**: Direction-aware — tracks best price (highest for LONG, lowest for SHORT)
-- **Expiry**: `max_hold_hours` (default 24h for pump, 4h for trend)
+- **Expiry**: `max_hold_hours` (default 24h for pump, 2h for trend)
+
+### ATR-Based SL/TP
+- **SL**: 1.5x ATR from entry price (wider = fewer whipsaw stops)
+- **TP**: 1.0x ATR from entry (2.0x ATR for strong signals with score >= 90)
+- **Fallback**: If ATR < 0.1% of price, uses fixed % from settings
+- **Breakeven stop**: When profit >= 0.5x ATR, SL moves to entry price (locks in zero-loss)
+- **ATR trailing stop**: Activates at 1.0x ATR profit, trails at 0.5x ATR distance
+- **Fallback trailing**: If no ATR stored, uses %-based trailing from settings
+
+### DCA (Dollar Cost Averaging)
+- **Purpose**: Build positions when price moves against entry but signal remains valid
+- **Layers**: Up to 3 (configurable via `dca_max_layers`)
+- **Trigger**: Price moves >= 1x ATR * layer_count against average entry
+- **Layer sizing**: Layer 1 = 100%, Layer 2 = 75%, Layer 3 = 50% of base `position_size_usdt`
+- **Validation**: Before each DCA layer, `TrendScanner::isAlignmentValid()` checks EMA9/21 still agrees
+- **Cap**: Total position cannot exceed `max_position_usdt` (default 150 USDT)
+- **On DCA**: Recalculates weighted average entry, updates quantity, recomputes SL/TP from new average
+- **Exchange orders**: Old SL/TP orders cancelled and replaced with new levels
+- **Position fields**: `layer_count` (1-3), `atr_value` (decimal) stored on Position model
 
 ## Key Files
 
@@ -106,14 +130,18 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 | `min_volume_multiplier` | 3 | Min volume vs 7-day average |
 | `reversal_drop_pct` | 5 | Min drop from peak to confirm reversal |
 | `min_volume_usdt` | 5000000 | Min 24h USDT volume to consider coin |
+| `watchlist` | BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT | Comma-separated symbols to scan |
+| `max_position_usdt` | 150 | Max total USDT per coin incl. DCA layers |
+| `dca_enabled` | true | Enable/disable DCA layers |
+| `dca_max_layers` | 3 | Max DCA layers per position |
 | `strategy` | trend | Active strategy: 'pump' or 'trend' |
 | `trend_scan_interval` | 120 | Seconds between trend scans |
-| `trend_min_score` | 60 | Min score (0-100) to open a trend trade |
-| `trend_max_hold_hours` | 4 | Max hold time for trend trades |
-| `trend_stop_loss_pct` | 2.5 | Trend stop loss % |
-| `trend_take_profit_pct` | 5 | Trend take profit % |
-| `trend_trailing_stop_activation_pct` | 1.5 | Trend trailing stop activation % |
-| `trend_trailing_stop_pct` | 1.5 | Trend trailing stop distance % |
+| `trend_min_score` | 75 | Min score (0-100) to open a trend trade |
+| `trend_max_hold_hours` | 2 | Max hold time for trend trades |
+| `trend_stop_loss_pct` | 2.5 | Trend stop loss % (ATR fallback) |
+| `trend_take_profit_pct` | 5 | Trend take profit % (ATR fallback) |
+| `trend_trailing_stop_activation_pct` | 1.5 | Trend trailing stop activation % (ATR fallback) |
+| `trend_trailing_stop_pct` | 1.5 | Trend trailing stop distance % (ATR fallback) |
 
 ## API Endpoints
 

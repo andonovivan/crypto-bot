@@ -147,6 +147,7 @@
         <th onclick="sortTable('positions', 'pnl_pct')">P&amp;L % <span class="sort-arrow" id="pos-sort-pnl_pct"></span></th>
         <th>SL</th>
         <th>TP</th>
+        <th>Layers</th>
         <th onclick="sortTable('positions', 'opened_at')">Opened <span class="sort-arrow" id="pos-sort-opened_at"></span></th>
         <th></th>
       </tr>
@@ -174,12 +175,13 @@
         <th>RSI</th>
         <th>MACD</th>
         <th>Volume</th>
+        <th>ATR</th>
         <th>Price</th>
         <th>Status</th>
         <th>Detected</th>
       </tr>
     </thead>
-    <tbody id="trend-signals-body"><tr><td colspan="10" class="empty">Loading...</td></tr></tbody>
+    <tbody id="trend-signals-body"><tr><td colspan="11" class="empty">Loading...</td></tr></tbody>
   </table>
 
   <!-- Pump signals table (hidden when trend strategy active) -->
@@ -414,7 +416,7 @@ function render(data) {
   // Positions table
   const posBody = document.getElementById('positions-body');
   if (data.positions.length === 0) {
-    posBody.innerHTML = '<tr><td colspan="12" class="empty">No open positions</td></tr>';
+    posBody.innerHTML = '<tr><td colspan="13" class="empty">No open positions</td></tr>';
   } else {
     const sorted = sortData(data.positions.map(p => ({
       ...p,
@@ -431,6 +433,7 @@ function render(data) {
       <td class="${pnlClass(p.pnl_pct)}">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</td>
       <td>${formatPrice(p.stop_loss_price)}</td>
       <td>${formatPrice(p.take_profit_price)}</td>
+      <td>${p.layer_count || 1}${p.layer_count > 1 ? ' <span style="color:#d29922;font-size:0.75em">DCA</span>' : ''}</td>
       <td>${timeAgo(p.opened_at)}</td>
       <td><button class="btn-close-pos" onclick="closePosition(${p.id}, this)">Close</button></td>
     </tr>`).join('');
@@ -447,7 +450,7 @@ function render(data) {
   const trendBody = document.getElementById('trend-signals-body');
   const trendSignals = data.trend_signals || [];
   if (trendSignals.length === 0) {
-    trendBody.innerHTML = '<tr><td colspan="10" class="empty">No active trend signals</td></tr>';
+    trendBody.innerHTML = '<tr><td colspan="11" class="empty">No active trend signals</td></tr>';
   } else {
     trendBody.innerHTML = trendSignals.map(s => `<tr>
       <td><strong>${s.symbol}</strong></td>
@@ -457,6 +460,7 @@ function render(data) {
       <td>${s.rsi_value !== null ? s.rsi_value.toFixed(1) : '—'}</td>
       <td>${s.macd_histogram !== null ? s.macd_histogram.toFixed(6) : '—'}</td>
       <td>${s.volume_ratio !== null ? s.volume_ratio.toFixed(1) + 'x' : '—'}</td>
+      <td>${s.atr_value !== null ? formatPrice(s.atr_value) : '—'}</td>
       <td>${formatPrice(s.entry_price)}</td>
       <td><span class="signal-status signal-detected">${s.status.replace('_', ' ').toUpperCase()}</span></td>
       <td>${timeAgo(s.created_at)}</td>
