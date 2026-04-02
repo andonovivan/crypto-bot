@@ -58,7 +58,6 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **Hard requirements** (must all pass):
   - RSI not extreme (15-85 range)
   - MACD histogram must confirm direction (positive for LONG, negative for SHORT)
-  - Volume ratio >= 1.2x average
 - **Signal scoring** (0-100): EMA cross (30pts), RSI zone (20pts), MACD histogram (25pts), volume (15pts), trend alignment (10pts)
 - **Min score**: `trend_min_score` (default 75) to open a trade
 - **Direction**: LONG if EMA9 > EMA21, SHORT if EMA9 < EMA21

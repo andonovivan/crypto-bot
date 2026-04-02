@@ -182,11 +182,6 @@ class TrendScanner
             return null;
         }
 
-        // Volume must show participation
-        if ($volumeRatio < 1.2) {
-            return null;
-        }
-
         // === SCORING ===
         $score = 0;
 
@@ -235,10 +230,13 @@ class TrendScanner
         if ($volumeRatio >= 2.0) {
             $score += 15;
         } elseif ($volumeRatio >= 1.5) {
-            $score += 10;
-        } else {
-            $score += 5; // Already passed 1.2 hard requirement
+            $score += 12;
+        } elseif ($volumeRatio >= 1.0) {
+            $score += 8;
+        } elseif ($volumeRatio >= 0.8) {
+            $score += 4;
         }
+        // Below 0.8x: 0 pts (dead volume, score will be low)
 
         // 5. Price vs EMA(50) trend alignment (10 pts)
         $priceNow = $closes[$last];
