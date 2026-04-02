@@ -80,7 +80,7 @@
 
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
-  <button class="tab-btn" onclick="switchTab('signals')" id="signals-tab-btn">Wave Status</button>
+  <button class="tab-btn" onclick="switchTab('signals')" id="signals-tab-btn" style="display:none">Wave Status</button>
   <button class="tab-btn" onclick="switchTab('history')">Trade History</button>
   <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
 </div>
@@ -127,23 +127,20 @@
     <thead>
       <tr>
         <th onclick="sortTable('positions', 'symbol')">Symbol <span class="sort-arrow" id="pos-sort-symbol"></span></th>
-        <th>Side</th>
-        <th onclick="sortTable('positions', 'entry_price')">Entry <span class="sort-arrow" id="pos-sort-entry_price"></span></th>
-        <th onclick="sortTable('positions', 'current_price')">Current <span class="sort-arrow" id="pos-sort-current_price"></span></th>
-        <th onclick="sortTable('positions', 'position_size_usdt')">Invested <span class="sort-arrow" id="pos-sort-position_size_usdt"></span></th>
-        <th onclick="sortTable('positions', 'current_value')">Value <span class="sort-arrow" id="pos-sort-current_value"></span></th>
-        <th onclick="sortTable('positions', 'unrealized_pnl')">P&amp;L <span class="sort-arrow" id="pos-sort-unrealized_pnl"></span></th>
-        <th onclick="sortTable('positions', 'pnl_pct')">P&amp;L % <span class="sort-arrow" id="pos-sort-pnl_pct"></span></th>
-        <th onclick="sortTable('positions', 'net_pnl')">Net <span class="sort-arrow" id="pos-sort-net_pnl"></span></th>
-        <th>SL</th>
-        <th>TP</th>
+        <th onclick="sortTable('positions', 'entry_price')">Entry Price <span class="sort-arrow" id="pos-sort-entry_price"></span></th>
+        <th onclick="sortTable('positions', 'current_price')">Current Price <span class="sort-arrow" id="pos-sort-current_price"></span></th>
+        <th onclick="sortTable('positions', 'unrealized_pnl')">Unrealized PnL <span class="sort-arrow" id="pos-sort-unrealized_pnl"></span></th>
+        <th onclick="sortTable('positions', 'pnl_pct')">PnL % <span class="sort-arrow" id="pos-sort-pnl_pct"></span></th>
+        <th onclick="sortTable('positions', 'position_size_usdt')">Size <span class="sort-arrow" id="pos-sort-position_size_usdt"></span></th>
+        <th onclick="sortTable('positions', 'net_pnl')">Net PnL <span class="sort-arrow" id="pos-sort-net_pnl"></span></th>
+        <th>SL / TP</th>
         <th>Layers</th>
+        <th onclick="sortTable('positions', 'opened_at')">Time Opened <span class="sort-arrow" id="pos-sort-opened_at"></span></th>
         <th>Hold</th>
-        <th onclick="sortTable('positions', 'opened_at')">Opened <span class="sort-arrow" id="pos-sort-opened_at"></span></th>
         <th></th>
       </tr>
     </thead>
-    <tbody id="positions-body"><tr><td colspan="15" class="empty">Loading...</td></tr></tbody>
+    <tbody id="positions-body"><tr><td colspan="12" class="empty">Loading...</td></tr></tbody>
   </table>
 </div>
 
@@ -174,24 +171,23 @@
 
 <!-- History Tab -->
 <div id="tab-history" class="tab-pane">
-  <h2 class="section-title">Recent Closed Trades</h2>
+  <h2 class="section-title">Trade History</h2>
   <table>
     <thead>
       <tr>
         <th onclick="sortTable('history', 'symbol')">Symbol <span class="sort-arrow" id="hist-sort-symbol"></span></th>
-        <th>Side</th>
-        <th onclick="sortTable('history', 'entry_price')">Entry <span class="sort-arrow" id="hist-sort-entry_price"></span></th>
-        <th onclick="sortTable('history', 'exit_price')">Exit <span class="sort-arrow" id="hist-sort-exit_price"></span></th>
-        <th onclick="sortTable('history', 'quantity')">Qty <span class="sort-arrow" id="hist-sort-quantity"></span></th>
-        <th onclick="sortTable('history', 'gross_pnl')">Gross <span class="sort-arrow" id="hist-sort-gross_pnl"></span></th>
-        <th onclick="sortTable('history', 'pnl_pct')">P&amp;L % <span class="sort-arrow" id="hist-sort-pnl_pct"></span></th>
+        <th onclick="sortTable('history', 'entry_price')">Entry Price <span class="sort-arrow" id="hist-sort-entry_price"></span></th>
+        <th onclick="sortTable('history', 'exit_price')">Exit Price <span class="sort-arrow" id="hist-sort-exit_price"></span></th>
+        <th onclick="sortTable('history', 'net_pnl')">Realized PnL <span class="sort-arrow" id="hist-sort-net_pnl"></span></th>
+        <th onclick="sortTable('history', 'pnl_pct')">PnL % <span class="sort-arrow" id="hist-sort-pnl_pct"></span></th>
+        <th onclick="sortTable('history', 'position_size_usdt')">Size <span class="sort-arrow" id="hist-sort-position_size_usdt"></span></th>
         <th onclick="sortTable('history', 'fees')">Fees <span class="sort-arrow" id="hist-sort-fees"></span></th>
-        <th onclick="sortTable('history', 'net_pnl')">Net <span class="sort-arrow" id="hist-sort-net_pnl"></span></th>
         <th>Reason</th>
-        <th onclick="sortTable('history', 'created_at')">Closed <span class="sort-arrow" id="hist-sort-created_at"></span></th>
+        <th onclick="sortTable('history', 'opened_at')">Time Opened <span class="sort-arrow" id="hist-sort-opened_at"></span></th>
+        <th onclick="sortTable('history', 'created_at')">Time Closed <span class="sort-arrow" id="hist-sort-created_at"></span></th>
       </tr>
     </thead>
-    <tbody id="history-body"><tr><td colspan="11" class="empty">Loading...</td></tr></tbody>
+    <tbody id="history-body"><tr><td colspan="10" class="empty">Loading...</td></tr></tbody>
   </table>
   <div class="pagination" id="history-pagination"></div>
 </div>
@@ -301,6 +297,14 @@ function timeAgo(ts) {
   return Math.floor(diff / 86400) + 'd ago';
 }
 
+function formatTimestamp(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts * 1000);
+  const pad = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '/' + pad(d.getMonth()+1) + '/' + pad(d.getDate())
+    + ', ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
 function holdTime(openedTs, expiresTs) {
   if (!openedTs) return '-';
   const now = Math.floor(Date.now() / 1000);
@@ -377,6 +381,19 @@ function render(data) {
   document.getElementById('strategy-badge').innerHTML =
     `<span style="background:${sb.bg};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.55em;font-weight:bold;vertical-align:middle;">${sb.label}</span>`;
 
+  // Hide Wave Status tab when not using wave strategy
+  const waveTabBtn = document.getElementById('signals-tab-btn');
+  const waveTabPane = document.getElementById('tab-signals');
+  if (strategy !== 'wave') {
+    waveTabBtn.style.display = 'none';
+    // If wave tab was active, switch to dashboard
+    if (waveTabPane.classList.contains('active')) {
+      switchTab('dashboard');
+    }
+  } else {
+    waveTabBtn.style.display = '';
+  }
+
   // Subtitle
   document.getElementById('signals-count').textContent = s.active_signals;
   document.getElementById('positions-count-sub').textContent = s.open_positions;
@@ -408,27 +425,26 @@ function render(data) {
   // Positions table
   const posBody = document.getElementById('positions-body');
   if (data.positions.length === 0) {
-    posBody.innerHTML = '<tr><td colspan="15" class="empty">No open positions</td></tr>';
+    posBody.innerHTML = '<tr><td colspan="12" class="empty">No open positions</td></tr>';
   } else {
-    const sorted = sortData(data.positions.map(p => ({
-      ...p,
-      current_value: p.position_size_usdt + (p.unrealized_pnl || 0),
-    })), sortState.positions.key, sortState.positions.asc);
+    const sorted = sortData([...data.positions], sortState.positions.key, sortState.positions.asc);
     posBody.innerHTML = sorted.map(p => `<tr>
-      <td><strong>${p.symbol}</strong>${p.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.6em">DRY</span>' : ''}</td>
-      <td>${sideBadge(p.side)}</td>
+      <td>
+        <strong>${p.symbol}</strong><br>
+        ${sideBadge(p.side)}
+        <span style="color:#8b949e;font-size:0.7em;margin-left:2px">${p.leverage || '-'}x</span>
+        ${p.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.55em">DRY</span>' : ''}
+      </td>
       <td>${formatPrice(p.entry_price)}</td>
       <td>${formatPrice(p.current_price)}</td>
-      <td>$${fmtNum(p.position_size_usdt, 2)}</td>
-      <td style="color:${pnlColor(p.unrealized_pnl)}">$${fmtNum(p.current_value, 2)}</td>
       <td style="color:${pnlColor(p.unrealized_pnl)}">${pnlStr(p.unrealized_pnl)}</td>
-      <td style="color:${pnlColor(p.pnl_pct)}">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</td>
-      <td style="color:${pnlColor(p.net_pnl)};font-weight:bold">${pnlStr(p.net_pnl)} <span style="color:#8b949e;font-weight:normal;font-size:0.75em">(-$${fmtNum(p.estimated_fees || 0, 4)} fees)</span></td>
-      <td>${formatPrice(p.stop_loss_price)}</td>
-      <td>${formatPrice(p.take_profit_price)}</td>
+      <td style="color:${pnlColor(p.pnl_pct)};font-weight:bold">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</td>
+      <td>${fmtNum(p.position_size_usdt, 2)} USDT</td>
+      <td style="color:${pnlColor(p.net_pnl)};font-weight:bold">${pnlStr(p.net_pnl)}<br><span style="color:#8b949e;font-weight:normal;font-size:0.75em">-$${fmtNum(p.estimated_fees || 0, 4)} fees</span></td>
+      <td><span style="color:#f85149">${formatPrice(p.stop_loss_price)}</span> / <span style="color:#3fb950">${formatPrice(p.take_profit_price)}</span></td>
       <td>${p.layer_count || 1}${p.layer_count > 1 ? ' <span style="color:#d29922;font-size:0.75em">DCA</span>' : ''}</td>
+      <td style="font-size:0.85em">${formatTimestamp(p.opened_at)}</td>
       <td>${holdTime(p.opened_at, p.expires_at)}</td>
-      <td>${timeAgo(p.opened_at)}</td>
       <td><button class="btn-close-pos" onclick="closePosition(${p.id}, this)">Close</button></td>
     </tr>`).join('');
   }
@@ -460,23 +476,27 @@ function render(data) {
   // History table
   const histBody = document.getElementById('history-body');
   if (data.recent_trades.length === 0) {
-    histBody.innerHTML = '<tr><td colspan="11" class="empty">No closed trades yet</td></tr>';
+    histBody.innerHTML = '<tr><td colspan="10" class="empty">No closed trades yet</td></tr>';
   } else {
-    const trades = data.recent_trades.map(t => ({ ...t, net_pnl: t.pnl, gross_pnl: t.pnl + (t.fees || 0) }));
+    const trades = data.recent_trades.map(t => ({ ...t, net_pnl: t.pnl }));
     const sorted = sortData(trades, sortState.history.key, sortState.history.asc);
     histBody.innerHTML = sorted.map(t => {
       return `<tr>
-      <td><strong>${t.symbol}</strong>${t.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.6em">DRY</span>' : ''}</td>
-      <td>${sideBadge(t.side)}</td>
+      <td>
+        <strong>${t.symbol}</strong><br>
+        ${sideBadge(t.side)}
+        <span style="color:#8b949e;font-size:0.7em;margin-left:2px">${t.leverage || '-'}x</span>
+        ${t.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.55em">DRY</span>' : ''}
+      </td>
       <td>${formatPrice(t.entry_price)}</td>
       <td>${formatPrice(t.exit_price)}</td>
-      <td>${t.quantity.toFixed(4)}</td>
-      <td style="color:${pnlColor(t.gross_pnl)}">${pnlStr(t.gross_pnl)}</td>
-      <td style="color:${pnlColor(t.pnl_pct)}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
-      <td class="negative">$${fmtNum(t.fees || 0, 4)}</td>
       <td style="color:${pnlColor(t.net_pnl)};font-weight:bold">${pnlStr(t.net_pnl)}</td>
+      <td style="color:${pnlColor(t.pnl_pct)};font-weight:bold">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
+      <td>${t.position_size_usdt ? fmtNum(t.position_size_usdt, 2) + ' USDT' : '-'}</td>
+      <td style="color:#f85149">-$${fmtNum(t.fees || 0, 4)}</td>
       <td>${reasonBadge(t.close_reason)}</td>
-      <td>${timeAgo(t.created_at)}</td>
+      <td style="font-size:0.85em">${formatTimestamp(t.opened_at)}</td>
+      <td style="font-size:0.85em">${formatTimestamp(t.created_at)}</td>
     </tr>`;
     }).join('');
   }

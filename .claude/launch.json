@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "echo",
+      "runtimeArgs": ["Dashboard already running in Docker on port 8090"],
+      "port": 8090,
+      "autoPort": false
+    }
+  ]
+}
