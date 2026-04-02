@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider** scalping strategy. Supports both LONG and SHORT positions. Scans every 5 seconds on 1-minute candles. Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
+Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider** scalping strategy. Supports both LONG and SHORT positions. Scans every 30 seconds on 15-minute candles (configurable). Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
 
 ## Architecture
 
 ### Docker Services (docker-compose.yml)
 - **db** — MariaDB 11 (persistent volume `dbdata`, healthcheck)
 - **app** — Dashboard web server (port 8090, runs migrations on startup)
-- **bot** — Continuous scan loop (`bot:run`, unified 5-second scan+monitor loop)
+- **bot** — Continuous scan loop (`bot:run`, unified 30-second scan+monitor loop)
 - **scheduler** — Laravel scheduler (`schedule:run` loop)
 - App runs migrations; bot/scheduler wait for app to start first
 
@@ -26,8 +26,8 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 - `getBalance()` delegates to `getAccountData()['availableBalance']` in both implementations
 
 ### Core Flow (Wave Rider — active strategy)
-1. **BotRun** — Unified 5-second loop: for each watchlist symbol, analyze wave then manage position
-2. **WaveScanner::analyze()** — Fetches 1m klines (cached 3s), computes EMA(5/13), RSI(7), ATR(14), classifies wave state
+1. **BotRun** — Unified 30-second loop: for each watchlist symbol, analyze wave then manage position
+2. **WaveScanner::analyze()** — Fetches klines at configurable interval (default 15m, cached 15s), computes EMA(5/13), RSI(7), ATR(14), classifies wave state
 3. **TradingEngine::openPosition()** — Opens LONG or SHORT with ATR-based SL/TP on `new_wave` signal
 4. **Wave break check** — If EMA alignment flips against position, close immediately (CloseReason::WaveBreak)
 5. **TradingEngine::checkPosition()** — Checks SL/TP/trailing/expiry
@@ -36,7 +36,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 
 ### Wave Detection Logic (WaveScanner)
 - **Watchlist-based**: Scans 1-3 pre-selected coins (default: BTCUSDT)
-- **Data**: 1-minute klines (30 candles)
+- **Data**: Configurable kline interval (default 15m), 50 candles (~12.5 hours on 15m)
 - **Indicators**: EMA(5/13), RSI(7), ATR(14)
 - **Direction**: LONG if EMA5 > EMA13, SHORT if EMA5 < EMA13
 - **Fresh cross**: EMA crossed between previous and current candle
@@ -47,7 +47,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
   - `riding` — EMA aligned, no fresh cross → hold
   - `weakening` — EMA gap shrinking 3 consecutive candles → prepare to exit
 - **Signals are ephemeral** — WaveSignal DTOs, never stored in DB
-- **In-memory kline cache** — 3-second TTL prevents duplicate API calls within same loop iteration
+- **In-memory kline cache** — 15-second TTL prevents duplicate API calls within same loop iteration
 - **isWaveIntact()** — Checks EMA alignment still matches position direction (used for DCA validation and wave-break exit)
 
 ### Legacy Strategies (kept for backward compatibility)
@@ -60,7 +60,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 - **Margin check**: Before opening, verifies `availableBalance >= positionSize / leverage`
 - **P&L**: LONG = (current - entry) * qty, SHORT = (entry - current) * qty
 - **Fees**: Deducted from P&L on close — entry fee + exit fee (taker rate on notional). Stored in `Trade.fees` column.
-- **Expiry**: `wave_max_hold_minutes` (default 30 minutes)
+- **Expiry**: `wave_max_hold_minutes` (default 120 minutes)
 
 ### ATR-Based SL/TP (Wave Rider)
 - **SL**: 1.0x ATR from entry price (configurable via `wave_sl_atr_multiplier`)
@@ -86,7 +86,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 
 | File | Purpose |
 |------|---------|
-| `app/Services/WaveScanner.php` | Wave detection: EMA(5/13) cross, RSI(7), ATR(14) on 1m candles |
+| `app/Services/WaveScanner.php` | Wave detection: EMA(5/13) cross, RSI(7), ATR(14) on configurable candles (default 15m) |
 | `app/Services/WaveAnalysis.php` | Ephemeral DTO: wave direction, state, RSI, ATR, price |
 | `app/Services/WaveSignal.php` | Lightweight DTO for openPosition() interface compatibility |
 | `app/Services/TechnicalAnalysis.php` | EMA, RSI, MACD, ATR calculations |
@@ -99,7 +99,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 | `resources/views/dashboard.blade.php` | Single-page dark theme dashboard |
 | `routes/web.php` | Route definitions |
 | `routes/console.php` | Scheduled commands |
-| `app/Console/Commands/BotRun.php` | Unified 5-second scan+monitor loop with graceful shutdown |
+| `app/Console/Commands/BotRun.php` | Unified 30-second scan+monitor loop with graceful shutdown |
 | `bootstrap/app.php` | CSRF exemption for `api/*` routes |
 | `config/crypto.php` | Default config values |
 | `app/Services/TrendScanner.php` | Legacy: trend detection (not actively used) |
@@ -125,19 +125,20 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 ### Wave Settings
 | Key | Default | Description |
 |-----|---------|-------------|
-| `wave_scan_interval` | 5 | Seconds between scan loops |
+| `wave_scan_interval` | 30 | Seconds between scan loops |
+| `wave_kline_interval` | 15m | Kline candle interval (1m, 5m, 15m, 1h, 4h) |
 | `wave_ema_fast` | 5 | Fast EMA period |
 | `wave_ema_slow` | 13 | Slow EMA period |
 | `wave_rsi_period` | 7 | RSI period |
 | `wave_atr_period` | 14 | ATR period |
-| `wave_kline_limit` | 30 | Number of 1m candles to fetch |
+| `wave_kline_limit` | 50 | Number of candles to fetch |
 | `wave_sl_atr_multiplier` | 1.0 | Stop loss distance in ATR multiples |
 | `wave_tp_atr_multiplier` | 1.5 | Take profit distance in ATR multiples |
 | `wave_fee_floor_multiplier` | 2.5 | Fee floor multiplier for minimum TP distance |
-| `wave_max_tp_atr` | 2.5 | Max TP distance in ATR multiples (skip trade if fee floor exceeds this) |
+| `wave_max_tp_atr` | 2.0 | Max TP distance in ATR multiples (skip trade if fee floor exceeds this) |
 | `wave_trailing_activation_atr` | 0.15 | Trailing stop activation in ATR multiples |
 | `wave_trailing_distance_atr` | 0.2 | Trailing stop distance in ATR multiples |
-| `wave_max_hold_minutes` | 30 | Max hold time before forced close |
+| `wave_max_hold_minutes` | 120 | Max hold time before forced close |
 | `wave_dca_trigger_atr` | 0.5 | DCA trigger distance in ATR multiples |
 | `wave_rsi_overbought` | 80 | RSI overbought threshold (reject LONG above) |
 | `wave_rsi_oversold` | 20 | RSI oversold threshold (reject SHORT below) |
@@ -189,7 +190,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 
 ## Performance & Reliability
 
-- **Kline cache**: In-memory 3-second TTL in WaveScanner. Prevents duplicate API calls when `analyze()` and `isWaveIntact()` need klines for the same symbol in the same loop.
+- **Kline cache**: In-memory 15-second TTL in WaveScanner. Prevents duplicate API calls when `analyze()` and `isWaveIntact()` need klines for the same symbol in the same loop.
 - **Price cache**: 10s TTL in database cache. `getPrice()` reads from cache first (1 API weight per miss).
 - **Account data cache**: 10s TTL. `getAccountData()` cached as `binance:account_data`.
 - **Commission rate cache**: 1h TTL per symbol. `getCommissionRate()` cached as `binance:commission:{symbol}`.
@@ -198,7 +199,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 - **LOT_SIZE**: `calculateQuantity()` and `formatQuantity()` use actual stepSize from exchangeInfo.
 - **MariaDB**: Proper concurrent access from all containers. No file locking issues.
 - **Rate limiting**: Tracks `X-MBX-USED-WEIGHT-1M` header from Binance. Warns at 1800/2400. Pauses at 2300/2400.
-- **Bot loop**: Unified 5-second loop — scan + monitor in one pass per symbol. Responsive shutdown via sub-second sleep chunks.
+- **Bot loop**: Unified 30-second loop — scan + monitor in one pass per symbol. Responsive shutdown via sub-second sleep chunks.
 
 ## Fee & Balance Tracking
 

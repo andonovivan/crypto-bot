@@ -95,7 +95,7 @@ class TradingEngine
             // ATR/fee viability check — skip if fee floor pushes TP beyond reachable ATR range
             $atrValue = $signal->atr_value ?? null;
             if ($atrValue > 0 && $strategy === 'wave') {
-                $maxTpAtr = (float) Settings::get('wave_max_tp_atr') ?: 2.5;
+                $maxTpAtr = (float) Settings::get('wave_max_tp_atr') ?: 2.0;
 
                 try {
                     $rates = $this->exchange->getCommissionRate($signal->symbol);

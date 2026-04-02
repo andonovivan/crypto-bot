@@ -36,7 +36,7 @@ class BotRun extends Command
         $this->info('Starting Wave Rider Bot');
         $this->info($isDryRun ? '  Mode: DRY RUN (no real trades)' : '  Mode: LIVE TRADING');
         $this->info("  Watchlist: " . implode(', ', $watchlist));
-        $this->info("  Scan interval: {$scanInterval}s");
+        $this->info("  Interval: " . (Settings::get('wave_kline_interval') ?: '15m') . " candles | Scan: {$scanInterval}s");
         $this->info("  EMA: " . Settings::get('wave_ema_fast') . "/" . Settings::get('wave_ema_slow'));
         $this->info("  RSI: " . Settings::get('wave_rsi_period') . " (OB:" . Settings::get('wave_rsi_overbought') . " OS:" . Settings::get('wave_rsi_oversold') . ")");
         $this->info("  SL: " . Settings::get('wave_sl_atr_multiplier') . "x ATR | TP: " . Settings::get('wave_tp_atr_multiplier') . "x ATR (max " . Settings::get('wave_max_tp_atr') . "x ATR)");

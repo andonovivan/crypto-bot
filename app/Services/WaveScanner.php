@@ -6,8 +6,8 @@ use App\Services\Exchange\ExchangeInterface;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Wave Rider scanner — detects short-term price waves using fast EMAs on 1-minute candles.
- * Scans every few seconds. Signals are ephemeral (not stored in DB).
+ * Wave Rider scanner — detects short-term price waves using fast EMAs on configurable candle interval (default 15m).
+ * Scans every 30 seconds. Signals are ephemeral (not stored in DB).
  */
 class WaveScanner
 {
@@ -17,7 +17,7 @@ class WaveScanner
      */
     private array $klineCache = [];
 
-    private const CACHE_TTL_SECONDS = 3;
+    private const CACHE_TTL_SECONDS = 15;
 
     public function __construct(
         private ExchangeInterface $exchange,
@@ -183,7 +183,8 @@ class WaveScanner
 
         try {
             $limit = (int) Settings::get('wave_kline_limit') ?: 30;
-            $klines = $this->exchange->getKlines($symbol, '1m', $limit);
+            $interval = (string) Settings::get('wave_kline_interval') ?: '15m';
+            $klines = $this->exchange->getKlines($symbol, $interval, $limit);
 
             $this->klineCache[$symbol] = [
                 'data' => $klines,
