@@ -14,10 +14,16 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - App runs migrations; bot/scheduler wait for app to start first
 
 ### Exchange Abstraction
-- `ExchangeInterface` — contract for all exchange operations
+- `ExchangeInterface` — contract for all exchange operations (19 methods)
 - `BinanceExchange` — real Binance Futures API (HMAC-SHA256 signed requests)
 - `DryRunExchange` — wraps real exchange for market data, simulates trades in DB
-- DryRun balance = `starting_balance - allocated_usdt + realized_pnl` (from Position/Trade tables)
+- **Account data**: `getAccountData()` returns wallet balance, available balance, unrealized profit, margin balance, position margin, maintenance margin
+  - BinanceExchange: calls `/fapi/v2/account` (cached 10s)
+  - DryRunExchange: calculates from DB — margin = `position_size_usdt / leverage` (not full notional)
+- **Commission rates**: `getCommissionRate($symbol)` returns maker/taker rates
+  - BinanceExchange: calls `/fapi/v1/commissionRate` (cached 1h per symbol)
+  - DryRunExchange: uses `dry_run_fee_rate` setting (default 0.05%)
+- `getBalance()` delegates to `getAccountData()['availableBalance']` in both implementations
 
 ### Core Flow (Trend Strategy — default)
 1. **TrendScanner::scan()** — Pre-filters tickers by volume/range, fetches 5m klines for top candidates, computes EMA/RSI/MACD, scores signals 0-100
@@ -57,7 +63,9 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 ### Position Management (bidirectional)
 - **LONG entry**: `openLong()` — SL = entry * (1 - sl_pct/100), TP = entry * (1 + tp_pct/100)
 - **SHORT entry**: `openShort()` — SL = entry * (1 + sl_pct/100), TP = entry * (1 - tp_pct/100)
+- **Margin check**: Before opening, verifies `availableBalance >= positionSize / leverage`
 - **P&L**: LONG = (current - entry) * qty, SHORT = (entry - current) * qty
+- **Fees**: Deducted from P&L on close — entry fee + exit fee (taker rate on notional). Stored in `Trade.fees` column.
 - **Trailing stop**: Direction-aware — tracks best price (highest for LONG, lowest for SHORT)
 - **Expiry**: `max_hold_hours` (default 24h for pump, 4h for trend)
 
@@ -70,8 +78,9 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 | `app/Services/PumpScanner.php` | Pump detection + reversal checking |
 | `app/Services/TradingEngine.php` | Position open/close/monitor (LONG + SHORT) |
 | `app/Services/Settings.php` | DB-first settings with config fallback |
-| `app/Services/Exchange/BinanceExchange.php` | Binance Futures API (LONG + SHORT) |
-| `app/Services/Exchange/DryRunExchange.php` | Paper trading simulation |
+| `app/Services/Exchange/ExchangeInterface.php` | Contract: 19 methods including account data & commission rates |
+| `app/Services/Exchange/BinanceExchange.php` | Binance Futures API (LONG + SHORT, account data, commission rates) |
+| `app/Services/Exchange/DryRunExchange.php` | Paper trading simulation (margin-based balance, fee simulation) |
 | `app/Http/Controllers/DashboardController.php` | All API endpoints |
 | `resources/views/dashboard.blade.php` | Single-page dark theme dashboard |
 | `routes/web.php` | Route definitions |
@@ -84,17 +93,18 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `position_size_usdt` | 100 | USDT per trade |
+| `position_size_usdt` | 50 | USDT per trade (notional, leveraged) |
 | `max_positions` | 5 | Max concurrent open positions |
-| `stop_loss_pct` | 5 | Stop loss % above entry |
-| `take_profit_pct` | 10 | Take profit % below entry |
+| `stop_loss_pct` | 8 | Stop loss % (pump strategy) |
+| `take_profit_pct` | 15 | Take profit % (pump strategy) |
 | `max_hold_hours` | 24 | Auto-close after N hours |
-| `leverage` | 10 | Futures leverage |
+| `leverage` | 5 | Futures leverage |
 | `dry_run` | true | Paper trading mode |
 | `starting_balance` | 10000 | Simulated starting balance |
+| `dry_run_fee_rate` | 0.0005 | Dry-run simulated fee rate (0.05%) |
 | `min_price_change_pct` | 15 | Min 24h price change to detect pump |
 | `min_volume_multiplier` | 3 | Min volume vs 7-day average |
-| `reversal_drop_pct` | 3 | Min drop from peak to confirm reversal |
+| `reversal_drop_pct` | 5 | Min drop from peak to confirm reversal |
 | `min_volume_usdt` | 5000000 | Min 24h USDT volume to consider coin |
 | `strategy` | trend | Active strategy: 'pump' or 'trend' |
 | `trend_scan_interval` | 120 | Seconds between trend scans |
@@ -110,7 +120,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 | Method | Path | Action |
 |--------|------|--------|
 | GET | `/` | Dashboard view |
-| GET | `/api/data` | Positions, trades, signals, summary JSON |
+| GET | `/api/data` | Positions, trades, signals, summary (balance/margin/fees/P&L) JSON |
 | GET | `/api/settings` | Current settings |
 | POST | `/api/settings` | Save settings `{settings: {key: value}}` |
 | POST | `/api/scan` | Manual scan `{auto_trade: bool}` |
@@ -143,6 +153,8 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 ## Performance & Reliability
 
 - **Price cache**: 10s TTL in database cache. `getFuturesTickers()` populates cache for all symbols. `getPrices()` and `getPrice()` read from cache first.
+- **Account data cache**: 10s TTL. `getAccountData()` cached as `binance:account_data`. Dashboard refreshes every 10s.
+- **Commission rate cache**: 1h TTL per symbol. `getCommissionRate()` cached as `binance:commission:{symbol}`.
 - **Batch pricing**: `getPrices(array $symbols)` fetches all prices in 1 API call. Used by `checkReversals()`, `monitorPositions()`, and dashboard `data()`.
 - **Tradability filter**: `getExchangeInfo()` cached 1 hour. `isTradable()` checks symbol status is "TRADING". Skips delisted/frozen coins in scan and before opening trades.
 - **LOT_SIZE**: `calculateQuantity()` and `formatQuantity()` use actual stepSize from exchangeInfo instead of hardcoded rounding.
@@ -150,6 +162,15 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **MariaDB**: Proper concurrent access from all containers. No file locking issues.
 - **Rate limiting**: Tracks `X-MBX-USED-WEIGHT-1M` header from Binance. Warns at 1800/2400. Pauses at 2300/2400.
 - **Bot loop**: Scans every 300s, monitors positions every 60s (decoupled intervals).
+
+## Fee & Balance Tracking
+
+- **Trading fees**: Calculated on position close. Both entry and exit use taker rate (market orders). Fee = `price * quantity * takerRate` per side. Deducted from realized P&L.
+- **Fee rates**: Live mode fetches from `/fapi/v1/commissionRate` (default ~0.05% taker). Dry-run uses `dry_run_fee_rate` setting.
+- **Balance model**: `getAccountData()` returns Binance-compatible fields: `walletBalance`, `availableBalance`, `unrealizedProfit`, `marginBalance`, `positionMargin`, `maintMargin`.
+- **DryRun margin**: Uses `position_size_usdt / leverage` (margin), not full notional. With 5x leverage, a $50 position locks $10 margin.
+- **Margin check**: `openPosition()` verifies `availableBalance >= positionSize / leverage` before placing orders.
+- **Historical trades**: Trades created before fee tracking have `fees = 0`. The `total_fees` sum only reflects trades created after the feature was added.
 
 ## Known Issues & Gotchas
 

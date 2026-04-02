@@ -302,15 +302,52 @@ class BinanceExchange implements ExchangeInterface
 
     public function getBalance(): float
     {
-        $response = $this->signedRequest('GET', '/fapi/v2/balance');
+        return $this->getAccountData()['availableBalance'];
+    }
 
-        foreach ($response as $asset) {
-            if ($asset['asset'] === 'USDT') {
-                return (float) $asset['availableBalance'];
-            }
+    public function getAccountData(): array
+    {
+        $cached = Cache::get('binance:account_data');
+        if ($cached) {
+            return $cached;
         }
 
-        return 0.0;
+        $response = $this->signedRequest('GET', '/fapi/v2/account');
+
+        $data = [
+            'walletBalance' => (float) ($response['totalWalletBalance'] ?? 0),
+            'availableBalance' => (float) ($response['availableBalance'] ?? 0),
+            'unrealizedProfit' => (float) ($response['totalUnrealizedProfit'] ?? 0),
+            'marginBalance' => (float) ($response['totalMarginBalance'] ?? 0),
+            'positionMargin' => (float) ($response['totalPositionInitialMargin'] ?? 0),
+            'maintMargin' => (float) ($response['totalMaintMargin'] ?? 0),
+        ];
+
+        Cache::put('binance:account_data', $data, self::PRICE_CACHE_TTL);
+
+        return $data;
+    }
+
+    public function getCommissionRate(string $symbol): array
+    {
+        $cacheKey = "binance:commission:{$symbol}";
+        $cached = Cache::get($cacheKey);
+        if ($cached) {
+            return $cached;
+        }
+
+        $response = $this->signedRequest('GET', '/fapi/v1/commissionRate', [
+            'symbol' => $symbol,
+        ]);
+
+        $rates = [
+            'maker' => (float) ($response['makerCommissionRate'] ?? 0.0002),
+            'taker' => (float) ($response['takerCommissionRate'] ?? 0.0005),
+        ];
+
+        Cache::put($cacheKey, $rates, self::EXCHANGE_INFO_CACHE_TTL);
+
+        return $rates;
     }
 
     public function getOpenPositions(): array

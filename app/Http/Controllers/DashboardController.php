@@ -66,7 +66,9 @@ class DashboardController extends Controller
 
         $unrealizedPnl = $openPositions->sum('unrealized_pnl');
         $totalInvested = $openPositions->sum('position_size_usdt');
+        $totalFees = Trade::sum('fees');
 
+        $accountData = $exchange->getAccountData();
         $strategy = (string) Settings::get('strategy') ?: 'trend';
 
         // Active signals: both pump and trend
@@ -112,6 +114,7 @@ class DashboardController extends Controller
                 'quantity' => $t->quantity,
                 'pnl' => $t->pnl,
                 'pnl_pct' => $t->pnl_pct,
+                'fees' => $t->fees,
                 'close_reason' => $t->close_reason->value,
                 'is_dry_run' => $t->is_dry_run,
                 'created_at' => $t->created_at->timestamp,
@@ -163,10 +166,15 @@ class DashboardController extends Controller
                     'created_at' => $s->created_at->timestamp,
                 ]),
             'summary' => [
-                'balance' => round($exchange->getBalance(), 2),
+                'balance' => round($accountData['walletBalance'], 2),
+                'wallet_balance' => round($accountData['walletBalance'], 2),
+                'available_balance' => round($accountData['availableBalance'], 2),
+                'margin_in_use' => round($accountData['positionMargin'], 2),
+                'margin_balance' => round($accountData['marginBalance'], 2),
                 'combined_pnl' => round($totalPnl + $unrealizedPnl, 4),
                 'realized_pnl' => round($totalPnl, 4),
                 'unrealized_pnl' => round($unrealizedPnl, 4),
+                'total_fees' => round($totalFees, 4),
                 'total_invested' => round($totalInvested, 2),
                 'open_positions' => $openPositions->count(),
                 'total_trades' => $totalTrades,

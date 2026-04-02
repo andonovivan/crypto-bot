@@ -100,32 +100,36 @@
 <div id="tab-dashboard" class="tab-pane active">
   <div class="cards">
     <div class="card">
-      <div class="card-label">Balance</div>
+      <div class="card-label">Wallet Balance</div>
       <div class="card-value neutral" id="balance">-</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Available Balance</div>
+      <div class="card-value neutral" id="available-balance">-</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Margin in Use</div>
+      <div class="card-value neutral" id="margin-in-use">-</div>
     </div>
     <div class="card">
       <div class="card-label">Combined P&amp;L</div>
       <div class="card-value" id="combined">-</div>
     </div>
     <div class="card">
-      <div class="card-label">Unrealized P&amp;L</div>
-      <div class="card-value" id="unrealized">-</div>
-    </div>
-    <div class="card">
       <div class="card-label">Realized P&amp;L</div>
       <div class="card-value" id="realized">-</div>
     </div>
     <div class="card">
+      <div class="card-label">Unrealized P&amp;L</div>
+      <div class="card-value" id="unrealized">-</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Total Fees</div>
+      <div class="card-value negative" id="total-fees">-</div>
+    </div>
+    <div class="card">
       <div class="card-label">Win Rate</div>
       <div class="card-value" id="winrate">-</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Open Positions</div>
-      <div class="card-value neutral" id="positions-count">-</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Total Invested</div>
-      <div class="card-value neutral" id="invested">-</div>
     </div>
   </div>
 
@@ -209,11 +213,12 @@
         <th onclick="sortTable('history', 'quantity')">Qty <span class="sort-arrow" id="hist-sort-quantity"></span></th>
         <th onclick="sortTable('history', 'pnl')">P&amp;L <span class="sort-arrow" id="hist-sort-pnl"></span></th>
         <th onclick="sortTable('history', 'pnl_pct')">P&amp;L % <span class="sort-arrow" id="hist-sort-pnl_pct"></span></th>
+        <th onclick="sortTable('history', 'fees')">Fees <span class="sort-arrow" id="hist-sort-fees"></span></th>
         <th>Reason</th>
         <th onclick="sortTable('history', 'created_at')">Closed <span class="sort-arrow" id="hist-sort-created_at"></span></th>
       </tr>
     </thead>
-    <tbody id="history-body"><tr><td colspan="9" class="empty">Loading...</td></tr></tbody>
+    <tbody id="history-body"><tr><td colspan="10" class="empty">Loading...</td></tr></tbody>
   </table>
   <div class="pagination" id="history-pagination"></div>
 </div>
@@ -388,22 +393,23 @@ function render(data) {
   document.getElementById('updated').textContent = new Date(data.ts * 1000).toLocaleTimeString();
 
   // Cards
-  document.getElementById('balance').textContent = '$' + s.balance.toFixed(2);
+  document.getElementById('balance').textContent = '$' + s.wallet_balance.toFixed(2);
+  document.getElementById('available-balance').textContent = '$' + s.available_balance.toFixed(2);
+  document.getElementById('margin-in-use').textContent = '$' + s.margin_in_use.toFixed(2);
 
   document.getElementById('combined').className = 'card-value ' + pnlClass(s.combined_pnl);
   document.getElementById('combined').textContent = pnlStr(s.combined_pnl);
 
-  document.getElementById('unrealized').className = 'card-value ' + pnlClass(s.unrealized_pnl);
-  document.getElementById('unrealized').textContent = pnlStr(s.unrealized_pnl);
-
   document.getElementById('realized').className = 'card-value ' + pnlClass(s.realized_pnl);
   document.getElementById('realized').textContent = pnlStr(s.realized_pnl);
 
+  document.getElementById('unrealized').className = 'card-value ' + pnlClass(s.unrealized_pnl);
+  document.getElementById('unrealized').textContent = pnlStr(s.unrealized_pnl);
+
+  document.getElementById('total-fees').textContent = '-$' + Math.abs(s.total_fees).toFixed(4);
+
   document.getElementById('winrate').className = 'card-value ' + (s.win_rate >= 50 ? 'positive' : s.win_rate > 0 ? 'negative' : 'neutral');
   document.getElementById('winrate').textContent = s.win_rate + '% (' + s.winning_trades + '/' + s.total_trades + ')';
-
-  document.getElementById('positions-count').textContent = s.open_positions;
-  document.getElementById('invested').textContent = '$' + s.total_invested.toFixed(2);
 
   // Positions table
   const posBody = document.getElementById('positions-body');
@@ -478,7 +484,7 @@ function render(data) {
   // History table
   const histBody = document.getElementById('history-body');
   if (data.recent_trades.length === 0) {
-    histBody.innerHTML = '<tr><td colspan="9" class="empty">No closed trades yet</td></tr>';
+    histBody.innerHTML = '<tr><td colspan="10" class="empty">No closed trades yet</td></tr>';
   } else {
     const sorted = sortData(data.recent_trades, sortState.history.key, sortState.history.asc);
     histBody.innerHTML = sorted.map(t => `<tr>
@@ -489,6 +495,7 @@ function render(data) {
       <td>${t.quantity.toFixed(4)}</td>
       <td class="${pnlClass(t.pnl)}">${pnlStr(t.pnl)}</td>
       <td class="${pnlClass(t.pnl_pct)}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
+      <td class="negative">$${(t.fees || 0).toFixed(4)}</td>
       <td>${reasonBadge(t.close_reason)}</td>
       <td>${timeAgo(t.created_at)}</td>
     </tr>`).join('');

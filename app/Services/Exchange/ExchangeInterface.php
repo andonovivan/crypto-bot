@@ -81,9 +81,23 @@ interface ExchangeInterface
     public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity, string $side = 'SHORT'): array;
 
     /**
-     * Get account balance in USDT.
+     * Get account balance in USDT (available balance).
      */
     public function getBalance(): float;
+
+    /**
+     * Get full account data matching Binance Futures account structure.
+     *
+     * @return array{walletBalance: float, availableBalance: float, unrealizedProfit: float, marginBalance: float, positionMargin: float, maintMargin: float}
+     */
+    public function getAccountData(): array;
+
+    /**
+     * Get commission rates for a symbol.
+     *
+     * @return array{maker: float, taker: float}
+     */
+    public function getCommissionRate(string $symbol): array;
 
     /**
      * Get open positions from the exchange.

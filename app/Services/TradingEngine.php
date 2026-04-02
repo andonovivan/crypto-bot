@@ -50,6 +50,18 @@ class TradingEngine
             return null;
         }
 
+        // Check available margin before opening
+        $requiredMargin = $positionSizeUsdt / max($leverage, 1);
+        $accountData = $this->exchange->getAccountData();
+        if ($accountData['availableBalance'] < $requiredMargin) {
+            Log::warning('Insufficient available balance for new position', [
+                'symbol' => $signal->symbol,
+                'required_margin' => $requiredMargin,
+                'available_balance' => $accountData['availableBalance'],
+            ]);
+            return null;
+        }
+
         // Verify the symbol is still tradable
         if (! $this->exchange->isTradable($signal->symbol)) {
             Log::warning('Symbol not tradable, skipping', ['symbol' => $signal->symbol]);
@@ -344,8 +356,16 @@ class TradingEngine
 
         $actualExitPrice = $order['price'] > 0 ? $order['price'] : $exitPrice;
 
-        $pnl = $this->calculatePnl($position, $actualExitPrice);
+        $rawPnl = $this->calculatePnl($position, $actualExitPrice);
         $pnlPct = $this->calculatePnlPct($position, $actualExitPrice);
+
+        // Calculate trading fees (entry + exit, both taker since market orders)
+        $rates = $this->exchange->getCommissionRate($position->symbol);
+        $takerRate = $rates['taker'];
+        $entryFee = $position->entry_price * $position->quantity * $takerRate;
+        $exitFee = $actualExitPrice * $position->quantity * $takerRate;
+        $totalFees = round($entryFee + $exitFee, 4);
+        $pnl = round($rawPnl - $totalFees, 4);
 
         $status = match ($reason) {
             CloseReason::StopLoss => PositionStatus::StoppedOut,
@@ -369,6 +389,7 @@ class TradingEngine
             'quantity' => $position->quantity,
             'pnl' => $pnl,
             'pnl_pct' => round($pnlPct, 4),
+            'fees' => $totalFees,
             'close_reason' => $reason,
             'exchange_order_id' => $order['orderId'],
             'is_dry_run' => $position->is_dry_run,
@@ -381,6 +402,7 @@ class TradingEngine
             'entry' => $position->entry_price,
             'exit' => $actualExitPrice,
             'pnl' => $pnl,
+            'fees' => $totalFees,
             'pnl_pct' => round($pnlPct, 2) . '%',
         ]);
 

@@ -39,6 +39,7 @@ return [
         'leverage' => (int) env('TRADE_LEVERAGE', 5),
         'dry_run' => filter_var(env('DRY_RUN', true), FILTER_VALIDATE_BOOLEAN),
         'starting_balance' => (float) env('TRADE_STARTING_BALANCE', 10000),
+        'dry_run_fee_rate' => (float) env('DRY_RUN_FEE_RATE', 0.0005),
     ],
 
     /*

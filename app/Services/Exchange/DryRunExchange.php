@@ -154,15 +154,50 @@ class DryRunExchange implements ExchangeInterface
 
     public function getBalance(): float
     {
+        return $this->getAccountData()['availableBalance'];
+    }
+
+    public function getAccountData(): array
+    {
         $startingBalance = (float) Settings::get('starting_balance');
-
-        $allocatedUsdt = Position::where('status', PositionStatus::Open)
-            ->where('is_dry_run', true)
-            ->sum('position_size_usdt');
-
         $realizedPnl = \App\Models\Trade::where('is_dry_run', true)->sum('pnl');
 
-        return $startingBalance - $allocatedUsdt + $realizedPnl;
+        $walletBalance = $startingBalance + $realizedPnl;
+
+        // Margin = notional / leverage (not the full notional)
+        $openPositions = Position::where('status', PositionStatus::Open)
+            ->where('is_dry_run', true)
+            ->get(['position_size_usdt', 'leverage', 'unrealized_pnl']);
+
+        $positionMargin = 0.0;
+        $unrealizedProfit = 0.0;
+        foreach ($openPositions as $pos) {
+            $leverage = $pos->leverage > 0 ? $pos->leverage : 1;
+            $positionMargin += $pos->position_size_usdt / $leverage;
+            $unrealizedProfit += $pos->unrealized_pnl ?? 0;
+        }
+
+        $marginBalance = $walletBalance + $unrealizedProfit;
+        $availableBalance = $walletBalance - $positionMargin + $unrealizedProfit;
+
+        return [
+            'walletBalance' => round($walletBalance, 4),
+            'availableBalance' => round($availableBalance, 4),
+            'unrealizedProfit' => round($unrealizedProfit, 4),
+            'marginBalance' => round($marginBalance, 4),
+            'positionMargin' => round($positionMargin, 4),
+            'maintMargin' => round($positionMargin * 0.4, 4),
+        ];
+    }
+
+    public function getCommissionRate(string $symbol): array
+    {
+        $rate = (float) Settings::get('dry_run_fee_rate');
+
+        return [
+            'maker' => $rate,
+            'taker' => $rate,
+        ];
     }
 
     public function getOpenPositions(): array
