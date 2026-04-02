@@ -65,6 +65,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 ### ATR-Based SL/TP (Wave Rider)
 - **SL**: 1.0x ATR from entry price (configurable via `wave_sl_atr_multiplier`)
 - **TP**: 0.5x ATR from entry (configurable via `wave_tp_atr_multiplier`) — quick profit capture
+- **Fee-aware TP floor**: TP distance is guaranteed to cover round-trip fees with 50% margin. Min TP = `entryPrice × 2 × takerRate × 1.5`. Fetches actual commission rate per symbol (cached 1h). Logged when adjustment occurs.
 - **Fallback**: If ATR < 0.1% of price, uses 1% SL / 0.5% TP
 - **Trailing stop**: Activates at 0.3x ATR profit, trails at 0.3x ATR distance (configurable)
 - **No breakeven** — trailing at 0.3x ATR activates before old breakeven would
@@ -153,7 +154,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 | Method | Path | Action |
 |--------|------|--------|
 | GET | `/` | Dashboard view |
-| GET | `/api/data` | Positions, trades, wave status, summary JSON |
+| GET | `/api/data` | Positions (with estimated fees & net P&L), trades, wave status, summary JSON |
 | GET | `/api/settings` | Current settings |
 | POST | `/api/settings` | Save settings `{settings: {key: value}}` |
 | POST | `/api/scan` | Manual wave scan `{auto_trade: bool}` |
@@ -199,10 +200,21 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures using the **Wave Rider
 ## Fee & Balance Tracking
 
 - **Trading fees**: Calculated on position close. Both entry and exit use taker rate (market orders). Fee = `price * quantity * takerRate` per side. Deducted from realized P&L.
+- **Estimated fees for open positions**: Dashboard computes `estimated_fees` (entry + projected exit at current price) and `net_pnl` (unrealized P&L minus estimated fees) per position. Uses `getCommissionRate()` (cached 1h per symbol) with fallback to `dry_run_fee_rate`.
+- **Fee-aware TP floor**: `calculateSlTp()` ensures TP distance always exceeds round-trip fees by 50% margin. Prevents take-profit exits that lose money after fees.
 - **Fee rates**: Live mode fetches from `/fapi/v1/commissionRate` (default ~0.05% taker). Dry-run uses `dry_run_fee_rate` setting.
 - **Balance model**: `getAccountData()` returns Binance-compatible fields: `walletBalance`, `availableBalance`, `unrealizedProfit`, `marginBalance`, `positionMargin`, `maintMargin`.
 - **DryRun margin**: Uses `position_size_usdt / leverage` (margin), not full notional. With 5x leverage, a $50 position locks $10 margin.
 - **Margin check**: `openPosition()` verifies `availableBalance >= positionSize / leverage` before placing orders.
+
+## Dashboard
+
+- **Cards**: Wallet balance, available balance, margin in use, combined/realized/unrealized P&L, total fees, win rate
+- **Open Positions table**: Symbol, side, entry/current price, invested, value, P&L, P&L%, Net (estimated fees + net P&L), SL, TP, DCA layers, hold time with expiry countdown, close button
+- **Wave Status tab**: Per-symbol wave direction, state (new_wave/riding/weakening), RSI, ATR, EMA gap, price
+- **Trade History table**: Symbol, side, entry/exit price, qty, gross P&L (before fees), P&L%, fees, net P&L (after fees), close reason, time
+- **Settings tab**: All runtime-configurable settings with strategy dropdown (Wave/Trend/Pump)
+- **Formatting**: Thousand separators on all dollar amounts ($66,591.10), subscript notation for micro-prices, inline color styling for P&L values
 
 ## Known Issues & Gotchas
 
