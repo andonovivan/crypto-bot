@@ -23,7 +23,6 @@ class TradingEngine
     {
         $maxPositions = Settings::get('max_positions');
         $leverage = (int) Settings::get('leverage');
-        $positionSizeUsdt = (float) Settings::get('position_size_usdt');
         $isDryRun = (bool) Settings::get('dry_run');
 
         // Determine expiry based on strategy
@@ -54,14 +53,22 @@ class TradingEngine
             return null;
         }
 
+        // Calculate position size dynamically from wallet balance
+        // margin = walletBalance * (position_size_pct / 100)
+        // notional = margin * leverage
+        $accountData = $this->exchange->getAccountData();
+        $positionSizePct = (float) Settings::get('position_size_pct') ?: 1.0;
+        $margin = $accountData['walletBalance'] * ($positionSizePct / 100);
+        $positionSizeUsdt = round($margin * max($leverage, 1), 2);
+
         // Check available margin before opening
         $requiredMargin = $positionSizeUsdt / max($leverage, 1);
-        $accountData = $this->exchange->getAccountData();
         if ($accountData['availableBalance'] < $requiredMargin) {
             Log::warning('Insufficient available balance for new position', [
                 'symbol' => $signal->symbol,
                 'required_margin' => $requiredMargin,
                 'available_balance' => $accountData['availableBalance'],
+                'position_size_usdt' => $positionSizeUsdt,
             ]);
             return null;
         }
@@ -312,8 +319,13 @@ class TradingEngine
     {
         $maxLayers = (int) Settings::get('dca_max_layers');
         $maxPositionUsdt = (float) Settings::get('max_position_usdt');
-        $positionSizeUsdt = (float) Settings::get('position_size_usdt');
         $atr = $position->atr_value;
+
+        // Use dynamic sizing: base DCA layer on 1% of current balance × leverage
+        $leverage = $position->leverage > 0 ? $position->leverage : 1;
+        $accountData = $this->exchange->getAccountData();
+        $positionSizePct = (float) Settings::get('position_size_pct') ?: 1.0;
+        $positionSizeUsdt = round($accountData['walletBalance'] * ($positionSizePct / 100) * $leverage, 2);
 
         // Skip if no ATR (can't calculate DCA trigger)
         if ($atr <= 0) {
@@ -357,8 +369,6 @@ class TradingEngine
             return;
         }
 
-        // Check margin
-        $leverage = $position->leverage > 0 ? $position->leverage : 1;
         // Layer sizing: 75% for layer 2, 50% for layer 3+
         $layerMultiplier = $position->layer_count === 1 ? 0.75 : 0.50;
         $layerSizeUsdt = $positionSizeUsdt * $layerMultiplier;
@@ -371,8 +381,8 @@ class TradingEngine
             return;
         }
 
+        // Check margin
         $requiredMargin = $layerSizeUsdt / $leverage;
-        $accountData = $this->exchange->getAccountData();
         if ($accountData['availableBalance'] < $requiredMargin) {
             return;
         }

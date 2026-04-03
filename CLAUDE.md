@@ -25,18 +25,18 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
   - DryRunExchange: uses `dry_run_fee_rate` setting (default 0.05%)
 - `getBalance()` delegates to `getAccountData()['availableBalance']` in both implementations
 
-### Core Flow (Wave Rider — active strategy)
+### Core Flow (Wave Rider)
 1. **BotRun** — Unified 30-second loop: for each watchlist symbol, analyze wave then manage position
-2. **WaveScanner::analyze()** — Fetches klines at configurable interval (default 15m, cached 15s), computes EMA(5/13), RSI(7), ATR(14), classifies wave state
-3. **TradingEngine::openPosition()** — Opens LONG or SHORT with ATR-based SL/TP on `new_wave` signal
-4. **Wave break check** — If EMA alignment flips against position, close immediately (CloseReason::WaveBreak)
+2. **WaveScanner::analyze()** — Fetches klines at strategy-specific interval (wave: 15m, staircase: 1h, cached 15s), computes EMA(5/13), RSI(7), ATR(14), classifies wave state
+3. **TradingEngine::openPosition()** — Calculates position size dynamically (% of wallet balance × leverage), opens LONG or SHORT with ATR-based SL/TP on `new_wave` signal
+4. **Wave break check** — If EMA alignment flips against position, close immediately (CloseReason::WaveBreak). Disabled for staircase strategy.
 5. **TradingEngine::checkPosition()** — Checks SL/TP/trailing/expiry
-6. **TradingEngine::checkDCA()** — Adds layers when price moves 0.5x ATR against entry (if wave intact)
+6. **TradingEngine::checkDCA()** — Adds layers when price moves 0.5x ATR against entry (if wave intact). Disabled for staircase.
 7. **TradingEngine::closePosition()** — Closes position via closeLong()/closeShort(), records Trade with fees
 
 ### Wave Detection Logic (WaveScanner)
 - **Watchlist-based**: Scans 1-3 pre-selected coins (default: BTCUSDT)
-- **Data**: Configurable kline interval (default 15m), 50 candles (~12.5 hours on 15m)
+- **Data**: Strategy-specific kline interval (wave: `wave_kline_interval` default 15m, staircase: `staircase_kline_interval` default 1h), 50 candles
 - **Indicators**: EMA(5/13), RSI(7), ATR(14)
 - **Direction**: LONG if EMA5 > EMA13, SHORT if EMA5 < EMA13
 - **Fresh cross**: EMA crossed between previous and current candle
@@ -65,13 +65,20 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **Max hold**: 1440 minutes (24h) by default
 - **Origin**: Reverse-engineered from OKX position history (149 trades, 89.9% win rate, ~1.68% TP target)
 
+### Dynamic Position Sizing
+- **Percentage-based**: Position size calculated dynamically at trade time from wallet balance
+- **Formula**: `margin = walletBalance × (position_size_pct / 100)`, `notional = margin × leverage`
+- **Example**: $10,000 balance, 1% setting, 10x leverage → $100 margin → $1,000 notional position
+- **Scales automatically**: As balance grows/shrinks from P&L, position sizes adjust proportionally
+- **DCA layers**: Also use dynamic sizing — recalculated from current balance at DCA time
+
 ### Position Management (bidirectional)
-- **LONG entry**: `openLong()` — ATR-based SL/TP, fallback to fixed %
-- **SHORT entry**: `openShort()` — ATR-based SL/TP, fallback to fixed %
-- **Margin check**: Before opening, verifies `availableBalance >= positionSize / leverage`
+- **LONG entry**: `openLong()` — ATR-based SL/TP (wave), fixed % SL/TP (staircase)
+- **SHORT entry**: `openShort()` — ATR-based SL/TP (wave), fixed % SL/TP (staircase)
+- **Margin check**: Before opening, verifies `availableBalance >= notional / leverage`
 - **P&L**: LONG = (current - entry) * qty, SHORT = (entry - current) * qty
 - **Fees**: Deducted from P&L on close — entry fee + exit fee (taker rate on notional). Stored in `Trade.fees` column.
-- **Expiry**: `wave_max_hold_minutes` (default 120 minutes)
+- **Expiry**: `wave_max_hold_minutes` (default 120 min) or `staircase_max_hold_minutes` (default 1440 min)
 
 ### ATR-Based SL/TP (Wave Rider)
 - **SL**: 1.0x ATR from entry price (configurable via `wave_sl_atr_multiplier`)
@@ -86,7 +93,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **Purpose**: Build positions when price moves against entry but wave still intact
 - **Layers**: Up to 3 (configurable via `dca_max_layers`)
 - **Trigger**: Price moves >= 0.5x ATR * layer_count against average entry (configurable via `wave_dca_trigger_atr`)
-- **Layer sizing**: Layer 1 = 100%, Layer 2 = 75%, Layer 3 = 50% of base `position_size_usdt`
+- **Layer sizing**: Layer 1 = 100%, Layer 2 = 75%, Layer 3 = 50% of dynamically calculated base size
 - **Validation**: Before each DCA layer, `WaveScanner::isWaveIntact()` checks EMA5/13 still agrees
 - **Cap**: Total position cannot exceed `max_position_usdt` (default 150 USDT)
 - **On DCA**: Recalculates weighted average entry, updates quantity, recomputes SL/TP from new average
@@ -97,7 +104,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 
 | File | Purpose |
 |------|---------|
-| `app/Services/WaveScanner.php` | Wave detection: EMA(5/13) cross, RSI(7), ATR(14) on configurable candles (default 15m) |
+| `app/Services/WaveScanner.php` | Wave detection: EMA(5/13) cross, RSI(7), ATR(14) on strategy-specific candles (wave: 15m, staircase: 1h) |
 | `app/Services/WaveAnalysis.php` | Ephemeral DTO: wave direction, state, RSI, ATR, price |
 | `app/Services/WaveSignal.php` | Lightweight DTO for openPosition() interface compatibility |
 | `app/Services/TechnicalAnalysis.php` | EMA, RSI, MACD, ATR calculations |
@@ -119,9 +126,9 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 ### Core Settings
 | Key | Default | Description |
 |-----|---------|-------------|
-| `position_size_usdt` | 50 | USDT per trade (notional, leveraged) |
+| `position_size_pct` | 1.0 | Position size as % of wallet balance (margin before leverage) |
 | `max_positions` | 2 | Max concurrent open positions |
-| `leverage` | 5 | Futures leverage |
+| `leverage` | 5 | Futures leverage (multiplied with margin to get notional) |
 | `dry_run` | true | Paper trading mode |
 | `starting_balance` | 10000 | Simulated starting balance |
 | `dry_run_fee_rate` | 0.0005 | Dry-run simulated fee rate (0.05%) |
@@ -215,15 +222,15 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **Fee-aware TP floor**: `calculateSlTp()` ensures TP distance always exceeds round-trip fees × configurable multiplier (default 2.5×). Min TP = `entryPrice × 2 × takerRate × feeFloorMultiplier`. Prevents take-profit exits that lose money after fees.
 - **Fee rates**: Live mode fetches from `/fapi/v1/commissionRate` (default ~0.05% taker). Dry-run uses `dry_run_fee_rate` setting.
 - **Balance model**: `getAccountData()` returns Binance-compatible fields: `walletBalance`, `availableBalance`, `unrealizedProfit`, `marginBalance`, `positionMargin`, `maintMargin`.
-- **DryRun margin**: Uses `position_size_usdt / leverage` (margin), not full notional. With 5x leverage, a $50 position locks $10 margin.
-- **Margin check**: `openPosition()` verifies `availableBalance >= positionSize / leverage` before placing orders.
+- **DryRun margin**: Uses `position_size_usdt / leverage` (margin), not full notional. With 10x leverage, a $1,000 notional position locks $100 margin.
+- **Dynamic sizing**: `openPosition()` calculates notional from `walletBalance × (position_size_pct / 100) × leverage` at trade time. Verifies `availableBalance >= margin` before placing orders.
 
 ## Dashboard
 
 - **Cards**: Wallet balance, available balance, margin in use, combined/realized/unrealized P&L, total fees, win rate
-- **Open Positions table**: Symbol, side, entry/current price, invested, value, P&L, P&L%, Net (estimated fees + net P&L), SL, TP, DCA layers, hold time with expiry countdown, close button
-- **Wave Status tab**: Per-symbol wave direction, state (new_wave/riding/weakening), RSI, ATR, EMA gap, price
-- **Trade History table**: Symbol, side, entry/exit price, qty, gross P&L (before fees), P&L%, fees, net P&L (after fees), close reason, time
+- **Open Positions table**: Symbol (with side/leverage/DRY badge), entry/current price, unrealized P&L, P&L%, size (notional USDT), net P&L (with fees), SL/TP, layers, opened time, close button
+- **Wave Status tab**: Per-symbol wave direction, state (new_wave/riding/weakening), RSI, ATR, EMA gap, price. Hidden when wave strategy is not selected.
+- **Trade History table**: Symbol (with side/leverage/DRY badge), entry/exit price, P&L, P&L%, size, fees, net P&L, close reason, opened/closed time
 - **Settings tab**: All runtime-configurable settings with strategy dropdown (Wave/Staircase)
 - **Formatting**: Thousand separators on all dollar amounts ($66,591.10), subscript notation for micro-prices, inline color styling for P&L values
 

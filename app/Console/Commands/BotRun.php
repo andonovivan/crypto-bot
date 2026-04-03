@@ -24,6 +24,7 @@ class BotRun extends Command
     {
         $isDryRun = config('crypto.trading.dry_run');
         $strategy = (string) Settings::get('strategy') ?: 'wave';
+        $leverage = (int) Settings::get('leverage') ?: 10;
         $scanInterval = (int) ($this->option('interval')
             ?: ($strategy === 'staircase'
                 ? Settings::get('staircase_scan_interval')
@@ -45,7 +46,7 @@ class BotRun extends Command
             $this->info("  Interval: " . (Settings::get('staircase_kline_interval') ?: '1h') . " candles | Scan: {$scanInterval}s");
             $this->info("  EMA: " . Settings::get('wave_ema_fast') . "/" . Settings::get('wave_ema_slow') . " (trend direction)");
             $this->info("  TP: " . Settings::get('staircase_take_profit_pct') . "% | SL: " . Settings::get('staircase_stop_loss_pct') . "%");
-            $this->info("  Max hold: " . Settings::get('staircase_max_hold_minutes') . " min | Position: $" . Settings::get('position_size_usdt'));
+            $this->info("  Max hold: " . Settings::get('staircase_max_hold_minutes') . " min | Position: " . (Settings::get('position_size_pct') ?: 1) . "% of balance × {$leverage}x");
             $this->info("  DCA: disabled | Trailing: disabled | Wave break: disabled");
             $this->info("  RSI filter: " . (Settings::get('staircase_rsi_filter') ? 'enabled' : 'disabled'));
             $this->info("  Cooldown: " . (Settings::get('staircase_cooldown_minutes') ?: 30) . " min after close");
@@ -59,7 +60,7 @@ class BotRun extends Command
             $this->info("  SL: " . Settings::get('wave_sl_atr_multiplier') . "x ATR | TP: " . Settings::get('wave_tp_atr_multiplier') . "x ATR (max " . Settings::get('wave_max_tp_atr') . "x ATR)");
             $this->info("  Trailing: activate " . Settings::get('wave_trailing_activation_atr') . "x ATR, trail " . Settings::get('wave_trailing_distance_atr') . "x ATR");
             $this->info("  DCA: " . (Settings::get('dca_enabled') ? 'enabled (max ' . Settings::get('dca_max_layers') . ' layers, trigger ' . Settings::get('wave_dca_trigger_atr') . 'x ATR)' : 'disabled'));
-            $this->info("  Max hold: " . Settings::get('wave_max_hold_minutes') . " min | Position: $" . Settings::get('position_size_usdt'));
+            $this->info("  Max hold: " . Settings::get('wave_max_hold_minutes') . " min | Position: " . (Settings::get('position_size_pct') ?: 1) . "% of balance × {$leverage}x");
         }
         $this->newLine();
 

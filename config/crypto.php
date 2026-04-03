@@ -28,7 +28,8 @@ return [
     |--------------------------------------------------------------------------
     */
     'trading' => [
-        'position_size_usdt' => (float) env('TRADE_POSITION_SIZE_USDT', 50),
+        'position_size_pct' => (float) env('TRADE_POSITION_SIZE_PCT', 1.0),
+        'position_size_usdt' => (float) env('TRADE_POSITION_SIZE_USDT', 50), // legacy, unused — kept for reference
         'max_positions' => (int) env('TRADE_MAX_POSITIONS', 2),
         'leverage' => (int) env('TRADE_LEVERAGE', 5),
         'dry_run' => filter_var(env('DRY_RUN', true), FILTER_VALIDATE_BOOLEAN),

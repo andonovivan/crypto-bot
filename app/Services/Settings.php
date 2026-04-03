@@ -13,7 +13,8 @@ class Settings
      * All configurable keys with their config path, type, and label.
      */
     public const KEYS = [
-        'position_size_usdt' => ['config' => 'crypto.trading.position_size_usdt', 'type' => 'float', 'label' => 'Position Size (USDT)'],
+        'position_size_pct' => ['config' => 'crypto.trading.position_size_pct', 'type' => 'float', 'label' => 'Position Size (% of balance)'],
+        'position_size_usdt' => ['config' => 'crypto.trading.position_size_usdt', 'type' => 'float', 'label' => 'Position Size (USDT) — legacy, unused'],
         'max_positions' => ['config' => 'crypto.trading.max_positions', 'type' => 'int', 'label' => 'Max Positions'],
         'leverage' => ['config' => 'crypto.trading.leverage', 'type' => 'int', 'label' => 'Leverage'],
         'dry_run' => ['config' => 'crypto.trading.dry_run', 'type' => 'bool', 'label' => 'Dry Run Mode'],
