@@ -212,8 +212,11 @@ class TradingEngine
             'unrealized_pnl' => $unrealizedPnl,
         ]);
 
-        // Breakeven protection: move SL to entry price once fees are covered
-        if (! $position->breakeven_activated) {
+        // Read strategy once for breakeven and trailing stop checks
+        $strategy = (string) Settings::get('strategy') ?: 'wave';
+
+        // Breakeven protection: move SL to entry price once fees are covered (wave only)
+        if ($strategy !== 'staircase' && ! $position->breakeven_activated) {
             try {
                 $rates = $this->exchange->getCommissionRate($position->symbol);
                 $takerRate = $rates['taker'];
@@ -253,7 +256,6 @@ class TradingEngine
         }
 
         // ATR-based trailing stop (Wave only — Staircase uses fixed TP, no trailing)
-        $strategy = (string) Settings::get('strategy') ?: 'wave';
         $atr = $position->atr_value;
         if ($strategy !== 'staircase' && $atr > 0) {
             $activationAtr = (float) Settings::get('wave_trailing_activation_atr') ?: 0.3;

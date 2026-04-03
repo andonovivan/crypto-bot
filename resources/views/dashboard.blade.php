@@ -441,7 +441,7 @@ function render(data) {
       <td style="color:${pnlColor(p.pnl_pct)};font-weight:bold">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</td>
       <td>${fmtNum(p.position_size_usdt, 2)} USDT</td>
       <td style="color:${pnlColor(p.net_pnl)};font-weight:bold">${pnlStr(p.net_pnl)}<br><span style="color:#8b949e;font-weight:normal;font-size:0.75em">-$${fmtNum(p.estimated_fees || 0, 4)} fees</span></td>
-      <td><span style="color:#f85149">${formatPrice(p.stop_loss_price)}</span> / <span style="color:#3fb950">${formatPrice(p.take_profit_price)}</span></td>
+      <td>${formatPrice(p.stop_loss_price)} / ${formatPrice(p.take_profit_price)}</td>
       <td>${p.layer_count || 1}${p.layer_count > 1 ? ' <span style="color:#d29922;font-size:0.75em">DCA</span>' : ''}</td>
       <td style="font-size:0.85em">${formatTimestamp(p.opened_at)}</td>
       <td>${holdTime(p.opened_at, p.expires_at)}</td>

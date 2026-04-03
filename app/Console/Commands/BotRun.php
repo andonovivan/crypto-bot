@@ -47,7 +47,7 @@ class BotRun extends Command
             $this->info("  EMA: " . Settings::get('wave_ema_fast') . "/" . Settings::get('wave_ema_slow') . " (trend direction)");
             $this->info("  TP: " . Settings::get('staircase_take_profit_pct') . "% | SL: " . Settings::get('staircase_stop_loss_pct') . "%");
             $this->info("  Max hold: " . Settings::get('staircase_max_hold_minutes') . " min | Position: " . (Settings::get('position_size_pct') ?: 1) . "% of balance × {$leverage}x");
-            $this->info("  DCA: disabled | Trailing: disabled | Wave break: disabled");
+            $this->info("  DCA: disabled | Trailing: disabled | Wave break: disabled | Breakeven: disabled");
             $this->info("  RSI filter: " . (Settings::get('staircase_rsi_filter') ? 'enabled' : 'disabled'));
             $this->info("  Cooldown: " . (Settings::get('staircase_cooldown_minutes') ?: 30) . " min after close");
         } else {

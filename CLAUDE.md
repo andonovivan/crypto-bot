@@ -56,9 +56,9 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **TP**: Fixed percentage of entry price (default 1.68%) — not ATR-based
 - **SL**: Fixed percentage of entry price (default 5.0%) — hard stop to prevent catastrophic losses
 - **No DCA**: DCA is disabled — avoids "averaging down" into losing positions
-- **No trailing stop**: Fixed TP is the sole exit mechanism (plus breakeven protection)
+- **No trailing stop**: Fixed TP/SL are the sole exit mechanisms
 - **RSI filter**: Off by default (configurable via `staircase_rsi_filter`)
-- **Breakeven protection**: Still active — moves SL to entry once fees are covered
+- **No breakeven protection**: Disabled for staircase — positions rely on fixed 5% SL and 1.68% TP. Breakeven at 0.1% (fee cover distance) was killing positions before they could reach the 1.68% TP target.
 - **No wave break exit**: Wave break is disabled for staircase — positions held until TP/SL/expiry. This matches the OKX strategy where positions were held for hours, not closed on EMA wobbles.
 - **Cooldown**: After closing a position, waits `staircase_cooldown_minutes` (default 30) before re-entering the same symbol. Prevents churn from rapid close→re-enter cycles.
 - **Kline interval**: Uses separate `staircase_kline_interval` (default 1h) for EMA analysis. Longer candles = more stable trend signal, fewer false crosses. EMA(5/13) on 1h = 5h/13h lookback.
@@ -86,7 +86,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **Fee-aware TP floor**: TP distance guaranteed to cover round-trip fees × configurable multiplier. Min TP = `entryPrice × 2 × takerRate × feeFloorMultiplier` (default 2.5×). Logged when adjustment occurs.
 - **ATR/fee viability filter**: Before opening, checks if fee-floor-adjusted TP exceeds `wave_max_tp_atr` × ATR (default 2.5×). If so, skips the trade — ATR is too low relative to fees for TP to be reachable. Prevents opening positions that can never realistically hit TP.
 - **Fallback**: If ATR < 0.1% of price, uses 1% SL / 0.5% TP
-- **Breakeven protection**: When unrealized profit >= round-trip fee distance (`entryPrice × 2 × takerRate`), SL moves to entry price. Prevents profitable positions from reversing to full SL loss. Resets on DCA (entry changes). Uses `CloseReason::Breakeven` to distinguish from full stop-loss.
+- **Breakeven protection** (wave only): When unrealized profit >= round-trip fee distance (`entryPrice × 2 × takerRate`), SL moves to entry price. Prevents profitable positions from reversing to full SL loss. Resets on DCA (entry changes). Uses `CloseReason::Breakeven` to distinguish from full stop-loss. Disabled for staircase strategy.
 - **Trailing stop**: Activates at 0.15x ATR profit, trails at 0.2x ATR distance (configurable). Engages after breakeven, only moves SL further into profit.
 
 ### DCA (Dollar Cost Averaging)
