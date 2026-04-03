@@ -8,6 +8,4 @@ enum CloseReason: string
     case StopLoss = 'stop_loss';
     case Expired = 'expired';
     case Manual = 'manual';
-    case WaveBreak = 'wave_break';
-    case Breakeven = 'breakeven';
 }

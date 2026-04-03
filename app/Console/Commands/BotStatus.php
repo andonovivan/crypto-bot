@@ -59,8 +59,7 @@ class BotStatus extends Command
         }
 
         $this->newLine();
-        $strategy = (string) Settings::get('strategy') ?: 'wave';
-        $this->line("Strategy: {$strategy}");
+        $this->line("Strategy: Grid Trading");
         $this->line("Mode: " . (config('crypto.trading.dry_run') ? 'DRY RUN' : 'LIVE'));
 
         return self::SUCCESS;

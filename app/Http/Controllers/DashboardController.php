@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Enums\CloseReason;
 use App\Models\Position;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
@@ -20,7 +19,7 @@ class DashboardController extends Controller
         return view('dashboard');
     }
 
-    public function data(ExchangeInterface $exchange, WaveScanner $waveScanner): JsonResponse
+    public function data(ExchangeInterface $exchange): JsonResponse
     {
         $openPositions = Position::open()
             ->orderByDesc('opened_at')
@@ -61,27 +60,6 @@ class DashboardController extends Controller
         $totalFees = Trade::sum('fees');
 
         $accountData = $exchange->getAccountData();
-        $strategy = (string) Settings::get('strategy') ?: 'wave';
-
-        // Wave status — analyze each watchlist symbol
-        $skipRsi = ($strategy === 'staircase' && ! Settings::get('staircase_rsi_filter'));
-        $waveStatus = [];
-        try {
-            foreach ($waveScanner->getWatchlist() as $symbol) {
-                $wave = $waveScanner->analyze($symbol, skipRsiFilter: $skipRsi);
-                $waveStatus[] = [
-                    'symbol' => $symbol,
-                    'direction' => $wave?->direction,
-                    'wave_state' => $wave?->waveState,
-                    'rsi' => $wave?->rsi,
-                    'atr' => $wave ? round($wave->atr, 8) : null,
-                    'ema_gap' => $wave?->emaGap,
-                    'price' => $wave?->currentPrice,
-                ];
-            }
-        } catch (\Throwable $e) {
-            // Wave analysis failed, show empty
-        }
 
         // Estimate fees for open positions (entry + projected exit at current price)
         $feeRateCache = [];
@@ -127,8 +105,6 @@ class DashboardController extends Controller
                     'take_profit_price' => $p->take_profit_price,
                     'leverage' => $p->leverage,
                     'is_dry_run' => $p->is_dry_run,
-                    'layer_count' => $p->layer_count ?? 1,
-                    'atr_value' => $p->atr_value,
                     'opened_at' => $p->opened_at->timestamp,
                     'expires_at' => $p->expires_at?->timestamp,
                 ];
@@ -150,7 +126,6 @@ class DashboardController extends Controller
                 'opened_at' => $t->position?->opened_at?->timestamp,
                 'created_at' => $t->created_at->timestamp,
             ]),
-            'wave_status' => $waveStatus,
             'summary' => [
                 'balance' => round($accountData['walletBalance'], 2),
                 'wallet_balance' => round($accountData['walletBalance'], 2),
@@ -167,9 +142,7 @@ class DashboardController extends Controller
                 'winning_trades' => $winningTrades,
                 'losing_trades' => $losingTrades,
                 'win_rate' => $winRate,
-                'active_signals' => count(array_filter($waveStatus, fn ($w) => $w['wave_state'] === 'new_wave')),
                 'dry_run' => (bool) Settings::get('dry_run'),
-                'strategy' => $strategy,
             ],
             'ts' => now()->timestamp,
         ]);
@@ -178,31 +151,48 @@ class DashboardController extends Controller
     public function scanNow(WaveScanner $waveScanner, TradingEngine $engine, Request $request): JsonResponse
     {
         $autoTrade = $request->boolean('auto_trade', false);
-        $strategy = (string) Settings::get('strategy') ?: 'wave';
-        $skipRsi = ($strategy === 'staircase' && ! Settings::get('staircase_rsi_filter'));
+        $skipRsi = ! Settings::get('grid_rsi_filter');
         $trades = [];
-        $waves = [];
+        $signals = [];
 
         foreach ($waveScanner->getWatchlist() as $symbol) {
             $wave = $waveScanner->analyze($symbol, skipRsiFilter: $skipRsi);
             if ($wave) {
-                $waves[] = [
+                $signals[] = [
                     'symbol' => $symbol,
                     'direction' => $wave->direction,
                     'state' => $wave->waveState,
                     'rsi' => $wave->rsi,
                 ];
 
-                $canEnter = match ($strategy) {
-                    'staircase' => in_array($wave->waveState, ['new_wave', 'riding']),
-                    default => $wave->waveState === 'new_wave',
-                };
+                $canEnter = in_array($wave->waveState, ['new_wave', 'riding']);
 
-                // Staircase cooldown — don't re-enter too soon after a close
-                if ($autoTrade && $canEnter && $strategy === 'staircase') {
-                    $cooldown = (int) Settings::get('staircase_cooldown_minutes') ?: 30;
+                // Cooldown check
+                if ($autoTrade && $canEnter) {
+                    $cooldown = (int) Settings::get('grid_cooldown_minutes') ?: 1;
                     if (Trade::where('symbol', $symbol)->where('created_at', '>=', now()->subMinutes($cooldown))->exists()) {
                         $canEnter = false;
+                    }
+                }
+
+                // Per-symbol count check
+                if ($autoTrade && $canEnter) {
+                    $maxPerSymbol = (int) Settings::get('grid_max_per_symbol') ?: 10;
+                    $symbolPositions = Position::open()->where('symbol', $symbol)->get();
+                    if ($symbolPositions->count() >= $maxPerSymbol) {
+                        $canEnter = false;
+                    }
+
+                    // Grid spacing check
+                    if ($canEnter) {
+                        $spacingPct = (float) Settings::get('grid_spacing_pct') ?: 0.5;
+                        foreach ($symbolPositions as $existing) {
+                            $distancePct = abs($wave->currentPrice - $existing->entry_price) / $existing->entry_price * 100;
+                            if ($distancePct < $spacingPct) {
+                                $canEnter = false;
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -224,9 +214,8 @@ class DashboardController extends Controller
 
         return response()->json([
             'ok' => true,
-            'strategy' => $strategy,
-            'waves' => $waves,
-            'signals' => count($waves),
+            'signals' => $signals,
+            'signal_count' => count($signals),
             'trades_opened' => $trades,
         ]);
     }
@@ -236,7 +225,7 @@ class DashboardController extends Controller
         $request->validate(['position_id' => 'required|integer']);
 
         $position = Position::open()->findOrFail($request->position_id);
-        $trade = $engine->closePosition($position, reason: CloseReason::Manual);
+        $trade = $engine->closePosition($position, reason: \App\Enums\CloseReason::Manual);
 
         return response()->json([
             'ok' => true,

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wave Rider Bot</title>
+<title>Grid Trading Bot</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
@@ -71,16 +71,14 @@
 </style>
 </head>
 <body>
-<h1>Wave Rider Bot <span id="badge"></span> <span id="strategy-badge"></span></h1>
+<h1>Grid Trading Bot <span id="badge"></span></h1>
 <p class="subtitle">
-  <span id="signals-count">-</span> active signals &middot;
   <span id="positions-count-sub">-</span> open positions &middot;
   Updated <span id="updated">-</span>
 </p>
 
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
-  <button class="tab-btn" onclick="switchTab('signals')" id="signals-tab-btn" style="display:none">Wave Status</button>
   <button class="tab-btn" onclick="switchTab('history')">Trade History</button>
   <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
 </div>
@@ -122,7 +120,13 @@
     </div>
   </div>
 
-  <h2 class="section-title">Open Positions</h2>
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+    <h2 class="section-title" style="margin:0;">Open Positions</h2>
+    <div>
+      <span class="settings-msg" id="scan-msg" style="margin-right:8px;"></span>
+      <button class="btn-save" style="margin-top:0;" onclick="scanNow(this)">Scan Now</button>
+    </div>
+  </div>
   <table>
     <thead>
       <tr>
@@ -134,38 +138,12 @@
         <th onclick="sortTable('positions', 'position_size_usdt')">Size <span class="sort-arrow" id="pos-sort-position_size_usdt"></span></th>
         <th onclick="sortTable('positions', 'net_pnl')">Net PnL <span class="sort-arrow" id="pos-sort-net_pnl"></span></th>
         <th>SL / TP</th>
-        <th>Layers</th>
         <th onclick="sortTable('positions', 'opened_at')">Time Opened <span class="sort-arrow" id="pos-sort-opened_at"></span></th>
         <th>Hold</th>
         <th></th>
       </tr>
     </thead>
-    <tbody id="positions-body"><tr><td colspan="12" class="empty">Loading...</td></tr></tbody>
-  </table>
-</div>
-
-<!-- Signals Tab -->
-<div id="tab-signals" class="tab-pane">
-  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-    <h2 class="section-title" style="margin:0;" id="signals-title">Active Signals</h2>
-    <button class="btn-save" id="scan-btn" onclick="scanNow(this)">Scan Now</button>
-  </div>
-  <div class="settings-msg" id="scan-msg"></div>
-
-  <!-- Wave status table -->
-  <table id="wave-status-table">
-    <thead>
-      <tr>
-        <th>Symbol</th>
-        <th>Direction</th>
-        <th>Wave State</th>
-        <th>RSI</th>
-        <th>ATR</th>
-        <th>EMA Gap</th>
-        <th>Price</th>
-      </tr>
-    </thead>
-    <tbody id="wave-status-body"><tr><td colspan="7" class="empty">Loading...</td></tr></tbody>
+    <tbody id="positions-body"><tr><td colspan="11" class="empty">Loading...</td></tr></tbody>
   </table>
 </div>
 
@@ -323,8 +301,6 @@ function reasonBadge(reason) {
     stop_loss: '#f85149',
     expired: '#d29922',
     manual: '#8b949e',
-    wave_break: '#1f6feb',
-    breakeven: '#d29922',
   };
   const color = colors[reason] || '#8b949e';
   return `<span style="color:${color};font-weight:bold;font-size:0.85em">${reason.replace('_', ' ').toUpperCase()}</span>`;
@@ -365,37 +341,13 @@ function sideBadge(side) {
 function render(data) {
   lastData = data;
   const s = data.summary;
-  const strategy = s.strategy || 'wave';
 
   // Badge
   document.getElementById('badge').innerHTML = s.dry_run
     ? '<span class="dry-run-badge">DRY RUN</span>'
     : '<span class="live-badge">LIVE</span>';
 
-  // Strategy badge
-  const stratBadges = {
-    wave: { bg: '#1f6feb', label: 'WAVE' },
-    staircase: { bg: '#3fb950', label: 'STAIRCASE' },
-  };
-  const sb = stratBadges[strategy] || stratBadges.wave;
-  document.getElementById('strategy-badge').innerHTML =
-    `<span style="background:${sb.bg};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.55em;font-weight:bold;vertical-align:middle;">${sb.label}</span>`;
-
-  // Hide Wave Status tab when not using wave strategy
-  const waveTabBtn = document.getElementById('signals-tab-btn');
-  const waveTabPane = document.getElementById('tab-signals');
-  if (strategy !== 'wave') {
-    waveTabBtn.style.display = 'none';
-    // If wave tab was active, switch to dashboard
-    if (waveTabPane.classList.contains('active')) {
-      switchTab('dashboard');
-    }
-  } else {
-    waveTabBtn.style.display = '';
-  }
-
   // Subtitle
-  document.getElementById('signals-count').textContent = s.active_signals;
   document.getElementById('positions-count-sub').textContent = s.open_positions;
   document.getElementById('updated').textContent = new Date(data.ts * 1000).toLocaleTimeString();
 
@@ -425,7 +377,7 @@ function render(data) {
   // Positions table
   const posBody = document.getElementById('positions-body');
   if (data.positions.length === 0) {
-    posBody.innerHTML = '<tr><td colspan="12" class="empty">No open positions</td></tr>';
+    posBody.innerHTML = '<tr><td colspan="11" class="empty">No open positions</td></tr>';
   } else {
     const sorted = sortData([...data.positions], sortState.positions.key, sortState.positions.asc);
     posBody.innerHTML = sorted.map(p => `<tr>
@@ -442,35 +394,10 @@ function render(data) {
       <td>${fmtNum(p.position_size_usdt, 2)} USDT</td>
       <td style="color:${pnlColor(p.net_pnl)};font-weight:bold">${pnlStr(p.net_pnl)}<br><span style="color:#8b949e;font-weight:normal;font-size:0.75em">-$${fmtNum(p.estimated_fees || 0, 4)} fees</span></td>
       <td>${formatPrice(p.stop_loss_price)} / ${formatPrice(p.take_profit_price)}</td>
-      <td>${p.layer_count || 1}${p.layer_count > 1 ? ' <span style="color:#d29922;font-size:0.75em">DCA</span>' : ''}</td>
       <td style="font-size:0.85em">${formatTimestamp(p.opened_at)}</td>
       <td>${holdTime(p.opened_at, p.expires_at)}</td>
       <td><button class="btn-close-pos" onclick="closePosition(${p.id}, this)">Close</button></td>
     </tr>`).join('');
-  }
-
-  // Wave status
-  document.getElementById('signals-title').textContent = 'Wave Status';
-  const waveBody = document.getElementById('wave-status-body');
-  const waveStatus = data.wave_status || [];
-  if (waveStatus.length === 0) {
-    waveBody.innerHTML = '<tr><td colspan="7" class="empty">No wave data</td></tr>';
-  } else {
-    waveBody.innerHTML = waveStatus.map(w => {
-      const dirColor = w.direction === 'LONG' ? '#3fb950' : (w.direction === 'SHORT' ? '#f85149' : '#8b949e');
-      const stateColors = { new_wave: '#3fb950', riding: '#58a6ff', weakening: '#d29922' };
-      const stateColor = stateColors[w.wave_state] || '#8b949e';
-      const stateLabel = (w.wave_state || 'none').replace('_', ' ').toUpperCase();
-      return `<tr>
-        <td><strong>${w.symbol}</strong></td>
-        <td><span style="color:${dirColor};font-weight:bold;font-size:0.75em">${w.direction || '—'}</span></td>
-        <td><span style="color:${stateColor};font-weight:bold;font-size:0.85em">${stateLabel}</span></td>
-        <td>${w.rsi !== null ? w.rsi.toFixed(1) : '—'}</td>
-        <td>${w.atr !== null ? formatPrice(w.atr) : '—'}</td>
-        <td>${w.ema_gap !== null ? w.ema_gap.toFixed(4) + '%' : '—'}</td>
-        <td>${w.price !== null ? formatPrice(w.price) : '—'}</td>
-      </tr>`;
-    }).join('');
   }
 
   // History table
@@ -521,14 +448,6 @@ async function loadSettings() {
           <select data-key="${key}">
             <option value="true" ${meta.value ? 'selected' : ''}>Yes</option>
             <option value="false" ${!meta.value ? 'selected' : ''}>No</option>
-          </select>
-        </div>`;
-      } else if (key === 'strategy') {
-        html += `<div class="setting-item">
-          <label>${meta.label}</label>
-          <select data-key="${key}">
-            <option value="wave" ${meta.value === 'wave' ? 'selected' : ''}>Wave Rider</option>
-            <option value="staircase" ${meta.value === 'staircase' ? 'selected' : ''}>Staircase</option>
           </select>
         </div>`;
       } else if (meta.type === 'string') {
@@ -604,7 +523,7 @@ async function scanNow(btn) {
     });
     const data = await res.json();
     if (data.ok) {
-      let text = `[${(data.strategy || 'wave').toUpperCase()}] Found ${data.signals} wave(s)`;
+      let text = `Found ${data.signal_count} signal(s)`;
       if (data.trades_opened && data.trades_opened.length > 0) {
         text += ` — opened: ${data.trades_opened.join(', ')}`;
       }
@@ -622,7 +541,7 @@ async function scanNow(btn) {
 }
 
 async function resetAll(btn) {
-  if (!confirm('This will delete ALL trades, positions, and signals. Are you sure?')) return;
+  if (!confirm('This will delete ALL trades and positions. Are you sure?')) return;
   btn.disabled = true;
   btn.textContent = 'Resetting...';
   try {

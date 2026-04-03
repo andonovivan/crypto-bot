@@ -6,7 +6,7 @@ use App\Services\Exchange\ExchangeInterface;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Wave Rider scanner — detects short-term price waves using fast EMAs on configurable candle interval (default 15m).
+ * Market scanner — detects trend direction using EMA crossovers on configurable candle interval.
  * Scans every 30 seconds. Signals are ephemeral (not stored in DB).
  */
 class WaveScanner
@@ -25,16 +25,16 @@ class WaveScanner
     ) {}
 
     /**
-     * Analyze a symbol for wave state. Returns null if data insufficient or market dead.
+     * Analyze a symbol for trend state. Returns null if data insufficient or market dead.
      */
     public function analyze(string $symbol, bool $skipRsiFilter = false): ?WaveAnalysis
     {
-        $emaFast = (int) Settings::get('wave_ema_fast');
-        $emaSlow = (int) Settings::get('wave_ema_slow');
-        $rsiPeriod = (int) Settings::get('wave_rsi_period');
-        $atrPeriod = (int) Settings::get('wave_atr_period') ?: 14;
-        $rsiOverbought = (int) Settings::get('wave_rsi_overbought');
-        $rsiOversold = (int) Settings::get('wave_rsi_oversold');
+        $emaFast = (int) Settings::get('grid_ema_fast') ?: 5;
+        $emaSlow = (int) Settings::get('grid_ema_slow') ?: 13;
+        $rsiPeriod = (int) Settings::get('grid_rsi_period') ?: 7;
+        $atrPeriod = (int) Settings::get('grid_atr_period') ?: 14;
+        $rsiOverbought = (int) Settings::get('grid_rsi_overbought') ?: 80;
+        $rsiOversold = (int) Settings::get('grid_rsi_oversold') ?: 20;
 
         $klines = $this->getCachedKlines($symbol);
         if ($klines === null) {
@@ -105,36 +105,6 @@ class WaveScanner
     }
 
     /**
-     * Check if the wave is still intact for a given direction.
-     * Used for DCA validation and wave-break exit detection.
-     */
-    public function isWaveIntact(string $symbol, string $direction): bool
-    {
-        $emaFast = (int) Settings::get('wave_ema_fast');
-        $emaSlow = (int) Settings::get('wave_ema_slow');
-
-        $klines = $this->getCachedKlines($symbol);
-        if ($klines === null) {
-            return false; // Can't verify, assume broken
-        }
-
-        $closes = array_column($klines, 'close');
-        if (count($closes) < $emaSlow + 2) {
-            return false;
-        }
-
-        $last = count($closes) - 1;
-        $emaFastValues = $this->ta->calculateEMA($closes, $emaFast);
-        $emaSlowValues = $this->ta->calculateEMA($closes, $emaSlow);
-
-        if ($direction === 'LONG') {
-            return $emaFastValues[$last] > $emaSlowValues[$last];
-        }
-
-        return $emaFastValues[$last] < $emaSlowValues[$last];
-    }
-
-    /**
      * Get the watchlist of symbols to scan.
      */
     public function getWatchlist(): array
@@ -184,11 +154,8 @@ class WaveScanner
         }
 
         try {
-            $limit = (int) Settings::get('wave_kline_limit') ?: 30;
-            $strategy = (string) Settings::get('strategy') ?: 'wave';
-            $interval = $strategy === 'staircase'
-                ? ((string) Settings::get('staircase_kline_interval') ?: '1h')
-                : ((string) Settings::get('wave_kline_interval') ?: '15m');
+            $limit = (int) Settings::get('grid_kline_limit') ?: 50;
+            $interval = (string) Settings::get('grid_kline_interval') ?: '1h';
             $klines = $this->exchange->getKlines($symbol, $interval, $limit);
 
             $this->klineCache[$symbol] = [
@@ -198,7 +165,7 @@ class WaveScanner
 
             return $klines;
         } catch (\Throwable $e) {
-            Log::warning('Failed to fetch klines for wave analysis', [
+            Log::warning('Failed to fetch klines for analysis', [
                 'symbol' => $symbol,
                 'error' => $e->getMessage(),
             ]);

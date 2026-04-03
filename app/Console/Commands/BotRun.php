@@ -2,8 +2,6 @@
 
 namespace App\Console\Commands;
 
-use App\Enums\CloseReason;
-use App\Enums\PositionStatus;
 use App\Models\Position;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
@@ -16,19 +14,15 @@ use Illuminate\Console\Command;
 class BotRun extends Command
 {
     protected $signature = 'bot:run {--interval= : Scan interval in seconds (overrides settings)}';
-    protected $description = 'Run the Wave Rider bot in a continuous loop';
+    protected $description = 'Run the Grid Trading bot in a continuous loop';
 
     private bool $shouldStop = false;
 
     public function handle(WaveScanner $waveScanner, TradingEngine $engine, ExchangeInterface $exchange): int
     {
         $isDryRun = config('crypto.trading.dry_run');
-        $strategy = (string) Settings::get('strategy') ?: 'wave';
         $leverage = (int) Settings::get('leverage') ?: 10;
-        $scanInterval = (int) ($this->option('interval')
-            ?: ($strategy === 'staircase'
-                ? Settings::get('staircase_scan_interval')
-                : Settings::get('wave_scan_interval')));
+        $scanInterval = (int) ($this->option('interval') ?: Settings::get('grid_scan_interval') ?: 30);
 
         // Register signal handlers for graceful shutdown
         if (extension_loaded('pcntl')) {
@@ -39,29 +33,17 @@ class BotRun extends Command
 
         $watchlist = $waveScanner->getWatchlist();
 
-        if ($strategy === 'staircase') {
-            $this->info('Starting Staircase Bot');
-            $this->info($isDryRun ? '  Mode: DRY RUN (no real trades)' : '  Mode: LIVE TRADING');
-            $this->info("  Watchlist: " . implode(', ', $watchlist));
-            $this->info("  Interval: " . (Settings::get('staircase_kline_interval') ?: '1h') . " candles | Scan: {$scanInterval}s");
-            $this->info("  EMA: " . Settings::get('wave_ema_fast') . "/" . Settings::get('wave_ema_slow') . " (trend direction)");
-            $this->info("  TP: " . Settings::get('staircase_take_profit_pct') . "% | SL: " . Settings::get('staircase_stop_loss_pct') . "%");
-            $this->info("  Max hold: " . Settings::get('staircase_max_hold_minutes') . " min | Position: " . (Settings::get('position_size_pct') ?: 1) . "% of balance × {$leverage}x");
-            $this->info("  DCA: disabled | Trailing: disabled | Wave break: disabled | Breakeven: disabled");
-            $this->info("  RSI filter: " . (Settings::get('staircase_rsi_filter') ? 'enabled' : 'disabled'));
-            $this->info("  Cooldown: " . (Settings::get('staircase_cooldown_minutes') ?: 30) . " min after close");
-        } else {
-            $this->info('Starting Wave Rider Bot');
-            $this->info($isDryRun ? '  Mode: DRY RUN (no real trades)' : '  Mode: LIVE TRADING');
-            $this->info("  Watchlist: " . implode(', ', $watchlist));
-            $this->info("  Interval: " . (Settings::get('wave_kline_interval') ?: '15m') . " candles | Scan: {$scanInterval}s");
-            $this->info("  EMA: " . Settings::get('wave_ema_fast') . "/" . Settings::get('wave_ema_slow'));
-            $this->info("  RSI: " . Settings::get('wave_rsi_period') . " (OB:" . Settings::get('wave_rsi_overbought') . " OS:" . Settings::get('wave_rsi_oversold') . ")");
-            $this->info("  SL: " . Settings::get('wave_sl_atr_multiplier') . "x ATR | TP: " . Settings::get('wave_tp_atr_multiplier') . "x ATR (max " . Settings::get('wave_max_tp_atr') . "x ATR)");
-            $this->info("  Trailing: activate " . Settings::get('wave_trailing_activation_atr') . "x ATR, trail " . Settings::get('wave_trailing_distance_atr') . "x ATR");
-            $this->info("  DCA: " . (Settings::get('dca_enabled') ? 'enabled (max ' . Settings::get('dca_max_layers') . ' layers, trigger ' . Settings::get('wave_dca_trigger_atr') . 'x ATR)' : 'disabled'));
-            $this->info("  Max hold: " . Settings::get('wave_max_hold_minutes') . " min | Position: " . (Settings::get('position_size_pct') ?: 1) . "% of balance × {$leverage}x");
-        }
+        $this->info('Starting Grid Trading Bot');
+        $this->info($isDryRun ? '  Mode: DRY RUN (no real trades)' : '  Mode: LIVE TRADING');
+        $this->info("  Watchlist: " . implode(', ', $watchlist));
+        $this->info("  Interval: " . (Settings::get('grid_kline_interval') ?: '1h') . " candles | Scan: {$scanInterval}s");
+        $this->info("  EMA: " . (Settings::get('grid_ema_fast') ?: 5) . "/" . (Settings::get('grid_ema_slow') ?: 13) . " (trend direction)");
+        $this->info("  Long TP: " . (Settings::get('grid_long_tp_pct') ?: 1.68) . "% | Long SL: " . (Settings::get('grid_long_sl_pct') ?: 5.0) . "%");
+        $this->info("  Short TP: " . (Settings::get('grid_short_tp_pct') ?: 1.0) . "% | Short SL: " . (Settings::get('grid_short_sl_pct') ?: 2.0) . "%");
+        $this->info("  Grid: max " . (Settings::get('grid_max_per_symbol') ?: 10) . " per symbol, " . (Settings::get('grid_spacing_pct') ?: 0.5) . "% spacing");
+        $this->info("  Max positions: " . (Settings::get('max_positions') ?: 30) . " | Position: " . (Settings::get('position_size_pct') ?: 1) . "% of balance x {$leverage}x");
+        $this->info("  Max hold: " . (Settings::get('grid_max_hold_minutes') ?: 1440) . " min | Cooldown: " . (Settings::get('grid_cooldown_minutes') ?: 1) . " min");
+        $this->info("  RSI filter: " . (Settings::get('grid_rsi_filter') ? 'enabled' : 'disabled'));
         $this->newLine();
 
         while (! $this->shouldStop) {
@@ -96,7 +78,7 @@ class BotRun extends Command
     }
 
     /**
-     * Process a single symbol: analyze wave, manage position, or open new one.
+     * Process a single symbol: manage all open positions, then evaluate new grid entry.
      */
     private function processSymbol(
         string $symbol,
@@ -104,70 +86,66 @@ class BotRun extends Command
         TradingEngine $engine,
         ExchangeInterface $exchange,
     ): void {
-        $strategy = (string) Settings::get('strategy') ?: 'wave';
-
-        // 1. Analyze current wave state (fetches klines, cached in-process)
-        $skipRsi = ($strategy === 'staircase' && ! Settings::get('staircase_rsi_filter'));
+        // 1. Analyze current market state (fetches klines, cached in-process)
+        $skipRsi = ! Settings::get('grid_rsi_filter');
         $wave = $waveScanner->analyze($symbol, skipRsiFilter: $skipRsi);
 
-        // 2. Check for existing position
-        $position = Position::open()->where('symbol', $symbol)->first();
+        $currentPrice = $wave?->currentPrice ?? $exchange->getPrice($symbol);
 
-        if ($position !== null) {
-            // --- MANAGE EXISTING POSITION ---
-            $currentPrice = $wave?->currentPrice ?? $exchange->getPrice($symbol);
-
-            // Wave break check — EMA flipped against our position (skip for staircase)
-            if ($strategy !== 'staircase' && ! $waveScanner->isWaveIntact($symbol, $position->side)) {
-                $engine->closePosition($position, $currentPrice, CloseReason::WaveBreak);
-                $this->warn("  [{$symbol}] WAVE BREAK — closed {$position->side} @ {$currentPrice}");
-                return;
-            }
-
-            // SL / TP / trailing / expiry checks
+        // --- PHASE 1: Manage ALL open positions for this symbol ---
+        $positions = Position::open()->where('symbol', $symbol)->get();
+        foreach ($positions as $position) {
             $engine->checkPosition($position, $currentPrice);
+        }
 
-            // DCA check (only if position survived above checks; staircase disables DCA)
-            $position->refresh();
-            if ($position->status === PositionStatus::Open
-                && $strategy !== 'staircase'
-                && (bool) Settings::get('dca_enabled')) {
-                $engine->checkDCA($position, $currentPrice);
+        // --- PHASE 2: Evaluate new grid entry ---
+        if ($wave === null) {
+            return;
+        }
+
+        // Check EMA alignment (new_wave or riding)
+        if (! in_array($wave->waveState, ['new_wave', 'riding'])) {
+            return;
+        }
+
+        // Cooldown — don't re-enter too soon after a close
+        $cooldown = (int) Settings::get('grid_cooldown_minutes') ?: 1;
+        $recentClose = Trade::where('symbol', $symbol)
+            ->where('created_at', '>=', now()->subMinutes($cooldown))
+            ->exists();
+        if ($recentClose) {
+            return;
+        }
+
+        // Per-symbol position count check
+        $maxPerSymbol = (int) Settings::get('grid_max_per_symbol') ?: 10;
+        $symbolPositions = Position::open()->where('symbol', $symbol)->get();
+        if ($symbolPositions->count() >= $maxPerSymbol) {
+            return;
+        }
+
+        // Grid spacing: current price must be >= spacing_pct away from ALL existing entries
+        $spacingPct = (float) Settings::get('grid_spacing_pct') ?: 0.5;
+        foreach ($symbolPositions as $existing) {
+            $distancePct = abs($currentPrice - $existing->entry_price) / $existing->entry_price * 100;
+            if ($distancePct < $spacingPct) {
+                return; // Too close to an existing grid entry
             }
+        }
 
-        } elseif ($wave !== null) {
-            // --- NEW ENTRY ---
-            // Wave: only on fresh EMA cross; Staircase: any aligned EMA state
-            $canEnter = match ($strategy) {
-                'staircase' => in_array($wave->waveState, ['new_wave', 'riding']),
-                default => $wave->waveState === 'new_wave',
-            };
+        // All checks passed — open new grid position
+        $signal = new WaveSignal(
+            symbol: $symbol,
+            direction: $wave->direction,
+            atr_value: $wave->atr,
+            currentPrice: $wave->currentPrice,
+            rsi: $wave->rsi,
+        );
 
-            // Staircase cooldown — don't re-enter too soon after a close
-            if ($canEnter && $strategy === 'staircase') {
-                $cooldown = (int) Settings::get('staircase_cooldown_minutes') ?: 30;
-                $recentClose = Trade::where('symbol', $symbol)
-                    ->where('created_at', '>=', now()->subMinutes($cooldown))
-                    ->exists();
-                if ($recentClose) {
-                    $canEnter = false;
-                }
-            }
-
-            if ($canEnter) {
-                $signal = new WaveSignal(
-                    symbol: $symbol,
-                    direction: $wave->direction,
-                    atr_value: $wave->atr,
-                    currentPrice: $wave->currentPrice,
-                    rsi: $wave->rsi,
-                );
-
-                $position = $engine->openPosition($signal, $wave->direction);
-                if ($position) {
-                    $this->info("  [{$symbol}] ENTRY {$wave->direction} @ {$position->entry_price} (RSI:{$wave->rsi} ATR:" . round($wave->atr, 6) . " gap:{$wave->emaGap}%)");
-                }
-            }
+        $position = $engine->openPosition($signal, $wave->direction);
+        if ($position) {
+            $gridCount = $symbolPositions->count() + 1;
+            $this->info("  [{$symbol}] GRID ENTRY {$wave->direction} @ {$position->entry_price} (RSI:{$wave->rsi} grid:{$gridCount}/{$maxPerSymbol})");
         }
     }
 }
