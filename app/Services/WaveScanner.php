@@ -185,7 +185,10 @@ class WaveScanner
 
         try {
             $limit = (int) Settings::get('wave_kline_limit') ?: 30;
-            $interval = (string) Settings::get('wave_kline_interval') ?: '15m';
+            $strategy = (string) Settings::get('strategy') ?: 'wave';
+            $interval = $strategy === 'staircase'
+                ? ((string) Settings::get('staircase_kline_interval') ?: '1h')
+                : ((string) Settings::get('wave_kline_interval') ?: '15m');
             $klines = $this->exchange->getKlines($symbol, $interval, $limit);
 
             $this->klineCache[$symbol] = [

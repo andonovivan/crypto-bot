@@ -86,5 +86,7 @@ return [
         'max_hold_minutes' => (int) env('STAIRCASE_MAX_HOLD_MINUTES', 1440),
         'rsi_filter' => filter_var(env('STAIRCASE_RSI_FILTER', false), FILTER_VALIDATE_BOOLEAN),
         'scan_interval' => (int) env('STAIRCASE_SCAN_INTERVAL', 30),
+        'cooldown_minutes' => (int) env('STAIRCASE_COOLDOWN_MINUTES', 30),
+        'kline_interval' => env('STAIRCASE_KLINE_INTERVAL', '1h'),
     ],
 ];

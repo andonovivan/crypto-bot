@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Enums\CloseReason;
 use App\Enums\PositionStatus;
 use App\Models\Position;
+use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
 use App\Services\Settings;
 use App\Services\TradingEngine;
@@ -41,12 +42,13 @@ class BotRun extends Command
             $this->info('Starting Staircase Bot');
             $this->info($isDryRun ? '  Mode: DRY RUN (no real trades)' : '  Mode: LIVE TRADING');
             $this->info("  Watchlist: " . implode(', ', $watchlist));
-            $this->info("  Interval: " . (Settings::get('wave_kline_interval') ?: '15m') . " candles | Scan: {$scanInterval}s");
+            $this->info("  Interval: " . (Settings::get('staircase_kline_interval') ?: '1h') . " candles | Scan: {$scanInterval}s");
             $this->info("  EMA: " . Settings::get('wave_ema_fast') . "/" . Settings::get('wave_ema_slow') . " (trend direction)");
             $this->info("  TP: " . Settings::get('staircase_take_profit_pct') . "% | SL: " . Settings::get('staircase_stop_loss_pct') . "%");
             $this->info("  Max hold: " . Settings::get('staircase_max_hold_minutes') . " min | Position: $" . Settings::get('position_size_usdt'));
-            $this->info("  DCA: disabled | Trailing: disabled");
+            $this->info("  DCA: disabled | Trailing: disabled | Wave break: disabled");
             $this->info("  RSI filter: " . (Settings::get('staircase_rsi_filter') ? 'enabled' : 'disabled'));
+            $this->info("  Cooldown: " . (Settings::get('staircase_cooldown_minutes') ?: 30) . " min after close");
         } else {
             $this->info('Starting Wave Rider Bot');
             $this->info($isDryRun ? '  Mode: DRY RUN (no real trades)' : '  Mode: LIVE TRADING');
@@ -114,8 +116,8 @@ class BotRun extends Command
             // --- MANAGE EXISTING POSITION ---
             $currentPrice = $wave?->currentPrice ?? $exchange->getPrice($symbol);
 
-            // Wave break check — EMA flipped against our position
-            if (! $waveScanner->isWaveIntact($symbol, $position->side)) {
+            // Wave break check — EMA flipped against our position (skip for staircase)
+            if ($strategy !== 'staircase' && ! $waveScanner->isWaveIntact($symbol, $position->side)) {
                 $engine->closePosition($position, $currentPrice, CloseReason::WaveBreak);
                 $this->warn("  [{$symbol}] WAVE BREAK — closed {$position->side} @ {$currentPrice}");
                 return;
@@ -139,6 +141,17 @@ class BotRun extends Command
                 'staircase' => in_array($wave->waveState, ['new_wave', 'riding']),
                 default => $wave->waveState === 'new_wave',
             };
+
+            // Staircase cooldown — don't re-enter too soon after a close
+            if ($canEnter && $strategy === 'staircase') {
+                $cooldown = (int) Settings::get('staircase_cooldown_minutes') ?: 30;
+                $recentClose = Trade::where('symbol', $symbol)
+                    ->where('created_at', '>=', now()->subMinutes($cooldown))
+                    ->exists();
+                if ($recentClose) {
+                    $canEnter = false;
+                }
+            }
 
             if ($canEnter) {
                 $signal = new WaveSignal(

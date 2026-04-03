@@ -51,7 +51,7 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **isWaveIntact()** — Checks EMA alignment still matches position direction (used for DCA validation and wave-break exit)
 
 ### Staircase Strategy (alternative to Wave Rider)
-- **Concept**: Fixed-% TP scalping that rides trends in "steps" — TP hit → close → immediately re-enter if trend intact → repeat
+- **Concept**: Fixed-% TP scalping that rides trends in "steps" — TP hit → close → re-enter after cooldown if trend intact → repeat
 - **Entry**: Opens when EMAs are aligned (`new_wave` OR `riding` state), not just on fresh crosses
 - **TP**: Fixed percentage of entry price (default 1.68%) — not ATR-based
 - **SL**: Fixed percentage of entry price (default 5.0%) — hard stop to prevent catastrophic losses
@@ -59,8 +59,9 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 - **No trailing stop**: Fixed TP is the sole exit mechanism (plus breakeven protection)
 - **RSI filter**: Off by default (configurable via `staircase_rsi_filter`)
 - **Breakeven protection**: Still active — moves SL to entry once fees are covered
-- **Wave break exit**: Still active — closes if EMAs flip against position
-- **Re-entry**: Immediate on next scan loop after TP hit, if EMAs still aligned
+- **No wave break exit**: Wave break is disabled for staircase — positions held until TP/SL/expiry. This matches the OKX strategy where positions were held for hours, not closed on EMA wobbles.
+- **Cooldown**: After closing a position, waits `staircase_cooldown_minutes` (default 30) before re-entering the same symbol. Prevents churn from rapid close→re-enter cycles.
+- **Kline interval**: Uses separate `staircase_kline_interval` (default 1h) for EMA analysis. Longer candles = more stable trend signal, fewer false crosses. EMA(5/13) on 1h = 5h/13h lookback.
 - **Max hold**: 1440 minutes (24h) by default
 - **Origin**: Reverse-engineered from OKX position history (149 trades, 89.9% win rate, ~1.68% TP target)
 
@@ -159,6 +160,8 @@ Laravel 13 (PHP 8.4) auto-trading bot for Binance Futures with two strategies: *
 | `staircase_max_hold_minutes` | 1440 | Max hold time (24h default) |
 | `staircase_rsi_filter` | false | Whether to apply RSI overbought/oversold filter |
 | `staircase_scan_interval` | 30 | Scan interval in seconds |
+| `staircase_cooldown_minutes` | 30 | Minutes to wait after closing before re-entering same symbol |
+| `staircase_kline_interval` | 1h | Kline candle interval for EMA analysis (1h = more stable than 15m) |
 
 ## API Endpoints
 

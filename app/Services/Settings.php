@@ -54,6 +54,8 @@ class Settings
         'staircase_max_hold_minutes' => ['config' => 'crypto.staircase.max_hold_minutes', 'type' => 'int', 'label' => 'Staircase Max Hold (min)'],
         'staircase_rsi_filter' => ['config' => 'crypto.staircase.rsi_filter', 'type' => 'bool', 'label' => 'Staircase RSI Filter'],
         'staircase_scan_interval' => ['config' => 'crypto.staircase.scan_interval', 'type' => 'int', 'label' => 'Staircase Scan Interval (s)'],
+        'staircase_cooldown_minutes' => ['config' => 'crypto.staircase.cooldown_minutes', 'type' => 'int', 'label' => 'Staircase Cooldown After Close (min)'],
+        'staircase_kline_interval' => ['config' => 'crypto.staircase.kline_interval', 'type' => 'string', 'label' => 'Staircase Kline Interval'],
     ];
 
     /**

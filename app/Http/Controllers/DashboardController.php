@@ -198,6 +198,14 @@ class DashboardController extends Controller
                     default => $wave->waveState === 'new_wave',
                 };
 
+                // Staircase cooldown — don't re-enter too soon after a close
+                if ($autoTrade && $canEnter && $strategy === 'staircase') {
+                    $cooldown = (int) Settings::get('staircase_cooldown_minutes') ?: 30;
+                    if (Trade::where('symbol', $symbol)->where('created_at', '>=', now()->subMinutes($cooldown))->exists()) {
+                        $canEnter = false;
+                    }
+                }
+
                 if ($autoTrade && $canEnter) {
                     $signal = new WaveSignal(
                         symbol: $symbol,
