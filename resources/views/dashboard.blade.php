@@ -416,7 +416,7 @@ function render(data) {
   document.getElementById('unrealized').style.color = pnlColor(s.unrealized_pnl);
   document.getElementById('unrealized').textContent = pnlStr(s.unrealized_pnl);
 
-  document.getElementById('total-fees').textContent = '-$' + fmtNum(Math.abs(s.total_fees), 4);
+  document.getElementById('total-fees').textContent = '-$' + fmtNum(Math.abs(s.total_fees), 2);
 
   document.getElementById('winrate').className = 'card-value';
   document.getElementById('winrate').style.color = s.win_rate >= 50 ? '#3fb950' : s.win_rate > 0 ? '#f85149' : '#c9d1d9';
