@@ -112,6 +112,13 @@ interface ExchangeInterface
     public function cancelOrders(string $symbol): bool;
 
     /**
+     * Cancel a single order by its order ID.
+     *
+     * @return bool True if cancelled successfully (or already gone)
+     */
+    public function cancelOrder(string $symbol, string $orderId): bool;
+
+    /**
      * Calculate the quantity of contracts for a given USDT amount.
      */
     public function calculateQuantity(string $symbol, float $usdtAmount, float $price): float;

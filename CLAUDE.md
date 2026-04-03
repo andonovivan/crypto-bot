@@ -14,7 +14,7 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 - App runs migrations; bot/scheduler wait for app to start first
 
 ### Exchange Abstraction
-- `ExchangeInterface` — contract for all exchange operations (19 methods)
+- `ExchangeInterface` — contract for all exchange operations (20 methods)
 - `BinanceExchange` — real Binance Futures API (HMAC-SHA256 signed requests)
 - `DryRunExchange` — wraps real exchange for market data, simulates trades in DB
 - **Account data**: `getAccountData()` returns wallet balance, available balance, unrealized profit, margin balance, position margin, maintenance margin
@@ -30,9 +30,9 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 2. **Phase 1 — Manage positions**: Fetches ALL open positions for the symbol, calls `checkPosition()` on each (SL/TP/expiry checks)
 3. **Phase 2 — Evaluate new grid entry**: Checks EMA alignment, cooldown, per-symbol count, grid spacing, then opens position if all pass
 4. **WaveScanner::analyze()** — Fetches klines (1h default, cached 15s), computes EMA(5/13), RSI(7), ATR(14), classifies trend state
-5. **TradingEngine::openPosition()** — Calculates position size dynamically (% of wallet balance x leverage), opens LONG or SHORT with direction-specific fixed-% SL/TP
+5. **TradingEngine::openPosition()** — Calculates position size dynamically (% of wallet balance x leverage), opens LONG or SHORT with direction-specific fixed-% SL/TP. Stores SL/TP order IDs per position. Fail-safe: if SL/TP placement fails, closes position immediately.
 6. **TradingEngine::checkPosition()** — Checks SL/TP/expiry, closes if hit
-7. **TradingEngine::closePosition()** — Closes via closeLong()/closeShort(), records Trade with fees
+7. **TradingEngine::closePosition()** — Cancels only this position's SL/TP orders by ID (not all orders for symbol), closes via closeLong()/closeShort(), records Trade with fees
 
 ### Market Scanner (WaveScanner)
 - **Watchlist-based**: Scans pre-selected coins (default: BTCUSDT)
@@ -70,6 +70,9 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 ### Position Management (bidirectional)
 - **LONG entry**: `openLong()` — direction-specific fixed % SL/TP
 - **SHORT entry**: `openShort()` — direction-specific fixed % SL/TP (tighter than longs)
+- **SL/TP order tracking**: Each position stores `sl_order_id` and `tp_order_id` from the exchange. On close, only that position's orders are cancelled (not all orders for the symbol). Safe for grid trading with multiple positions per symbol.
+- **SL/TP fail-safe**: If SL or TP order placement fails after opening, the position is immediately closed and any partial SL/TP orders are cancelled. No unprotected positions can exist.
+- **Per-order cancellation**: `cancelOrder(symbol, orderId)` uses `DELETE /fapi/v1/order` to cancel a specific order. `cancelOrders(symbol)` still available for cleanup but not used in normal flow.
 - **Margin check**: Before opening, verifies `availableBalance >= notional / leverage`
 - **P&L**: LONG = (current - entry) * qty, SHORT = (entry - current) * qty
 - **Fees**: Deducted from P&L on close — entry fee + exit fee (taker rate on notional). Stored in `Trade.fees` column.
@@ -85,7 +88,7 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 | `app/Services/TechnicalAnalysis.php` | EMA, RSI, MACD, ATR calculations |
 | `app/Services/TradingEngine.php` | Position open/close/checkPosition (grid-aware) |
 | `app/Services/Settings.php` | DB-first settings with config fallback |
-| `app/Services/Exchange/ExchangeInterface.php` | Contract: 19 methods including account data & commission rates |
+| `app/Services/Exchange/ExchangeInterface.php` | Contract: 20 methods including account data, commission rates & per-order cancellation |
 | `app/Services/Exchange/BinanceExchange.php` | Binance Futures API (LONG + SHORT, account data, commission rates) |
 | `app/Services/Exchange/DryRunExchange.php` | Paper trading simulation (margin-based balance, fee simulation) |
 | `app/Http/Controllers/DashboardController.php` | All API endpoints |
@@ -204,4 +207,5 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 - **BINANCE_TESTNET env**: Must use `filter_var(env(...), FILTER_VALIDATE_BOOLEAN)` because `env()` returns string "false" which is truthy in PHP
 - **DB settings override**: Old settings in `bot_settings` table override new config defaults. After major changes, reset via `POST /api/settings` or `POST /api/reset`
 - **Rebuild required**: After code changes, must `docker compose down && docker compose build && docker compose up -d`
-- **cancelOrders limitation**: `cancelOrders($symbol)` cancels ALL orders for a symbol. In DryRun mode this is harmless (SL/TP checked in code). For live trading with grid, would need per-order cancellation (store individual SL/TP order IDs per position).
+- **Dual SL/TP checking**: Bot checks SL/TP in code every 30 seconds AND places exchange-side SL/TP orders as safety net. If a Binance SL/TP triggers between bot checks, the bot will detect it on next cycle and reconcile. Exchange orders use `reduceOnly: true` with position-specific quantities.
+- **Live trading readiness**: Per-order cancellation (`cancelOrder`) ensures closing one grid position doesn't destroy SL/TP orders for sibling positions. Fail-safe ensures no unprotected positions exist. Remaining consideration: if Binance SL/TP triggers independently, DB may briefly be out of sync until next check cycle.

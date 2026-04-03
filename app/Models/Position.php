@@ -24,6 +24,8 @@ class Position extends Model
         'atr_value',
         'status',
         'exchange_order_id',
+        'sl_order_id',
+        'tp_order_id',
         'is_dry_run',
         'opened_at',
         'expires_at',

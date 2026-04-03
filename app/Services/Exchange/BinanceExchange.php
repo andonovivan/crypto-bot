@@ -381,6 +381,37 @@ class BinanceExchange implements ExchangeInterface
         return true;
     }
 
+    public function cancelOrder(string $symbol, string $orderId): bool
+    {
+        try {
+            $this->signedRequest('DELETE', '/fapi/v1/order', [
+                'symbol' => $symbol,
+                'orderId' => $orderId,
+            ]);
+
+            return true;
+        } catch (\Throwable $e) {
+            // Order may already be filled or cancelled — treat as success
+            // -2011: "Unknown order sent" (already filled/cancelled)
+            // -2013: "Order does not exist"
+            if (str_contains($e->getMessage(), 'Unknown order')
+                || str_contains($e->getMessage(), 'UNKNOWN_ORDER')
+                || str_contains($e->getMessage(), '-2011')
+                || str_contains($e->getMessage(), '-2013')
+                || str_contains($e->getMessage(), 'Order does not exist')
+            ) {
+                Log::info('Order already gone when cancelling', [
+                    'symbol' => $symbol,
+                    'orderId' => $orderId,
+                ]);
+
+                return true;
+            }
+
+            throw $e;
+        }
+    }
+
     public function calculateQuantity(string $symbol, float $usdtAmount, float $price): float
     {
         if ($price <= 0) {

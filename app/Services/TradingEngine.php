@@ -95,15 +95,44 @@ class TradingEngine
             // Calculate SL/TP — direction-specific fixed percentages
             $slTp = $this->calculateSlTp($entryPrice, $direction);
 
-            // Place stop-loss and take-profit orders
+            // Place stop-loss and take-profit orders, storing their order IDs
+            $slOrderId = null;
+            $tpOrderId = null;
             try {
-                $this->exchange->setStopLoss($signal->symbol, $slTp['sl'], $quantity, $direction);
-                $this->exchange->setTakeProfit($signal->symbol, $slTp['tp'], $quantity, $direction);
+                $slResult = $this->exchange->setStopLoss($signal->symbol, $slTp['sl'], $order['quantity'], $direction);
+                $slOrderId = $slResult['orderId'] ?? null;
+
+                $tpResult = $this->exchange->setTakeProfit($signal->symbol, $slTp['tp'], $order['quantity'], $direction);
+                $tpOrderId = $tpResult['orderId'] ?? null;
             } catch (\Throwable $e) {
-                Log::warning('Failed to set SL/TP orders', [
+                Log::error('Failed to set SL/TP orders — closing position for safety', [
                     'symbol' => $signal->symbol,
                     'error' => $e->getMessage(),
                 ]);
+
+                // Fail-safe: close the position immediately if SL/TP can't be placed
+                try {
+                    // Cancel whichever SL/TP was placed before the failure
+                    if ($slOrderId) {
+                        $this->exchange->cancelOrder($signal->symbol, $slOrderId);
+                    }
+                    if ($tpOrderId) {
+                        $this->exchange->cancelOrder($signal->symbol, $tpOrderId);
+                    }
+
+                    // Close the position
+                    $direction === 'LONG'
+                        ? $this->exchange->closeLong($signal->symbol, $order['quantity'])
+                        : $this->exchange->closeShort($signal->symbol, $order['quantity']);
+                } catch (\Throwable $closeErr) {
+                    Log::error('CRITICAL: Failed to close unprotected position', [
+                        'symbol' => $signal->symbol,
+                        'quantity' => $order['quantity'],
+                        'error' => $closeErr->getMessage(),
+                    ]);
+                }
+
+                return null;
             }
 
             $position = Position::create([
@@ -121,6 +150,8 @@ class TradingEngine
                 'atr_value' => $signal->atr_value ?? null,
                 'status' => PositionStatus::Open,
                 'exchange_order_id' => $order['orderId'],
+                'sl_order_id' => $slOrderId,
+                'tp_order_id' => $tpOrderId,
                 'is_dry_run' => $isDryRun,
                 'opened_at' => now(),
                 'expires_at' => $expiresAt,
@@ -133,6 +164,8 @@ class TradingEngine
                 'quantity' => $order['quantity'],
                 'stop_loss' => $slTp['sl'],
                 'take_profit' => $slTp['tp'],
+                'sl_order_id' => $slOrderId,
+                'tp_order_id' => $tpOrderId,
                 'leverage' => $leverage,
             ]);
 
@@ -210,11 +243,43 @@ class TradingEngine
             $exitPrice = $this->exchange->getPrice($position->symbol);
         }
 
-        // Cancel any open SL/TP orders
-        try {
-            $this->exchange->cancelOrders($position->symbol);
-        } catch (\Throwable $e) {
-            Log::warning('Failed to cancel orders on close', ['error' => $e->getMessage()]);
+        // Cancel this position's SL/TP orders by ID (safe for grid — doesn't nuke sibling positions)
+        if ($position->sl_order_id || $position->tp_order_id) {
+            if ($position->sl_order_id) {
+                try {
+                    $this->exchange->cancelOrder($position->symbol, $position->sl_order_id);
+                } catch (\Throwable $e) {
+                    Log::warning('Failed to cancel SL order on close', [
+                        'symbol' => $position->symbol,
+                        'sl_order_id' => $position->sl_order_id,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+
+            if ($position->tp_order_id) {
+                try {
+                    $this->exchange->cancelOrder($position->symbol, $position->tp_order_id);
+                } catch (\Throwable $e) {
+                    Log::warning('Failed to cancel TP order on close', [
+                        'symbol' => $position->symbol,
+                        'tp_order_id' => $position->tp_order_id,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+        } else {
+            // Fallback for legacy positions without stored order IDs.
+            // Uses cancelOrders (cancels ALL orders for symbol) — only safe when
+            // this is the sole position on the symbol, or in dry-run mode.
+            try {
+                $this->exchange->cancelOrders($position->symbol);
+            } catch (\Throwable $e) {
+                Log::warning('Failed to cancel orders on close (legacy fallback)', [
+                    'symbol' => $position->symbol,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         // Close the position on exchange using the correct direction

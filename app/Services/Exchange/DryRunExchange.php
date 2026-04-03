@@ -220,6 +220,12 @@ class DryRunExchange implements ExchangeInterface
         return true;
     }
 
+    public function cancelOrder(string $symbol, string $orderId): bool
+    {
+        Log::info("[DRY RUN] Cancel order", ['symbol' => $symbol, 'orderId' => $orderId]);
+        return true;
+    }
+
     public function calculateQuantity(string $symbol, float $usdtAmount, float $price): float
     {
         return $this->realExchange->calculateQuantity($symbol, $usdtAmount, $price);
