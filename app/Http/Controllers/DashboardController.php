@@ -158,6 +158,7 @@ class DashboardController extends Controller
                 'margin_in_use' => round($accountData['positionMargin'], 2),
                 'margin_balance' => round($accountData['marginBalance'], 2),
                 'net_pnl' => $totalNetPnl,
+                'total_fees' => round($totalFees + $positionsData->sum('estimated_fees'), 4),
                 'total_funding' => $totalFunding,
                 'total_invested' => round($totalInvested, 2),
                 'open_positions' => $openPositions->count(),

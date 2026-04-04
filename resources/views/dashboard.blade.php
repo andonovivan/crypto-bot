@@ -112,6 +112,10 @@
       <div class="card-value" id="net-pnl">-</div>
     </div>
     <div class="card">
+      <div class="card-label">Fees</div>
+      <div class="card-value" id="total-fees" style="color:#f85149">-</div>
+    </div>
+    <div class="card">
       <div class="card-label">Funding</div>
       <div class="card-value" id="total-funding">-</div>
     </div>
@@ -435,6 +439,8 @@ function render(data) {
   document.getElementById('net-pnl').className = 'card-value';
   document.getElementById('net-pnl').style.color = pnlColor(s.net_pnl);
   document.getElementById('net-pnl').textContent = pnlStr(s.net_pnl);
+
+  document.getElementById('total-fees').textContent = '-$' + fmtNum(Math.abs(s.total_fees), 2);
 
   document.getElementById('total-funding').className = 'card-value';
   document.getElementById('total-funding').style.color = pnlColor(s.total_funding);
