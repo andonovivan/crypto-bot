@@ -45,7 +45,7 @@ class BotRun extends Command
         $this->info("  Max positions: " . (Settings::get('max_positions') ?: 30) . " | Position: " . (Settings::get('position_size_pct') ?: 1) . "% of balance x {$leverage}x");
         $this->info("  Max hold: " . (Settings::get('grid_max_hold_minutes') ?: 1440) . " min | Cooldown: " . (Settings::get('grid_cooldown_minutes') ?: 1) . " min");
         $this->info("  RSI filter: " . (Settings::get('grid_rsi_filter') ? 'enabled' : 'disabled'));
-        $this->info("  Auto-add: " . (Settings::get('grid_auto_add_enabled') ? 'enabled (loss>' . (Settings::get('grid_auto_add_loss_pct') ?: 1.5) . '%, max ' . (Settings::get('grid_auto_add_max_layers') ?: 3) . ' layers)' : 'disabled'));
+        $this->info("  Auto-add: " . (Settings::get('grid_auto_add_enabled') ? 'enabled (SL proximity ' . (Settings::get('grid_auto_add_sl_proximity_pct') ?: 80) . '%, max ' . (Settings::get('grid_auto_add_max_layers') ?: 3) . ' layers)' : 'disabled'));
         $this->info("  Funding tracking: " . (Settings::get('funding_tracking_enabled') ? 'enabled' : 'disabled'));
         $this->newLine();
 
@@ -111,9 +111,9 @@ class BotRun extends Command
             $engine->checkPosition($position, $currentPrice);
         }
 
-        // --- PHASE 1b: Auto-add to losing positions ---
+        // --- PHASE 1b: Auto-add to losing positions (SL proximity trigger) ---
         if ($wave !== null && Settings::get('grid_auto_add_enabled')) {
-            $lossThreshold = (float) Settings::get('grid_auto_add_loss_pct') ?: 1.5;
+            $slProximityPct = (float) Settings::get('grid_auto_add_sl_proximity_pct') ?: 80;
             $maxLayers = 1 + ((int) Settings::get('grid_auto_add_max_layers') ?: 3);
 
             // Only auto-add if signal confirms direction and isn't weakening
@@ -132,12 +132,23 @@ class BotRun extends Command
                         continue;
                     }
 
-                    // Must be losing beyond threshold
+                    // Safety: skip if no SL price set
+                    if (! $position->stop_loss_price || $position->stop_loss_price <= 0) {
+                        continue;
+                    }
+
+                    // Calculate current loss %
                     $pnlPct = $position->side === 'LONG'
                         ? (($currentPrice - $position->entry_price) / $position->entry_price) * 100
                         : (($position->entry_price - $currentPrice) / $position->entry_price) * 100;
 
-                    if ($pnlPct > -$lossThreshold) {
+                    // Calculate SL distance from entry (as %) and trigger threshold
+                    $slDistancePct = $position->side === 'LONG'
+                        ? (($position->entry_price - $position->stop_loss_price) / $position->entry_price) * 100
+                        : (($position->stop_loss_price - $position->entry_price) / $position->entry_price) * 100;
+                    $triggerLossPct = $slDistancePct * ($slProximityPct / 100);
+
+                    if ($pnlPct > -$triggerLossPct) {
                         continue;
                     }
 
@@ -150,7 +161,7 @@ class BotRun extends Command
 
                     try {
                         $engine->addToPosition($position, $addUsdt);
-                        $this->info("  [{$symbol}] AUTO-ADD {$position->side} layer {$position->layer_count} @ {$currentPrice} (loss: " . round($pnlPct, 2) . '%)');
+                        $this->info("  [{$symbol}] AUTO-ADD {$position->side} layer {$position->layer_count} @ {$currentPrice} (loss: " . round($pnlPct, 2) . "%, SL proximity: " . round($triggerLossPct, 2) . '%)');
                     } catch (\Throwable $e) {
                         $this->warn("  [{$symbol}] Auto-add failed: {$e->getMessage()}");
                     }

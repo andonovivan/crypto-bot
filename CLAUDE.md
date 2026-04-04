@@ -14,15 +14,18 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 - App runs migrations; bot/scheduler wait for app to start first
 
 ### Exchange Abstraction
-- `ExchangeInterface` — contract for all exchange operations (20 methods)
+- `ExchangeInterface` — contract for all exchange operations (21 methods)
 - `BinanceExchange` — real Binance Futures API (HMAC-SHA256 signed requests)
 - `DryRunExchange` — wraps real exchange for market data, simulates trades in DB
 - **Account data**: `getAccountData()` returns wallet balance, available balance, unrealized profit, margin balance, position margin, maintenance margin
   - BinanceExchange: calls `/fapi/v2/account` (cached 10s)
-  - DryRunExchange: calculates from DB — margin = `position_size_usdt / leverage` (not full notional)
+  - DryRunExchange: calculates from DB — margin = `position_size_usdt / leverage` (not full notional). Wallet balance includes realized P&L + closed funding + open funding.
 - **Commission rates**: `getCommissionRate($symbol)` returns maker/taker rates
   - BinanceExchange: calls `/fapi/v1/commissionRate` (cached 1h per symbol)
   - DryRunExchange: uses `dry_run_fee_rate` setting (default 0.05%)
+- **Funding rates**: `getFundingRates($symbol)` returns current funding rate, next funding time, mark price per symbol
+  - BinanceExchange: calls `/fapi/v1/premiumIndex` (cached 60s)
+  - DryRunExchange: delegates to real exchange (market data)
 - `getBalance()` delegates to `getAccountData()['availableBalance']` in both implementations
 
 ### Core Flow (Grid Trading)
@@ -32,7 +35,9 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 4. **WaveScanner::analyze()** — Fetches klines (1h default, cached 15s), computes EMA(5/13), RSI(7), ATR(14), classifies trend state
 5. **TradingEngine::openPosition()** — Calculates position size dynamically (% of wallet balance x leverage), opens LONG or SHORT with direction-specific fixed-% SL/TP. Stores SL/TP order IDs per position. Fail-safe: if SL/TP placement fails, closes position immediately.
 6. **TradingEngine::checkPosition()** — Checks SL/TP/expiry, closes if hit
-7. **TradingEngine::closePosition()** — Cancels only this position's SL/TP orders by ID (not all orders for symbol), closes via closeLong()/closeShort(), records Trade with fees
+7. **TradingEngine::closePosition()** — Cancels only this position's SL/TP orders by ID (not all orders for symbol), closes via closeLong()/closeShort(), records Trade with fees and funding snapshot
+8. **Phase 1b — Auto-add to losing positions**: After managing positions, evaluates DCA adds for positions approaching SL with signal still confirming direction
+9. **FundingSettlementService** — Called each tick, settles funding fees at 8h UTC boundaries (00:00, 08:00, 16:00)
 
 ### Market Scanner (WaveScanner)
 - **Watchlist-based**: Scans pre-selected coins (default: BTCUSDT)
@@ -76,7 +81,29 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 - **Margin check**: Before opening, verifies `availableBalance >= notional / leverage`
 - **P&L**: LONG = (current - entry) * qty, SHORT = (entry - current) * qty
 - **Fees**: Deducted from P&L on close — entry fee + exit fee (taker rate on notional). Stored in `Trade.fees` column.
+- **Funding fees**: Accumulated per position via `FundingSettlementService`. Snapshotted into `Trade.funding_fee` on close. Included in net P&L calculations.
 - **Expiry**: `grid_max_hold_minutes` (default 1440 min / 24h)
+
+### Auto-Add (DCA) to Losing Positions
+- **SL proximity trigger**: Auto-adds when loss reaches X% of the stop loss distance (default 80%). Adapts to direction-specific SL.
+  - LONG (5% SL): triggers at -4% loss (80% × 5%)
+  - SHORT (2% SL): triggers at -1.6% loss (80% × 2%)
+- **Signal guard**: Only adds when wave state is `new_wave` or `riding` (not `weakening`). Direction must match.
+- **Max layers**: Configurable via `grid_auto_add_max_layers` (default 3 adds + 1 original = 4 total)
+- **After add**: Weighted average entry, SL/TP recalculated from new entry, proximity resets naturally
+- **Natural cooldown**: After averaging, loss % drops below threshold — price must drop further to trigger next add
+
+### Funding Rate Tracking
+- **Mechanism**: Binance perpetual futures settle funding every 8h (00:00, 08:00, 16:00 UTC). Positive rate = longs pay shorts; negative = shorts pay longs.
+- **FundingSettlementService**: Called every bot tick (30s). Detects 8h boundary crossing, calculates `notional × rate` per open position, updates `Position.funding_fee`.
+- **Sign convention**: LONG + positive rate = pays (negative); SHORT + positive rate = receives (positive)
+- **DryRun simulation**: Uses real funding rates from `/fapi/v1/premiumIndex` to simulate settlements
+- **P&L integration**: Open position net P&L = unrealized - estimated fees + funding. Closed trade snapshots funding into `Trade.funding_fee`.
+- **Dashboard**: Shows current funding rate per position (earning/paying), cumulative Funding card in summary
+
+### Direction Conflict Prevention
+- **One-way mode**: Binance Futures uses single net position per symbol. Bot prevents opening opposite-direction positions on same symbol.
+- **Check**: Before new entry in both BotRun and scanNow, verifies no existing positions with opposite side.
 
 ## Key Files
 
@@ -88,9 +115,10 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 | `app/Services/TechnicalAnalysis.php` | EMA, RSI, MACD, ATR calculations |
 | `app/Services/TradingEngine.php` | Position open/close/checkPosition (grid-aware) |
 | `app/Services/Settings.php` | DB-first settings with config fallback |
-| `app/Services/Exchange/ExchangeInterface.php` | Contract: 20 methods including account data, commission rates & per-order cancellation |
-| `app/Services/Exchange/BinanceExchange.php` | Binance Futures API (LONG + SHORT, account data, commission rates) |
-| `app/Services/Exchange/DryRunExchange.php` | Paper trading simulation (margin-based balance, fee simulation) |
+| `app/Services/FundingSettlementService.php` | 8h funding rate settlement for open positions |
+| `app/Services/Exchange/ExchangeInterface.php` | Contract: 21 methods including account data, commission rates, funding rates & per-order cancellation |
+| `app/Services/Exchange/BinanceExchange.php` | Binance Futures API (LONG + SHORT, account data, commission rates, funding rates) |
+| `app/Services/Exchange/DryRunExchange.php` | Paper trading simulation (margin-based balance, fee + funding simulation) |
 | `app/Http/Controllers/DashboardController.php` | All API endpoints |
 | `resources/views/dashboard.blade.php` | Single-page dark theme dashboard |
 | `routes/web.php` | Route definitions |
@@ -112,6 +140,7 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 | `dry_run_fee_rate` | 0.0005 | Dry-run simulated fee rate (0.05%) |
 | `watchlist` | BTCUSDT | Comma-separated symbols to scan |
 | `max_position_usdt` | 150 | Max total USDT per position |
+| `funding_tracking_enabled` | true | Track funding fees per position |
 
 ### Grid Settings
 | Key | Default | Description |
@@ -136,6 +165,9 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 | `grid_long_sl_pct` | 5.0 | Long SL as % of entry |
 | `grid_short_tp_pct` | 1.0 | Short TP as % of entry (tighter than longs) |
 | `grid_short_sl_pct` | 2.0 | Short SL as % of entry (tighter than longs) |
+| `grid_auto_add_enabled` | true | Auto-add (DCA) to losing positions when signal confirms |
+| `grid_auto_add_sl_proximity_pct` | 80 | Trigger auto-add at this % of the SL distance |
+| `grid_auto_add_max_layers` | 3 | Max auto-adds per position (total layers = 1 + this) |
 
 ## API Endpoints
 
@@ -147,6 +179,8 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 | POST | `/api/settings` | Save settings `{settings: {key: value}}` |
 | POST | `/api/scan` | Manual scan with grid checks `{auto_trade: bool}` |
 | POST | `/api/close` | Close position `{position_id: int}` |
+| POST | `/api/add` | Add to position `{position_id: int, amount: float}` |
+| POST | `/api/reverse` | Reverse position direction `{position_id: int}` |
 | POST | `/api/reset` | Truncate all trades/positions |
 
 ## Database (MariaDB 11)
@@ -155,7 +189,7 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 
 **Enums**:
 - `PositionStatus`: Open, Closed, Expired, StoppedOut
-- `CloseReason`: TakeProfit, StopLoss, Expired, Manual
+- `CloseReason`: TakeProfit, StopLoss, Expired, Manual, Reversed
 
 ## Development Commands
 
@@ -175,6 +209,7 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 - **Price cache**: 10s TTL in database cache. `getPrice()` reads from cache first (1 API weight per miss).
 - **Account data cache**: 10s TTL. `getAccountData()` cached as `binance:account_data`.
 - **Commission rate cache**: 1h TTL per symbol. `getCommissionRate()` cached as `binance:commission:{symbol}`.
+- **Funding rate cache**: 60s TTL. `getFundingRates()` cached as `binance:funding_rates`. Rates change every 8h so 60s is aggressive.
 - **API budget**: ~12-36 weight/minute for 1-3 coins (vs 2,400 limit = 1.5% usage). Each `getKlines()` = 1 weight, `getPrice()` = 1 weight (cached 10s).
 - **Tradability filter**: `getExchangeInfo()` cached 1 hour. `isTradable()` checks symbol status is "TRADING".
 - **LOT_SIZE**: `calculateQuantity()` and `formatQuantity()` use actual stepSize from exchangeInfo.
@@ -182,21 +217,23 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 - **Rate limiting**: Tracks `X-MBX-USED-WEIGHT-1M` header from Binance. Warns at 1800/2400. Pauses at 2300/2400.
 - **Bot loop**: 30-second loop — two-phase grid management per symbol. Responsive shutdown via sub-second sleep chunks.
 
-## Fee & Balance Tracking
+## Fee, Funding & Balance Tracking
 
-- **Trading fees**: Calculated on position close. Both entry and exit use taker rate (market orders). Fee = `price * quantity * takerRate` per side. Deducted from realized P&L.
-- **Estimated fees for open positions**: Dashboard computes `estimated_fees` (entry + projected exit at current price) and `net_pnl` (unrealized P&L minus estimated fees) per position. Uses `getCommissionRate()` (cached 1h per symbol) with fallback to `dry_run_fee_rate`.
+- **Trading fees**: Calculated on position close. Both entry and exit use taker rate (market orders). Fee = `price * quantity * takerRate` per side. Deducted from realized P&L. Stored in `Trade.fees`.
+- **Funding fees**: Accumulated per position at 8h settlement boundaries. Stored in `Position.funding_fee` (cumulative). Snapshotted to `Trade.funding_fee` on close. Positive = received, negative = paid.
+- **Estimated fees for open positions**: Dashboard computes `estimated_fees` (entry + projected exit at current price) and `net_pnl` (unrealized P&L minus estimated fees plus funding) per position. Uses `getCommissionRate()` (cached 1h per symbol) with fallback to `dry_run_fee_rate`.
+- **Net P&L formula**: `Trade.pnl` = rawPnl - tradingFees (already net of commissions). Dashboard total: `Trade::sum('pnl') + Trade::sum('funding_fee') + open positions net P&L`.
 - **Fee rates**: Live mode fetches from `/fapi/v1/commissionRate` (default ~0.05% taker). Dry-run uses `dry_run_fee_rate` setting.
 - **Balance model**: `getAccountData()` returns Binance-compatible fields: `walletBalance`, `availableBalance`, `unrealizedProfit`, `marginBalance`, `positionMargin`, `maintMargin`.
-- **DryRun margin**: Uses `position_size_usdt / leverage` (margin), not full notional. With 10x leverage, a $1,000 notional position locks $100 margin.
+- **DryRun balance**: `walletBalance = starting_balance + Trade::sum('pnl') + Trade::sum('funding_fee') + open Position::sum('funding_fee')`. Margin = `position_size_usdt / leverage`.
 - **Dynamic sizing**: `openPosition()` calculates notional from `walletBalance x (position_size_pct / 100) x leverage` at trade time. Verifies `availableBalance >= margin` before placing orders.
 
 ## Dashboard
 
-- **Cards**: Wallet balance, available balance, margin in use, combined/realized/unrealized P&L, total fees, win rate
-- **Open Positions table**: Symbol (with side/leverage/DRY badge), entry/current price, unrealized P&L, P&L%, size (notional USDT), net P&L (with fees), SL/TP, opened time, hold time, close button
+- **Cards**: Wallet balance, available balance, margin in use, P&L (Net), fees, funding, win rate
+- **Open Positions table**: Symbol (with side/leverage/DRY/layer badges), entry/current price, unrealized P&L, P&L%, size (notional USDT), net P&L (with fees + funding rate + accumulated funding), SL/TP, opened time, hold time, Add/Reverse/Close buttons
 - **Scan Now button**: Manual trigger for grid scan with auto-trade (respects grid spacing and cooldown)
-- **Trade History table**: Symbol (with side/leverage/DRY badge), entry/exit price, P&L, P&L%, size, fees, net P&L, close reason, opened/closed time
+- **Trade History table**: Symbol (with side/leverage/DRY badge), entry/exit price, P&L, P&L%, size, fees (with funding breakdown), net P&L, close reason, opened/closed time
 - **Settings tab**: All runtime-configurable settings
 - **Formatting**: Thousand separators on all dollar amounts ($66,591.10), subscript notation for micro-prices, inline color styling for P&L values
 

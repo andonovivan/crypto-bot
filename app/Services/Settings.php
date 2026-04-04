@@ -53,7 +53,7 @@ class Settings
 
         // Auto-add to losing positions
         'grid_auto_add_enabled' => ['config' => 'crypto.grid.auto_add_enabled', 'type' => 'bool', 'label' => 'Auto Add to Losing Positions'],
-        'grid_auto_add_loss_pct' => ['config' => 'crypto.grid.auto_add_loss_pct', 'type' => 'float', 'label' => 'Auto Add Loss Threshold (%)'],
+        'grid_auto_add_sl_proximity_pct' => ['config' => 'crypto.grid.auto_add_sl_proximity_pct', 'type' => 'float', 'label' => 'Auto Add SL Proximity (%)'],
         'grid_auto_add_max_layers' => ['config' => 'crypto.grid.auto_add_max_layers', 'type' => 'int', 'label' => 'Auto Add Max Layers'],
     ];
 

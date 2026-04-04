@@ -77,7 +77,7 @@ return [
 
         // Auto-add to losing positions (DCA when signal still confirms direction)
         'auto_add_enabled' => filter_var(env('GRID_AUTO_ADD_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
-        'auto_add_loss_pct' => (float) env('GRID_AUTO_ADD_LOSS_PCT', 1.5),
+        'auto_add_sl_proximity_pct' => (float) env('GRID_AUTO_ADD_SL_PROXIMITY_PCT', 80),
         'auto_add_max_layers' => (int) env('GRID_AUTO_ADD_MAX_LAYERS', 3),
     ],
 ];
