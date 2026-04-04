@@ -127,4 +127,12 @@ interface ExchangeInterface
      * Check if a symbol is currently tradable on the exchange.
      */
     public function isTradable(string $symbol): bool;
+
+    /**
+     * Get current funding rate info from premiumIndex.
+     *
+     * @param  string|null  $symbol  Specific symbol, or null for all symbols
+     * @return array<string, array{fundingRate: float, nextFundingTime: int, markPrice: float}>
+     */
+    public function getFundingRates(?string $symbol = null): array;
 }

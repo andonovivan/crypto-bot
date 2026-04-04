@@ -19,7 +19,6 @@
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
   .card-label { color: #8b949e; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.05em; }
   .card-value { font-size: 1.5em; font-weight: bold; margin-top: 4px; }
-  .negative { color: #f85149; }
   .neutral { color: #c9d1d9; }
   table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
   th { text-align: left; color: #8b949e; font-size: 0.75em; text-transform: uppercase;
@@ -113,8 +112,8 @@
       <div class="card-value" id="net-pnl">-</div>
     </div>
     <div class="card">
-      <div class="card-label">Total Fees</div>
-      <div class="card-value negative" id="total-fees">-</div>
+      <div class="card-label">Funding</div>
+      <div class="card-value" id="total-funding">-</div>
     </div>
     <div class="card">
       <div class="card-label">Win Rate</div>
@@ -243,6 +242,17 @@ function pnlStr(val) {
   if (val === null || val === undefined) return '-';
   const prefix = val >= 0 ? '+$' : '-$';
   return prefix + fmtNum(Math.abs(val), 2);
+}
+
+function fundingColor(side, rate) {
+  // Earning: LONG + negative rate, or SHORT + positive rate
+  const earning = (side === 'LONG' && rate < 0) || (side === 'SHORT' && rate > 0);
+  return earning ? '#3fb950' : '#f85149';
+}
+
+function fundingLabel(side, rate) {
+  const earning = (side === 'LONG' && rate < 0) || (side === 'SHORT' && rate > 0);
+  return earning ? 'earning' : 'paying';
 }
 
 function formatPrice(val) {
@@ -426,7 +436,9 @@ function render(data) {
   document.getElementById('net-pnl').style.color = pnlColor(s.net_pnl);
   document.getElementById('net-pnl').textContent = pnlStr(s.net_pnl);
 
-  document.getElementById('total-fees').textContent = '-$' + fmtNum(Math.abs(s.total_fees), 2);
+  document.getElementById('total-funding').className = 'card-value';
+  document.getElementById('total-funding').style.color = pnlColor(s.total_funding);
+  document.getElementById('total-funding').textContent = pnlStr(s.total_funding);
 
   document.getElementById('winrate').className = 'card-value';
   document.getElementById('winrate').style.color = s.win_rate >= 50 ? '#3fb950' : s.win_rate > 0 ? '#f85149' : '#c9d1d9';
@@ -451,7 +463,7 @@ function render(data) {
       <td style="color:${pnlColor(p.unrealized_pnl)}">${pnlStr(p.unrealized_pnl)}</td>
       <td style="color:${pnlColor(p.pnl_pct)};font-weight:bold">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</td>
       <td>${fmtNum(p.position_size_usdt, 2)} USDT</td>
-      <td style="color:${pnlColor(p.net_pnl)};font-weight:bold">${pnlStr(p.net_pnl)}<br><span style="color:#8b949e;font-weight:normal;font-size:0.75em">-$${fmtNum(p.estimated_fees || 0, 4)} fees</span></td>
+      <td style="color:${pnlColor(p.net_pnl)};font-weight:bold">${pnlStr(p.net_pnl)}<br><span style="color:#8b949e;font-weight:normal;font-size:0.75em">-$${fmtNum(p.estimated_fees || 0, 4)} fees</span>${p.funding_rate !== null ? `<br><span style="font-weight:normal;font-size:0.75em;color:${fundingColor(p.side, p.funding_rate)}">${(Math.abs(p.funding_rate) * 100).toFixed(4)}% ${fundingLabel(p.side, p.funding_rate)}</span>` : ''}${p.funding_fee ? `<br><span style="font-weight:normal;font-size:0.75em;color:${pnlColor(p.funding_fee)}">${pnlStr(p.funding_fee)} funding</span>` : ''}</td>
       <td>${formatPrice(p.stop_loss_price)} / ${formatPrice(p.take_profit_price)}</td>
       <td style="font-size:0.85em">${formatTimestamp(p.opened_at)}</td>
       <td>${holdTime(p.opened_at, p.expires_at)}</td>
@@ -469,7 +481,7 @@ function render(data) {
   if (data.recent_trades.length === 0) {
     histBody.innerHTML = '<tr><td colspan="10" class="empty">No closed trades yet</td></tr>';
   } else {
-    const trades = data.recent_trades.map(t => ({ ...t, net_pnl: t.pnl }));
+    const trades = data.recent_trades.map(t => ({ ...t, net_pnl: t.pnl + (t.funding_fee || 0) }));
     const sorted = sortData(trades, sortState.history.key, sortState.history.asc);
     histBody.innerHTML = sorted.map(t => {
       return `<tr>
@@ -484,7 +496,7 @@ function render(data) {
       <td style="color:${pnlColor(t.net_pnl)};font-weight:bold">${pnlStr(t.net_pnl)}</td>
       <td style="color:${pnlColor(t.pnl_pct)};font-weight:bold">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
       <td>${t.position_size_usdt ? fmtNum(t.position_size_usdt, 2) + ' USDT' : '-'}</td>
-      <td style="color:#f85149">-$${fmtNum(t.fees || 0, 4)}</td>
+      <td style="color:#f85149">-$${fmtNum(t.fees || 0, 4)}${t.funding_fee ? `<br><span style="color:${pnlColor(t.funding_fee)};font-size:0.8em">${pnlStr(t.funding_fee)} fund</span>` : ''}</td>
       <td>${reasonBadge(t.close_reason)}</td>
       <td style="font-size:0.85em">${formatTimestamp(t.opened_at)}</td>
       <td style="font-size:0.85em">${formatTimestamp(t.created_at)}</td>

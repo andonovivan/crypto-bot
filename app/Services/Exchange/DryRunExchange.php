@@ -55,7 +55,7 @@ class DryRunExchange implements ExchangeInterface
     public function openShort(string $symbol, float $quantity): array
     {
         $price = $this->getPrice($symbol);
-        $orderId = 'dry_' . uniqid();
+        $orderId = 'dry_' . uniqid('', true);
 
         Log::info("[DRY RUN] Open short", [
             'symbol' => $symbol,
@@ -74,7 +74,7 @@ class DryRunExchange implements ExchangeInterface
     public function closeShort(string $symbol, float $quantity): array
     {
         $price = $this->getPrice($symbol);
-        $orderId = 'dry_' . uniqid();
+        $orderId = 'dry_' . uniqid('', true);
 
         Log::info("[DRY RUN] Close short", [
             'symbol' => $symbol,
@@ -93,7 +93,7 @@ class DryRunExchange implements ExchangeInterface
     public function openLong(string $symbol, float $quantity): array
     {
         $price = $this->getPrice($symbol);
-        $orderId = 'dry_' . uniqid();
+        $orderId = 'dry_' . uniqid('', true);
 
         Log::info("[DRY RUN] Open long", [
             'symbol' => $symbol,
@@ -112,7 +112,7 @@ class DryRunExchange implements ExchangeInterface
     public function closeLong(string $symbol, float $quantity): array
     {
         $price = $this->getPrice($symbol);
-        $orderId = 'dry_' . uniqid();
+        $orderId = 'dry_' . uniqid('', true);
 
         Log::info("[DRY RUN] Close long", [
             'symbol' => $symbol,
@@ -137,7 +137,7 @@ class DryRunExchange implements ExchangeInterface
             'side' => $side,
         ]);
 
-        return ['orderId' => 'dry_sl_' . uniqid()];
+        return ['orderId' => 'dry_sl_' . uniqid('', true)];
     }
 
     public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity, string $side = 'SHORT'): array
@@ -149,7 +149,7 @@ class DryRunExchange implements ExchangeInterface
             'side' => $side,
         ]);
 
-        return ['orderId' => 'dry_tp_' . uniqid()];
+        return ['orderId' => 'dry_tp_' . uniqid('', true)];
     }
 
     public function getBalance(): float
@@ -162,7 +162,14 @@ class DryRunExchange implements ExchangeInterface
         $startingBalance = (float) Settings::get('starting_balance');
         $realizedPnl = \App\Models\Trade::where('is_dry_run', true)->sum('pnl');
 
-        $walletBalance = $startingBalance + $realizedPnl;
+        // Add all funding fees: closed trade funding + open position funding
+        // (Binance settles funding to wallet in real-time, even while positions are open)
+        $closedFunding = \App\Models\Trade::where('is_dry_run', true)->sum('funding_fee');
+        $openFunding = Position::where('status', PositionStatus::Open)
+            ->where('is_dry_run', true)
+            ->sum('funding_fee');
+
+        $walletBalance = $startingBalance + $realizedPnl + $closedFunding + $openFunding;
 
         // Margin = notional / leverage (not the full notional)
         $openPositions = Position::where('status', PositionStatus::Open)
@@ -229,5 +236,10 @@ class DryRunExchange implements ExchangeInterface
     public function calculateQuantity(string $symbol, float $usdtAmount, float $price): float
     {
         return $this->realExchange->calculateQuantity($symbol, $usdtAmount, $price);
+    }
+
+    public function getFundingRates(?string $symbol = null): array
+    {
+        return $this->realExchange->getFundingRates($symbol);
     }
 }

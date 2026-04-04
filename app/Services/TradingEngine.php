@@ -308,6 +308,8 @@ class TradingEngine
             'status' => $status,
         ]);
 
+        $fundingFee = $position->funding_fee ?? 0;
+
         $trade = Trade::create([
             'position_id' => $position->id,
             'symbol' => $position->symbol,
@@ -319,6 +321,7 @@ class TradingEngine
             'pnl' => $pnl,
             'pnl_pct' => round($pnlPct, 4),
             'fees' => $totalFees,
+            'funding_fee' => round($fundingFee, 4),
             'close_reason' => $reason,
             'exchange_order_id' => $order['orderId'],
             'is_dry_run' => $position->is_dry_run,

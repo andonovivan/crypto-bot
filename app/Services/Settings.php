@@ -21,6 +21,7 @@ class Settings
         'dry_run_fee_rate' => ['config' => 'crypto.trading.dry_run_fee_rate', 'type' => 'float', 'label' => 'Dry Run Fee Rate (0.0005 = 0.05%)'],
         'watchlist' => ['config' => 'crypto.trading.watchlist', 'type' => 'string', 'label' => 'Watchlist (comma-separated symbols)'],
         'max_position_usdt' => ['config' => 'crypto.trading.max_position_usdt', 'type' => 'float', 'label' => 'Max Position Size (USDT)'],
+        'funding_tracking_enabled' => ['config' => 'crypto.trading.funding_tracking_enabled', 'type' => 'bool', 'label' => 'Track Funding Fees'],
 
         // Grid trading settings
         'grid_scan_interval' => ['config' => 'crypto.grid.scan_interval', 'type' => 'int', 'label' => 'Scan Interval (seconds)'],

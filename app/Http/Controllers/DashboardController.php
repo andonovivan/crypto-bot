@@ -61,10 +61,20 @@ class DashboardController extends Controller
 
         $accountData = $exchange->getAccountData();
 
+        // Fetch current funding rates (cached 60s, for display in positions table)
+        $fundingRates = [];
+        if ($openPositions->isNotEmpty()) {
+            try {
+                $fundingRates = $exchange->getFundingRates();
+            } catch (\Throwable) {
+                // Funding rate display is non-critical
+            }
+        }
+
         // Estimate fees for open positions (entry + projected exit at current price)
         $feeRateCache = [];
 
-        $positionsData = $openPositions->map(function (Position $p) use ($exchange, &$feeRateCache) {
+        $positionsData = $openPositions->map(function (Position $p) use ($exchange, &$feeRateCache, $fundingRates) {
             $currentPrice = $p->current_price ?? $p->entry_price;
 
             // Get taker fee rate (cached per symbol)
@@ -81,7 +91,8 @@ class DashboardController extends Controller
             $entryFee = $p->entry_price * $p->quantity * $takerRate;
             $exitFee = $currentPrice * $p->quantity * $takerRate;
             $estimatedFees = round($entryFee + $exitFee, 4);
-            $netPnl = round(($p->unrealized_pnl ?? 0) - $estimatedFees, 4);
+            $fundingFee = $p->funding_fee ?? 0;
+            $netPnl = round(($p->unrealized_pnl ?? 0) - $estimatedFees + $fundingFee, 4);
 
             return [
                 'id' => $p->id,
@@ -98,6 +109,8 @@ class DashboardController extends Controller
                         : (($p->entry_price - $currentPrice) / $p->entry_price) * 100, 2)
                     : 0,
                 'estimated_fees' => $estimatedFees,
+                'funding_fee' => round($fundingFee, 4),
+                'funding_rate' => $fundingRates[$p->symbol]['fundingRate'] ?? null,
                 'net_pnl' => $netPnl,
                 'best_price' => $p->best_price,
                 'stop_loss_price' => $p->stop_loss_price,
@@ -110,10 +123,13 @@ class DashboardController extends Controller
             ];
         });
 
-        // Net P&L = realized trades (P&L minus fees) + open positions (unrealized minus estimated fees)
-        $realizedNetPnl = $totalPnl - $totalFees;
+        // Net P&L: Trade.pnl already has trading fees deducted, add closed funding + open net P&L
+        $closedFunding = Trade::sum('funding_fee');
         $openNetPnl = $positionsData->sum('net_pnl');
-        $totalNetPnl = round($realizedNetPnl + $openNetPnl, 4);
+        $totalNetPnl = round($totalPnl + $closedFunding + $openNetPnl, 4);
+
+        // Total funding across all positions (open + closed)
+        $totalFunding = round($positionsData->sum('funding_fee') + $closedFunding, 4);
 
         return response()->json([
             'positions' => $positionsData,
@@ -127,6 +143,7 @@ class DashboardController extends Controller
                 'pnl' => $t->pnl,
                 'pnl_pct' => $t->pnl_pct,
                 'fees' => $t->fees,
+                'funding_fee' => $t->funding_fee,
                 'close_reason' => $t->close_reason->value,
                 'is_dry_run' => $t->is_dry_run,
                 'position_size_usdt' => $t->position?->position_size_usdt,
@@ -141,7 +158,7 @@ class DashboardController extends Controller
                 'margin_in_use' => round($accountData['positionMargin'], 2),
                 'margin_balance' => round($accountData['marginBalance'], 2),
                 'net_pnl' => $totalNetPnl,
-                'total_fees' => round($totalFees, 4),
+                'total_funding' => $totalFunding,
                 'total_invested' => round($totalInvested, 2),
                 'open_positions' => $openPositions->count(),
                 'total_trades' => $totalTrades,

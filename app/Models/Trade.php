@@ -19,6 +19,7 @@ class Trade extends Model
         'pnl',
         'pnl_pct',
         'fees',
+        'funding_fee',
         'close_reason',
         'exchange_order_id',
         'is_dry_run',
@@ -33,6 +34,7 @@ class Trade extends Model
             'pnl' => 'float',
             'pnl_pct' => 'float',
             'fees' => 'float',
+            'funding_fee' => 'float',
             'close_reason' => CloseReason::class,
             'is_dry_run' => 'boolean',
         ];

@@ -6,6 +6,7 @@ use App\Models\Position;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
 use App\Services\Settings;
+use App\Services\FundingSettlementService;
 use App\Services\TradingEngine;
 use App\Services\WaveScanner;
 use App\Services\WaveSignal;
@@ -18,7 +19,7 @@ class BotRun extends Command
 
     private bool $shouldStop = false;
 
-    public function handle(WaveScanner $waveScanner, TradingEngine $engine, ExchangeInterface $exchange): int
+    public function handle(WaveScanner $waveScanner, TradingEngine $engine, ExchangeInterface $exchange, FundingSettlementService $fundingService): int
     {
         $isDryRun = config('crypto.trading.dry_run');
         $leverage = (int) Settings::get('leverage') ?: 10;
@@ -45,10 +46,18 @@ class BotRun extends Command
         $this->info("  Max hold: " . (Settings::get('grid_max_hold_minutes') ?: 1440) . " min | Cooldown: " . (Settings::get('grid_cooldown_minutes') ?: 1) . " min");
         $this->info("  RSI filter: " . (Settings::get('grid_rsi_filter') ? 'enabled' : 'disabled'));
         $this->info("  Auto-add: " . (Settings::get('grid_auto_add_enabled') ? 'enabled (loss>' . (Settings::get('grid_auto_add_loss_pct') ?: 1.5) . '%, max ' . (Settings::get('grid_auto_add_max_layers') ?: 3) . ' layers)' : 'disabled'));
+        $this->info("  Funding tracking: " . (Settings::get('funding_tracking_enabled') ? 'enabled' : 'disabled'));
         $this->newLine();
 
         while (! $this->shouldStop) {
             $loopStart = microtime(true);
+
+            // Settle funding fees for open positions (runs quickly — no-op unless 8h boundary crossed)
+            try {
+                $fundingService->settleFunding();
+            } catch (\Throwable $e) {
+                $this->error("Funding settlement error: {$e->getMessage()}");
+            }
 
             // Re-read watchlist each cycle so dashboard changes take effect immediately
             $watchlist = $waveScanner->getWatchlist();

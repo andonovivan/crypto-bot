@@ -14,6 +14,7 @@ class BinanceExchange implements ExchangeInterface
 
     private const PRICE_CACHE_TTL = 10; // seconds
     private const EXCHANGE_INFO_CACHE_TTL = 3600; // 1 hour
+    private const FUNDING_RATE_CACHE_TTL = 60; // 1 minute (rates change every 8h)
     private const RATE_LIMIT_WARN_THRESHOLD = 1800; // warn at 75% of 2400
 
     public function __construct()
@@ -585,5 +586,39 @@ class BinanceExchange implements ExchangeInterface
         }
 
         return 8; // default
+    }
+
+    public function getFundingRates(?string $symbol = null): array
+    {
+        $cacheKey = 'binance:funding_rates';
+
+        $cached = Cache::get($cacheKey);
+        if ($cached !== null) {
+            if ($symbol !== null) {
+                return isset($cached[$symbol]) ? [$symbol => $cached[$symbol]] : [];
+            }
+
+            return $cached;
+        }
+
+        // Fetch all symbols (weight 10) and cache — more efficient than per-symbol calls
+        $response = $this->publicRequest('GET', '/fapi/v1/premiumIndex');
+
+        $rates = [];
+        foreach ($response as $item) {
+            $rates[$item['symbol']] = [
+                'fundingRate' => (float) $item['lastFundingRate'],
+                'nextFundingTime' => (int) $item['nextFundingTime'],
+                'markPrice' => (float) $item['markPrice'],
+            ];
+        }
+
+        Cache::put($cacheKey, $rates, self::FUNDING_RATE_CACHE_TTL);
+
+        if ($symbol !== null) {
+            return isset($rates[$symbol]) ? [$symbol => $rates[$symbol]] : [];
+        }
+
+        return $rates;
     }
 }

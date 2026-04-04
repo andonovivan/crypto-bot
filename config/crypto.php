@@ -36,6 +36,7 @@ return [
         'dry_run_fee_rate' => (float) env('DRY_RUN_FEE_RATE', 0.0005),
         'watchlist' => env('WATCHLIST', 'BTCUSDT'),
         'max_position_usdt' => (float) env('MAX_POSITION_USDT', 150),
+        'funding_tracking_enabled' => filter_var(env('FUNDING_TRACKING_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
     ],
 
     /*
