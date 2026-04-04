@@ -73,5 +73,10 @@ return [
         'long_sl_pct' => (float) env('GRID_LONG_SL_PCT', 5.0),
         'short_tp_pct' => (float) env('GRID_SHORT_TP_PCT', 1.0),
         'short_sl_pct' => (float) env('GRID_SHORT_SL_PCT', 2.0),
+
+        // Auto-add to losing positions (DCA when signal still confirms direction)
+        'auto_add_enabled' => filter_var(env('GRID_AUTO_ADD_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+        'auto_add_loss_pct' => (float) env('GRID_AUTO_ADD_LOSS_PCT', 1.5),
+        'auto_add_max_layers' => (int) env('GRID_AUTO_ADD_MAX_LAYERS', 3),
     ],
 ];

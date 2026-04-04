@@ -44,6 +44,7 @@ class BotRun extends Command
         $this->info("  Max positions: " . (Settings::get('max_positions') ?: 30) . " | Position: " . (Settings::get('position_size_pct') ?: 1) . "% of balance x {$leverage}x");
         $this->info("  Max hold: " . (Settings::get('grid_max_hold_minutes') ?: 1440) . " min | Cooldown: " . (Settings::get('grid_cooldown_minutes') ?: 1) . " min");
         $this->info("  RSI filter: " . (Settings::get('grid_rsi_filter') ? 'enabled' : 'disabled'));
+        $this->info("  Auto-add: " . (Settings::get('grid_auto_add_enabled') ? 'enabled (loss>' . (Settings::get('grid_auto_add_loss_pct') ?: 1.5) . '%, max ' . (Settings::get('grid_auto_add_max_layers') ?: 3) . ' layers)' : 'disabled'));
         $this->newLine();
 
         while (! $this->shouldStop) {
@@ -99,6 +100,53 @@ class BotRun extends Command
         $positions = Position::open()->where('symbol', $symbol)->get();
         foreach ($positions as $position) {
             $engine->checkPosition($position, $currentPrice);
+        }
+
+        // --- PHASE 1b: Auto-add to losing positions ---
+        if ($wave !== null && Settings::get('grid_auto_add_enabled')) {
+            $lossThreshold = (float) Settings::get('grid_auto_add_loss_pct') ?: 1.5;
+            $maxLayers = 1 + ((int) Settings::get('grid_auto_add_max_layers') ?: 3);
+
+            // Only auto-add if signal confirms direction and isn't weakening
+            if (in_array($wave->waveState, ['new_wave', 'riding'])) {
+                // Re-fetch — some positions may have been closed by checkPosition above
+                $surviving = Position::open()->where('symbol', $symbol)->get();
+
+                foreach ($surviving as $position) {
+                    // Direction must match current signal
+                    if ($position->side !== $wave->direction) {
+                        continue;
+                    }
+
+                    // Max layers check
+                    if ($position->layer_count >= $maxLayers) {
+                        continue;
+                    }
+
+                    // Must be losing beyond threshold
+                    $pnlPct = $position->side === 'LONG'
+                        ? (($currentPrice - $position->entry_price) / $position->entry_price) * 100
+                        : (($position->entry_price - $currentPrice) / $position->entry_price) * 100;
+
+                    if ($pnlPct > -$lossThreshold) {
+                        continue;
+                    }
+
+                    // Calculate add amount (same dynamic sizing as new positions)
+                    $positionSizePct = (float) Settings::get('position_size_pct') ?: 1.0;
+                    $leverage = (int) Settings::get('leverage') ?: 5;
+                    $accountData = $exchange->getAccountData();
+                    $margin = $accountData['walletBalance'] * ($positionSizePct / 100);
+                    $addUsdt = round($margin * max($leverage, 1), 2);
+
+                    try {
+                        $engine->addToPosition($position, $addUsdt);
+                        $this->info("  [{$symbol}] AUTO-ADD {$position->side} layer {$position->layer_count} @ {$currentPrice} (loss: " . round($pnlPct, 2) . '%)');
+                    } catch (\Throwable $e) {
+                        $this->warn("  [{$symbol}] Auto-add failed: {$e->getMessage()}");
+                    }
+                }
+            }
         }
 
         // --- PHASE 2: Evaluate new grid entry ---

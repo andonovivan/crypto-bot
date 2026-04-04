@@ -49,6 +49,11 @@ class Settings
         'grid_long_sl_pct' => ['config' => 'crypto.grid.long_sl_pct', 'type' => 'float', 'label' => 'Long SL (%)'],
         'grid_short_tp_pct' => ['config' => 'crypto.grid.short_tp_pct', 'type' => 'float', 'label' => 'Short TP (%)'],
         'grid_short_sl_pct' => ['config' => 'crypto.grid.short_sl_pct', 'type' => 'float', 'label' => 'Short SL (%)'],
+
+        // Auto-add to losing positions
+        'grid_auto_add_enabled' => ['config' => 'crypto.grid.auto_add_enabled', 'type' => 'bool', 'label' => 'Auto Add to Losing Positions'],
+        'grid_auto_add_loss_pct' => ['config' => 'crypto.grid.auto_add_loss_pct', 'type' => 'float', 'label' => 'Auto Add Loss Threshold (%)'],
+        'grid_auto_add_max_layers' => ['config' => 'crypto.grid.auto_add_max_layers', 'type' => 'int', 'label' => 'Auto Add Max Layers'],
     ];
 
     /**
