@@ -109,16 +109,8 @@
       <div class="card-value neutral" id="margin-in-use">-</div>
     </div>
     <div class="card">
-      <div class="card-label">Combined P&amp;L</div>
-      <div class="card-value" id="combined">-</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Realized P&amp;L</div>
-      <div class="card-value" id="realized">-</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Unrealized P&amp;L</div>
-      <div class="card-value" id="unrealized">-</div>
+      <div class="card-label">P&amp;L (Net)</div>
+      <div class="card-value" id="net-pnl">-</div>
     </div>
     <div class="card">
       <div class="card-label">Total Fees</div>
@@ -430,17 +422,9 @@ function render(data) {
   document.getElementById('available-balance').textContent = '$' + fmtNum(s.available_balance, 2);
   document.getElementById('margin-in-use').textContent = '$' + fmtNum(s.margin_in_use, 2);
 
-  document.getElementById('combined').className = 'card-value';
-  document.getElementById('combined').style.color = pnlColor(s.combined_pnl);
-  document.getElementById('combined').textContent = pnlStr(s.combined_pnl);
-
-  document.getElementById('realized').className = 'card-value';
-  document.getElementById('realized').style.color = pnlColor(s.realized_pnl);
-  document.getElementById('realized').textContent = pnlStr(s.realized_pnl);
-
-  document.getElementById('unrealized').className = 'card-value';
-  document.getElementById('unrealized').style.color = pnlColor(s.unrealized_pnl);
-  document.getElementById('unrealized').textContent = pnlStr(s.unrealized_pnl);
+  document.getElementById('net-pnl').className = 'card-value';
+  document.getElementById('net-pnl').style.color = pnlColor(s.net_pnl);
+  document.getElementById('net-pnl').textContent = pnlStr(s.net_pnl);
 
   document.getElementById('total-fees').textContent = '-$' + fmtNum(Math.abs(s.total_fees), 2);
 

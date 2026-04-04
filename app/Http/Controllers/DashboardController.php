@@ -64,52 +64,59 @@ class DashboardController extends Controller
         // Estimate fees for open positions (entry + projected exit at current price)
         $feeRateCache = [];
 
-        return response()->json([
-            'positions' => $openPositions->map(function (Position $p) use ($exchange, &$feeRateCache) {
-                $currentPrice = $p->current_price ?? $p->entry_price;
+        $positionsData = $openPositions->map(function (Position $p) use ($exchange, &$feeRateCache) {
+            $currentPrice = $p->current_price ?? $p->entry_price;
 
-                // Get taker fee rate (cached per symbol)
-                if (! isset($feeRateCache[$p->symbol])) {
-                    try {
-                        $rates = $exchange->getCommissionRate($p->symbol);
-                        $feeRateCache[$p->symbol] = $rates['taker'];
-                    } catch (\Throwable) {
-                        $feeRateCache[$p->symbol] = (float) Settings::get('dry_run_fee_rate') ?: 0.0005;
-                    }
+            // Get taker fee rate (cached per symbol)
+            if (! isset($feeRateCache[$p->symbol])) {
+                try {
+                    $rates = $exchange->getCommissionRate($p->symbol);
+                    $feeRateCache[$p->symbol] = $rates['taker'];
+                } catch (\Throwable) {
+                    $feeRateCache[$p->symbol] = (float) Settings::get('dry_run_fee_rate') ?: 0.0005;
                 }
-                $takerRate = $feeRateCache[$p->symbol];
+            }
+            $takerRate = $feeRateCache[$p->symbol];
 
-                $entryFee = $p->entry_price * $p->quantity * $takerRate;
-                $exitFee = $currentPrice * $p->quantity * $takerRate;
-                $estimatedFees = round($entryFee + $exitFee, 4);
-                $netPnl = round(($p->unrealized_pnl ?? 0) - $estimatedFees, 4);
+            $entryFee = $p->entry_price * $p->quantity * $takerRate;
+            $exitFee = $currentPrice * $p->quantity * $takerRate;
+            $estimatedFees = round($entryFee + $exitFee, 4);
+            $netPnl = round(($p->unrealized_pnl ?? 0) - $estimatedFees, 4);
 
-                return [
-                    'id' => $p->id,
-                    'symbol' => $p->symbol,
-                    'side' => $p->side,
-                    'entry_price' => $p->entry_price,
-                    'current_price' => $currentPrice,
-                    'quantity' => $p->quantity,
-                    'position_size_usdt' => $p->position_size_usdt,
-                    'unrealized_pnl' => $p->unrealized_pnl,
-                    'pnl_pct' => $p->entry_price > 0
-                        ? round($p->side === 'LONG'
-                            ? (($currentPrice - $p->entry_price) / $p->entry_price) * 100
-                            : (($p->entry_price - $currentPrice) / $p->entry_price) * 100, 2)
-                        : 0,
-                    'estimated_fees' => $estimatedFees,
-                    'net_pnl' => $netPnl,
-                    'best_price' => $p->best_price,
-                    'stop_loss_price' => $p->stop_loss_price,
-                    'take_profit_price' => $p->take_profit_price,
-                    'leverage' => $p->leverage,
-                    'layer_count' => $p->layer_count,
-                    'is_dry_run' => $p->is_dry_run,
-                    'opened_at' => $p->opened_at->timestamp,
-                    'expires_at' => $p->expires_at?->timestamp,
-                ];
-            }),
+            return [
+                'id' => $p->id,
+                'symbol' => $p->symbol,
+                'side' => $p->side,
+                'entry_price' => $p->entry_price,
+                'current_price' => $currentPrice,
+                'quantity' => $p->quantity,
+                'position_size_usdt' => $p->position_size_usdt,
+                'unrealized_pnl' => $p->unrealized_pnl,
+                'pnl_pct' => $p->entry_price > 0
+                    ? round($p->side === 'LONG'
+                        ? (($currentPrice - $p->entry_price) / $p->entry_price) * 100
+                        : (($p->entry_price - $currentPrice) / $p->entry_price) * 100, 2)
+                    : 0,
+                'estimated_fees' => $estimatedFees,
+                'net_pnl' => $netPnl,
+                'best_price' => $p->best_price,
+                'stop_loss_price' => $p->stop_loss_price,
+                'take_profit_price' => $p->take_profit_price,
+                'leverage' => $p->leverage,
+                'layer_count' => $p->layer_count,
+                'is_dry_run' => $p->is_dry_run,
+                'opened_at' => $p->opened_at->timestamp,
+                'expires_at' => $p->expires_at?->timestamp,
+            ];
+        });
+
+        // Net P&L = realized trades (P&L minus fees) + open positions (unrealized minus estimated fees)
+        $realizedNetPnl = $totalPnl - $totalFees;
+        $openNetPnl = $positionsData->sum('net_pnl');
+        $totalNetPnl = round($realizedNetPnl + $openNetPnl, 4);
+
+        return response()->json([
+            'positions' => $positionsData,
             'recent_trades' => $recentTrades->map(fn (Trade $t) => [
                 'id' => $t->id,
                 'symbol' => $t->symbol,
@@ -133,9 +140,7 @@ class DashboardController extends Controller
                 'available_balance' => round($accountData['availableBalance'], 2),
                 'margin_in_use' => round($accountData['positionMargin'], 2),
                 'margin_balance' => round($accountData['marginBalance'], 2),
-                'combined_pnl' => round($totalPnl + $unrealizedPnl, 4),
-                'realized_pnl' => round($totalPnl, 4),
-                'unrealized_pnl' => round($unrealizedPnl, 4),
+                'net_pnl' => $totalNetPnl,
                 'total_fees' => round($totalFees, 4),
                 'total_invested' => round($totalInvested, 2),
                 'open_positions' => $openPositions->count(),
