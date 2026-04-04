@@ -127,6 +127,12 @@ class BotRun extends Command
             return;
         }
 
+        // Direction conflict: don't open if existing positions are in the opposite direction
+        $hasConflict = $symbolPositions->contains(fn ($p) => $p->side !== $wave->direction);
+        if ($hasConflict) {
+            return;
+        }
+
         // Grid spacing: current price must be >= spacing_pct away from ALL existing entries
         $spacingPct = (float) Settings::get('grid_spacing_pct') ?: 0.5;
         foreach ($symbolPositions as $existing) {

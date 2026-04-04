@@ -184,6 +184,11 @@ class DashboardController extends Controller
                         $canEnter = false;
                     }
 
+                    // Direction conflict: don't open if existing positions are in opposite direction
+                    if ($canEnter && $symbolPositions->contains(fn ($p) => $p->side !== $wave->direction)) {
+                        $canEnter = false;
+                    }
+
                     // Grid spacing check
                     if ($canEnter) {
                         $spacingPct = (float) Settings::get('grid_spacing_pct') ?: 0.5;
