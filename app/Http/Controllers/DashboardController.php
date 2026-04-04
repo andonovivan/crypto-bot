@@ -267,6 +267,42 @@ class DashboardController extends Controller
         }
     }
 
+    public function reversePosition(Request $request, TradingEngine $engine): JsonResponse
+    {
+        $request->validate(['position_id' => 'required|integer']);
+
+        $position = Position::open()->findOrFail($request->position_id);
+
+        try {
+            $result = $engine->reversePosition($position);
+
+            return response()->json([
+                'ok' => true,
+                'closed_trade' => [
+                    'pnl' => $result['trade']->pnl,
+                    'exit_price' => $result['trade']->exit_price,
+                    'fees' => $result['trade']->fees,
+                ],
+                'new_position' => $result['position'] ? [
+                    'id' => $result['position']->id,
+                    'side' => $result['position']->side,
+                    'entry_price' => $result['position']->entry_price,
+                    'quantity' => $result['position']->quantity,
+                    'stop_loss_price' => $result['position']->stop_loss_price,
+                    'take_profit_price' => $result['position']->take_profit_price,
+                ] : null,
+                'warning' => $result['position'] === null
+                    ? 'Position was closed but the reverse open failed. You may want to open a new position manually.'
+                    : null,
+            ]);
+        } catch (\RuntimeException $e) {
+            return response()->json([
+                'ok' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
     public function settings(): JsonResponse
     {
         return response()->json([

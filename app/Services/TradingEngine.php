@@ -436,6 +436,151 @@ class TradingEngine
     }
 
     /**
+     * Reverse a position: close the current position and open a new one in the opposite direction
+     * with the same USDT size. Only allowed when this is the sole open position on the symbol.
+     *
+     * @return array{trade: Trade, position: ?Position}
+     */
+    public function reversePosition(Position $position): array
+    {
+        if ($position->status !== PositionStatus::Open) {
+            throw new \RuntimeException('Cannot reverse a position that is not open');
+        }
+
+        // Only allow reversal when this is the sole position on the symbol (one-way mode safety)
+        $symbolPositionCount = Position::open()->where('symbol', $position->symbol)->count();
+        if ($symbolPositionCount > 1) {
+            throw new \RuntimeException(
+                "Cannot reverse: {$position->symbol} has {$symbolPositionCount} open positions. "
+                . 'Close all other positions on this symbol first.'
+            );
+        }
+
+        // Capture state before closing
+        $symbol = $position->symbol;
+        $positionSizeUsdt = $position->position_size_usdt;
+        $leverage = $position->leverage > 0 ? $position->leverage : 1;
+        $isDryRun = $position->is_dry_run;
+        $newDirection = $position->side === 'LONG' ? 'SHORT' : 'LONG';
+
+        // Step 1: Close the old position
+        $trade = $this->closePosition($position, reason: CloseReason::Reversed);
+
+        // Step 2: Open new position in opposite direction
+        try {
+            $price = $this->exchange->getPrice($symbol);
+
+            // Check available margin (freed from close)
+            $requiredMargin = $positionSizeUsdt / $leverage;
+            $accountData = $this->exchange->getAccountData();
+            if ($accountData['availableBalance'] < $requiredMargin) {
+                Log::warning('Insufficient balance for reverse open leg', [
+                    'symbol' => $symbol,
+                    'required_margin' => $requiredMargin,
+                    'available_balance' => $accountData['availableBalance'],
+                ]);
+                return ['trade' => $trade, 'position' => null];
+            }
+
+            $this->exchange->setLeverage($symbol, $leverage);
+
+            $quantity = $this->exchange->calculateQuantity($symbol, $positionSizeUsdt, $price);
+            if ($quantity <= 0) {
+                Log::warning('Reverse: calculated quantity is zero', ['symbol' => $symbol, 'price' => $price]);
+                return ['trade' => $trade, 'position' => null];
+            }
+
+            $order = $newDirection === 'LONG'
+                ? $this->exchange->openLong($symbol, $quantity)
+                : $this->exchange->openShort($symbol, $quantity);
+
+            $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
+
+            // Place SL/TP — fail-safe: close if placement fails
+            $slTpResult = null;
+            try {
+                $tempPosition = new Position([
+                    'symbol' => $symbol,
+                    'side' => $newDirection,
+                    'sl_order_id' => null,
+                    'tp_order_id' => null,
+                ]);
+                $slTpResult = $this->replaceSlTpOrders($tempPosition, $entryPrice, $order['quantity']);
+            } catch (\Throwable $e) {
+                Log::error('Reverse: failed to set SL/TP — closing new position for safety', [
+                    'symbol' => $symbol,
+                    'direction' => $newDirection,
+                    'error' => $e->getMessage(),
+                ]);
+
+                try {
+                    $newDirection === 'LONG'
+                        ? $this->exchange->closeLong($symbol, $order['quantity'])
+                        : $this->exchange->closeShort($symbol, $order['quantity']);
+                } catch (\Throwable $closeErr) {
+                    Log::error('CRITICAL: Failed to close unprotected reversed position', [
+                        'symbol' => $symbol,
+                        'quantity' => $order['quantity'],
+                        'error' => $closeErr->getMessage(),
+                    ]);
+                }
+
+                return ['trade' => $trade, 'position' => null];
+            }
+
+            // Calculate initial entry fee
+            $rates = $this->exchange->getCommissionRate($symbol);
+            $initialEntryFee = round($entryPrice * $order['quantity'] * $rates['taker'], 8);
+
+            $maxHoldMinutes = (int) Settings::get('grid_max_hold_minutes') ?: 1440;
+
+            $newPosition = Position::create([
+                'symbol' => $symbol,
+                'side' => $newDirection,
+                'entry_price' => $entryPrice,
+                'quantity' => $order['quantity'],
+                'position_size_usdt' => $positionSizeUsdt,
+                'stop_loss_price' => $slTpResult['sl'],
+                'take_profit_price' => $slTpResult['tp'],
+                'current_price' => $entryPrice,
+                'best_price' => $entryPrice,
+                'leverage' => $leverage,
+                'layer_count' => 1,
+                'atr_value' => null,
+                'status' => PositionStatus::Open,
+                'exchange_order_id' => $order['orderId'],
+                'sl_order_id' => $slTpResult['sl_order_id'],
+                'tp_order_id' => $slTpResult['tp_order_id'],
+                'total_entry_fee' => $initialEntryFee,
+                'is_dry_run' => $isDryRun,
+                'opened_at' => now(),
+                'expires_at' => now()->addMinutes($maxHoldMinutes),
+            ]);
+
+            Log::info('Position reversed', [
+                'symbol' => $symbol,
+                'old_side' => $position->side,
+                'new_side' => $newDirection,
+                'entry_price' => $entryPrice,
+                'quantity' => $order['quantity'],
+                'stop_loss' => $slTpResult['sl'],
+                'take_profit' => $slTpResult['tp'],
+            ]);
+
+            return ['trade' => $trade, 'position' => $newPosition];
+
+        } catch (\Throwable $e) {
+            Log::error('Reverse: open leg failed after close', [
+                'symbol' => $symbol,
+                'direction' => $newDirection,
+                'error' => $e->getMessage(),
+            ]);
+
+            return ['trade' => $trade, 'position' => null];
+        }
+    }
+
+    /**
      * Cancel old SL/TP orders and place new ones for a position.
      * Used by both openPosition() and addToPosition().
      *

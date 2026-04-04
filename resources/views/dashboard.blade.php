@@ -45,6 +45,10 @@
     padding: 3px 10px; cursor: pointer; font-size: 0.75em; white-space: nowrap; margin-right: 4px; }
   .btn-add-pos:hover { background: #388bfd; }
   .btn-add-pos:disabled { opacity: 0.4; cursor: default; }
+  .btn-reverse-pos { background: #8957e5; color: #fff; border: none; border-radius: 4px;
+    padding: 3px 10px; cursor: pointer; font-size: 0.75em; white-space: nowrap; margin-right: 4px; }
+  .btn-reverse-pos:hover { background: #a371f7; }
+  .btn-reverse-pos:disabled { opacity: 0.4; cursor: default; }
   .add-input { width: 55px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
     color: #c9d1d9; padding: 3px 5px; font-size: 0.7em; text-align: right; font-family: monospace; margin-right: 4px; }
   .pagination { display: flex; align-items: center; gap: 8px; margin: 8px 0 20px; }
@@ -307,6 +311,7 @@ function reasonBadge(reason) {
     stop_loss: '#f85149',
     expired: '#d29922',
     manual: '#8b949e',
+    reversed: '#8957e5',
   };
   const color = colors[reason] || '#8b949e';
   return `<span style="color:${color};font-weight:bold;font-size:0.85em">${reason.replace('_', ' ').toUpperCase()}</span>`;
@@ -369,6 +374,35 @@ async function addToPosition(id, btn) {
     alert('Error: ' + e.message);
     btn.disabled = false;
     btn.textContent = 'Add';
+  }
+}
+
+async function reversePosition(id, btn) {
+  if (!confirm('Reverse this position? This will close it and open a new one in the opposite direction with the same USDT size.')) return;
+  btn.disabled = true;
+  btn.textContent = 'Reversing...';
+  try {
+    const res = await fetch('/api/reverse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
+      body: JSON.stringify({ position_id: id }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      if (data.warning) {
+        alert(data.warning);
+      }
+      btn.textContent = 'Reversed!';
+      fetchData();
+    } else {
+      alert(data.message || 'Failed to reverse');
+      btn.disabled = false;
+      btn.textContent = 'Reverse';
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Reverse';
   }
 }
 
@@ -440,6 +474,7 @@ function render(data) {
       <td style="white-space:nowrap">
         <input type="number" id="add-amt-${p.id}" class="add-input" placeholder="USDT" min="1" step="1" />
         <button class="btn-add-pos" onclick="addToPosition(${p.id}, this)">Add</button>
+        <button class="btn-reverse-pos" onclick="reversePosition(${p.id}, this)">Reverse</button>
         <button class="btn-close-pos" onclick="closePosition(${p.id}, this)">Close</button>
       </td>
     </tr>`).join('');
