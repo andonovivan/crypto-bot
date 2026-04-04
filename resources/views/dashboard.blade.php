@@ -41,6 +41,12 @@
     padding: 3px 10px; cursor: pointer; font-size: 0.75em; white-space: nowrap; }
   .btn-close-pos:hover { background: #f85149; }
   .btn-close-pos:disabled { opacity: 0.4; cursor: default; }
+  .btn-add-pos { background: #1f6feb; color: #fff; border: none; border-radius: 4px;
+    padding: 3px 10px; cursor: pointer; font-size: 0.75em; white-space: nowrap; margin-right: 4px; }
+  .btn-add-pos:hover { background: #388bfd; }
+  .btn-add-pos:disabled { opacity: 0.4; cursor: default; }
+  .add-input { width: 55px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+    color: #c9d1d9; padding: 3px 5px; font-size: 0.7em; text-align: right; font-family: monospace; margin-right: 4px; }
   .pagination { display: flex; align-items: center; gap: 8px; margin: 8px 0 20px; }
   .pagination button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
     border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 0.8em; }
@@ -332,6 +338,40 @@ async function closePosition(id, btn) {
   }
 }
 
+async function addToPosition(id, btn) {
+  const input = document.getElementById('add-amt-' + id);
+  const amount = parseFloat(input?.value);
+  if (!amount || amount <= 0) {
+    alert('Enter a USDT amount to add');
+    return;
+  }
+  if (!confirm('Add $' + amount.toFixed(2) + ' USDT to this position?')) return;
+  btn.disabled = true;
+  btn.textContent = 'Adding...';
+  try {
+    const res = await fetch('/api/add-margin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
+      body: JSON.stringify({ position_id: id, amount_usdt: amount }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.textContent = 'Added!';
+      if (input) input.value = '';
+      fetchData();
+      setTimeout(() => { btn.disabled = false; btn.textContent = 'Add'; }, 1500);
+    } else {
+      alert(data.message || 'Failed to add');
+      btn.disabled = false;
+      btn.textContent = 'Add';
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Add';
+  }
+}
+
 function sideBadge(side) {
   if (!side) return '';
   const color = side === 'LONG' ? '#3fb950' : '#f85149';
@@ -386,6 +426,7 @@ function render(data) {
         ${sideBadge(p.side)}
         <span style="color:#8b949e;font-size:0.7em;margin-left:2px">${p.leverage || '-'}x</span>
         ${p.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.55em">DRY</span>' : ''}
+        ${p.layer_count > 1 ? `<span style="color:#d29922;font-size:0.65em;margin-left:2px">x${p.layer_count}</span>` : ''}
       </td>
       <td>${formatPrice(p.entry_price)}</td>
       <td>${formatPrice(p.current_price)}</td>
@@ -396,7 +437,11 @@ function render(data) {
       <td>${formatPrice(p.stop_loss_price)} / ${formatPrice(p.take_profit_price)}</td>
       <td style="font-size:0.85em">${formatTimestamp(p.opened_at)}</td>
       <td>${holdTime(p.opened_at, p.expires_at)}</td>
-      <td><button class="btn-close-pos" onclick="closePosition(${p.id}, this)">Close</button></td>
+      <td style="white-space:nowrap">
+        <input type="number" id="add-amt-${p.id}" class="add-input" placeholder="USDT" min="1" step="1" />
+        <button class="btn-add-pos" onclick="addToPosition(${p.id}, this)">Add</button>
+        <button class="btn-close-pos" onclick="closePosition(${p.id}, this)">Close</button>
+      </td>
     </tr>`).join('');
   }
 

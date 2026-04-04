@@ -49,6 +49,9 @@ class BotRun extends Command
         while (! $this->shouldStop) {
             $loopStart = microtime(true);
 
+            // Re-read watchlist each cycle so dashboard changes take effect immediately
+            $watchlist = $waveScanner->getWatchlist();
+
             foreach ($watchlist as $symbol) {
                 if ($this->shouldStop) {
                     break;

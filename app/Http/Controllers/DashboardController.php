@@ -104,6 +104,7 @@ class DashboardController extends Controller
                     'stop_loss_price' => $p->stop_loss_price,
                     'take_profit_price' => $p->take_profit_price,
                     'leverage' => $p->leverage,
+                    'layer_count' => $p->layer_count,
                     'is_dry_run' => $p->is_dry_run,
                     'opened_at' => $p->opened_at->timestamp,
                     'expires_at' => $p->expires_at?->timestamp,
@@ -232,6 +233,38 @@ class DashboardController extends Controller
             'pnl' => $trade->pnl,
             'exit_price' => $trade->exit_price,
         ]);
+    }
+
+    public function addToPosition(Request $request, TradingEngine $engine): JsonResponse
+    {
+        $request->validate([
+            'position_id' => 'required|integer',
+            'amount_usdt' => 'required|numeric|min:1',
+        ]);
+
+        $position = Position::open()->findOrFail($request->position_id);
+
+        try {
+            $updated = $engine->addToPosition($position, (float) $request->amount_usdt);
+
+            return response()->json([
+                'ok' => true,
+                'position' => [
+                    'id' => $updated->id,
+                    'entry_price' => $updated->entry_price,
+                    'quantity' => $updated->quantity,
+                    'position_size_usdt' => $updated->position_size_usdt,
+                    'stop_loss_price' => $updated->stop_loss_price,
+                    'take_profit_price' => $updated->take_profit_price,
+                    'layer_count' => $updated->layer_count,
+                ],
+            ]);
+        } catch (\RuntimeException $e) {
+            return response()->json([
+                'ok' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        }
     }
 
     public function settings(): JsonResponse
