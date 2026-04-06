@@ -170,6 +170,10 @@ class BotRun extends Command
         }
 
         // --- PHASE 2: Evaluate new grid entry ---
+        if (Settings::get('trading_paused')) {
+            return; // Paused — manage existing positions but don't open new ones
+        }
+
         if ($wave === null) {
             return;
         }

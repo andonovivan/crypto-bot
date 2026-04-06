@@ -69,6 +69,11 @@
     padding: 8px 24px; cursor: pointer; font-size: 0.9em; margin-top: 12px; }
   .btn-save:hover { background: #2ea043; }
   .btn-save:disabled { opacity: 0.5; cursor: default; }
+  .btn-pause { background: #30363d; color: #c9d1d9; border: 1px solid #484f58; border-radius: 6px;
+    padding: 8px 16px; cursor: pointer; font-size: 0.9em; margin-right: 8px; }
+  .btn-pause:hover { background: #484f58; }
+  .btn-pause[data-paused] { background: #da3633; color: #fff; border-color: #da3633; }
+  .btn-pause[data-paused]:hover { background: #f85149; }
   .settings-msg { font-size: 0.85em; margin-bottom: 12px; min-height: 1.4em; }
   .footer { color: #484f58; font-size: 0.75em; margin-top: 24px; }
   .empty { color: #484f58; text-align: center; padding: 20px; }
@@ -129,6 +134,7 @@
     <h2 class="section-title" style="margin:0;">Open Positions</h2>
     <div>
       <span class="settings-msg" id="scan-msg" style="margin-right:8px;"></span>
+      <button class="btn-pause" id="pause-btn" onclick="togglePause(this)" style="margin-top:0;">⏸ Pause</button>
       <button class="btn-save" style="margin-top:0;" onclick="scanNow(this)">Scan Now</button>
     </div>
   </div>
@@ -427,6 +433,9 @@ function render(data) {
     ? '<span class="dry-run-badge">DRY RUN</span>'
     : '<span class="live-badge">LIVE</span>';
 
+  // Pause button state
+  updatePauseButton(s.trading_paused);
+
   // Subtitle
   document.getElementById('positions-count-sub').textContent = s.open_positions;
   document.getElementById('updated').textContent = new Date(data.ts * 1000).toLocaleTimeString();
@@ -589,6 +598,34 @@ async function saveSettings(btn) {
 
   btn.disabled = false;
   btn.textContent = 'Save Settings';
+}
+
+async function togglePause(btn) {
+  btn.disabled = true;
+  const isPaused = btn.hasAttribute('data-paused');
+  try {
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
+      body: JSON.stringify({ settings: { trading_paused: !isPaused } }),
+    });
+    updatePauseButton(!isPaused);
+    fetchData();
+  } catch (e) {
+    console.error('Toggle pause failed:', e);
+  }
+  btn.disabled = false;
+}
+
+function updatePauseButton(paused) {
+  const btn = document.getElementById('pause-btn');
+  if (paused) {
+    btn.setAttribute('data-paused', '');
+    btn.textContent = '\u25B6 Resume';
+  } else {
+    btn.removeAttribute('data-paused');
+    btn.textContent = '\u23F8 Pause';
+  }
 }
 
 async function scanNow(btn) {

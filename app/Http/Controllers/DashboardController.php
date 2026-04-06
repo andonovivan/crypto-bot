@@ -167,6 +167,7 @@ class DashboardController extends Controller
                 'losing_trades' => $losingTrades,
                 'win_rate' => $winRate,
                 'dry_run' => (bool) Settings::get('dry_run'),
+                'trading_paused' => (bool) Settings::get('trading_paused'),
             ],
             'ts' => now()->timestamp,
         ]);
@@ -223,6 +224,11 @@ class DashboardController extends Controller
                             }
                         }
                     }
+                }
+
+                // Pause check
+                if ($autoTrade && $canEnter && Settings::get('trading_paused')) {
+                    $canEnter = false;
                 }
 
                 if ($autoTrade && $canEnter) {
