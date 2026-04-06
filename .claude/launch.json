@@ -3,10 +3,10 @@
   "configurations": [
     {
       "name": "dashboard",
-      "runtimeExecutable": "echo",
-      "runtimeArgs": ["Dashboard already running in Docker on port 8090"],
-      "port": 8090,
-      "autoPort": false
+      "runtimeExecutable": "sleep",
+      "runtimeArgs": ["86400"],
+      "port": 8091,
+      "urlOverride": "http://localhost:8090"
     }
   ]
 }

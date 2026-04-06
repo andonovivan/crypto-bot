@@ -176,8 +176,10 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 | GET | `/` | Dashboard view |
 | GET | `/api/data` | Positions (with estimated fees & net P&L), trades, summary JSON |
 | GET | `/api/settings` | Current settings |
+| GET | `/api/scanner` | Scan all watchlist symbols: signals, blocked reasons, entry eligibility |
 | POST | `/api/settings` | Save settings `{settings: {key: value}}` |
-| POST | `/api/scan` | Manual scan with grid checks `{auto_trade: bool}` |
+| POST | `/api/scan` | Scan + auto-trade with grid checks `{auto_trade: bool}` |
+| POST | `/api/open-position` | Manually open position `{symbol: string, direction: 'LONG'\|'SHORT'}` |
 | POST | `/api/close` | Close position `{position_id: int}` |
 | POST | `/api/add` | Add to position `{position_id: int, amount: float}` |
 | POST | `/api/reverse` | Reverse position direction `{position_id: int}` |
@@ -230,10 +232,21 @@ Laravel 13 (PHP 8.4) **grid trading bot** for Binance Futures. Opens multiple co
 
 ## Dashboard
 
-- **Cards**: Wallet balance, available balance, margin in use, P&L (Net), fees, funding, win rate
-- **Open Positions table**: Symbol (with side/leverage/DRY/layer badges), entry/current price, unrealized P&L, P&L%, size (notional USDT), net P&L (with fees + funding rate + accumulated funding), SL/TP, opened time, hold time, Add/Reverse/Close buttons
-- **Scan Now button**: Manual trigger for grid scan with auto-trade (respects grid spacing and cooldown)
-- **Trade History table**: Symbol (with side/leverage/DRY badge), entry/exit price, P&L, P&L%, size, fees (with funding breakdown), net P&L, close reason, opened/closed time
+Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
+
+- **Dashboard tab**:
+  - **Cards**: Wallet balance, available balance, margin in use, P&L (Net), fees, funding, win rate
+  - **Open Positions table**: Symbol (with side/leverage/DRY/layer badges), entry/current price, unrealized P&L, P&L%, size (notional USDT), net P&L (with fees + funding rate + accumulated funding), SL/TP, opened time, hold time, Add/Reverse/Close buttons
+- **Scanner tab**:
+  - **Scanner table**: Per-symbol signal data — direction (LONG/SHORT), wave state (new_wave/riding/weakening), RSI, price, open position count, entry status (allowed or blocked with reasons)
+  - **Blocked reasons**: Trading paused, max total positions, wave weakening, RSI filtered, cooldown, max per symbol, direction conflict, grid spacing too close
+  - **Scan button**: View-only scan — fetches latest signals without opening positions
+  - **Scan + Auto Trade button**: Scans and automatically opens positions where all entry conditions pass
+  - **Pause/Resume button**: Toggles `trading_paused` setting — existing positions keep running, only new entries are blocked
+  - **Open Long/Short buttons**: Per-symbol manual position opening from the scanner table
+  - **Manual open form**: Symbol dropdown + direction select for opening positions on any watchlist symbol
+  - Auto-scans on first tab visit; no auto-refresh timer (kline API calls are heavier)
+- **Trade History tab**: Symbol (with side/leverage/DRY badge), entry/exit price, P&L, P&L%, size, fees (with funding breakdown), net P&L, close reason, opened/closed time
 - **Settings tab**: All runtime-configurable settings
 - **Formatting**: Thousand separators on all dollar amounts ($66,591.10), subscript notation for micro-prices, inline color styling for P&L values
 

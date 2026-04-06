@@ -74,6 +74,20 @@
   .btn-pause:hover { background: #484f58; }
   .btn-pause[data-paused] { background: #da3633; color: #fff; border-color: #da3633; }
   .btn-pause[data-paused]:hover { background: #f85149; }
+  .btn-open-long { background: #238636; color: #fff; border: none; border-radius: 4px;
+    padding: 3px 10px; cursor: pointer; font-size: 0.75em; white-space: nowrap; margin-right: 4px; }
+  .btn-open-long:hover { background: #2ea043; }
+  .btn-open-long:disabled { opacity: 0.4; cursor: default; }
+  .btn-open-short { background: #da3633; color: #fff; border: none; border-radius: 4px;
+    padding: 3px 10px; cursor: pointer; font-size: 0.75em; white-space: nowrap; }
+  .btn-open-short:hover { background: #f85149; }
+  .btn-open-short:disabled { opacity: 0.4; cursor: default; }
+  .btn-scan { background: #1f6feb; color: #fff; border: none; border-radius: 6px;
+    padding: 8px 16px; cursor: pointer; font-size: 0.9em; }
+  .btn-scan:hover { background: #388bfd; }
+  .btn-scan:disabled { opacity: 0.5; cursor: default; }
+  .wave-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 0.7em;
+    font-weight: bold; text-transform: uppercase; letter-spacing: 0.03em; }
   .settings-msg { font-size: 0.85em; margin-bottom: 12px; min-height: 1.4em; }
   .footer { color: #484f58; font-size: 0.75em; margin-top: 24px; }
   .empty { color: #484f58; text-align: center; padding: 20px; }
@@ -93,6 +107,7 @@
 
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
+  <button class="tab-btn" onclick="switchTab('scanner')">Scanner</button>
   <button class="tab-btn" onclick="switchTab('history')">Trade History</button>
   <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
 </div>
@@ -130,14 +145,7 @@
     </div>
   </div>
 
-  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-    <h2 class="section-title" style="margin:0;">Open Positions</h2>
-    <div>
-      <span class="settings-msg" id="scan-msg" style="margin-right:8px;"></span>
-      <button class="btn-pause" id="pause-btn" onclick="togglePause(this)" style="margin-top:0;">⏸ Pause</button>
-      <button class="btn-save" style="margin-top:0;" onclick="scanNow(this)">Scan Now</button>
-    </div>
-  </div>
+  <h2 class="section-title">Open Positions</h2>
   <table>
     <thead>
       <tr>
@@ -156,6 +164,47 @@
     </thead>
     <tbody id="positions-body"><tr><td colspan="11" class="empty">Loading...</td></tr></tbody>
   </table>
+</div>
+
+<!-- Scanner Tab -->
+<div id="tab-scanner" class="tab-pane">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+    <h2 class="section-title" style="margin:0;">Market Scanner</h2>
+    <div style="display:flex; align-items:center;">
+      <span class="settings-msg" id="scan-msg" style="margin-right:8px;"></span>
+      <button class="btn-pause" id="pause-btn" onclick="togglePause(this)" style="margin-top:0;">⏸ Pause</button>
+      <button class="btn-scan" id="scan-btn" onclick="fetchScannerData(this)">Scan</button>
+      <button class="btn-save" style="margin-top:0; margin-left:8px;" onclick="scanNow(this)">Scan + Auto Trade</button>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th onclick="sortTable('scanner', 'symbol')">Symbol <span class="sort-arrow" id="scan-sort-symbol"></span></th>
+        <th onclick="sortTable('scanner', 'direction')">Direction <span class="sort-arrow" id="scan-sort-direction"></span></th>
+        <th onclick="sortTable('scanner', 'wave_state')">Wave State <span class="sort-arrow" id="scan-sort-wave_state"></span></th>
+        <th onclick="sortTable('scanner', 'rsi')">RSI <span class="sort-arrow" id="scan-sort-rsi"></span></th>
+        <th onclick="sortTable('scanner', 'current_price')">Price <span class="sort-arrow" id="scan-sort-current_price"></span></th>
+        <th onclick="sortTable('scanner', 'open_positions')">Positions <span class="sort-arrow" id="scan-sort-open_positions"></span></th>
+        <th>Status</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="scanner-body"><tr><td colspan="8" class="empty">Click Scan to analyze watchlist symbols</td></tr></tbody>
+  </table>
+
+  <div style="margin-top:16px; padding:16px; background:#161b22; border:1px solid #30363d; border-radius:8px; display:flex; align-items:center; gap:12px;">
+    <span style="color:#8b949e; font-size:0.85em; white-space:nowrap;">Manual Open:</span>
+    <select id="manual-symbol" style="background:#0d1117; border:1px solid #30363d; border-radius:4px; color:#c9d1d9; padding:6px 10px; font-size:0.85em;">
+      <option value="">Select symbol...</option>
+    </select>
+    <select id="manual-direction" style="background:#0d1117; border:1px solid #30363d; border-radius:4px; color:#c9d1d9; padding:6px 10px; font-size:0.85em;">
+      <option value="LONG">LONG</option>
+      <option value="SHORT">SHORT</option>
+    </select>
+    <button class="btn-open-long" style="padding:6px 16px; font-size:0.85em;" onclick="openManualPosition(this)">Open Position</button>
+    <span id="manual-msg" class="settings-msg" style="margin:0;"></span>
+  </div>
 </div>
 
 <!-- History Tab -->
@@ -212,13 +261,19 @@ let lastData = null;
 const sortState = {
   positions: { key: 'opened_at', asc: false },
   history: { key: 'created_at', asc: false },
+  scanner: { key: 'symbol', asc: true },
 };
+let scannerData = null;
+let scannerLoaded = false;
 
 function switchTab(name) {
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   document.querySelector('.tab-btn[onclick*="' + name + '"]').classList.add('active');
+  if (name === 'scanner' && !scannerLoaded) {
+    fetchScannerData(document.getElementById('scan-btn'));
+  }
 }
 
 function sortData(items, key, asc) {
@@ -235,7 +290,8 @@ function sortTable(table, key) {
   const state = sortState[table];
   if (state.key === key) { state.asc = !state.asc; }
   else { state.key = key; state.asc = true; }
-  if (lastData) render(lastData);
+  if (table === 'scanner' && scannerData) { renderScanner(scannerData); }
+  else if (lastData) { render(lastData); }
 }
 
 function fmtNum(val, decimals) {
@@ -649,6 +705,8 @@ async function scanNow(btn) {
       msg.style.color = '#3fb950';
       msg.textContent = text;
       fetchData();
+      // Refresh scanner table with latest data
+      fetchScannerData(document.getElementById('scan-btn'));
     }
   } catch (e) {
     msg.style.color = '#f85149';
@@ -656,7 +714,156 @@ async function scanNow(btn) {
   }
 
   btn.disabled = false;
-  btn.textContent = 'Scan Now';
+  btn.textContent = 'Scan + Auto Trade';
+}
+
+async function fetchScannerData(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning...'; }
+  try {
+    const res = await fetch('/api/scanner');
+    const data = await res.json();
+    if (data.ok) {
+      scannerData = data;
+      scannerLoaded = true;
+      renderScanner(data);
+      // Populate manual open dropdown
+      const sel = document.getElementById('manual-symbol');
+      const current = sel.value;
+      sel.innerHTML = '<option value="">Select symbol...</option>' +
+        data.symbols.map(s => `<option value="${s.symbol}" ${s.symbol === current ? 'selected' : ''}>${s.symbol}</option>`).join('');
+    }
+  } catch (e) {
+    console.error('Scanner fetch failed:', e);
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Scan'; }
+}
+
+function waveBadge(state) {
+  if (!state) return '<span style="color:#484f58">-</span>';
+  const colors = {
+    new_wave: { bg: '#238636', fg: '#fff' },
+    riding: { bg: '#1f6feb', fg: '#fff' },
+    weakening: { bg: '#9e6a03', fg: '#fff' },
+  };
+  const c = colors[state] || { bg: '#30363d', fg: '#8b949e' };
+  const label = state.replace('_', ' ');
+  return `<span class="wave-badge" style="background:${c.bg};color:${c.fg}">${label}</span>`;
+}
+
+function rsiColor(rsi) {
+  if (rsi === null) return '#8b949e';
+  if (rsi >= 70) return '#f85149';
+  if (rsi <= 30) return '#3fb950';
+  return '#c9d1d9';
+}
+
+function renderScanner(data) {
+  const body = document.getElementById('scanner-body');
+  if (!data.symbols || data.symbols.length === 0) {
+    body.innerHTML = '<tr><td colspan="8" class="empty">No watchlist symbols configured</td></tr>';
+    return;
+  }
+
+  const sorted = sortData([...data.symbols], sortState.scanner.key, sortState.scanner.asc);
+  body.innerHTML = sorted.map(s => {
+    const dirBadge = s.direction ? sideBadge(s.direction) : '<span style="color:#484f58">No signal</span>';
+    const statusIcon = s.can_enter
+      ? '<span style="color:#3fb950;font-weight:bold">&#10003;</span>'
+      : '<span style="color:#f85149;font-weight:bold">&#10007;</span>';
+    const reasonText = s.blocked_reasons.length > 0
+      ? `<br><span style="color:#8b949e;font-size:0.75em" title="${s.blocked_reasons.join('\n')}">${s.blocked_reasons[0]}</span>`
+      : '';
+
+    return `<tr>
+      <td><strong>${s.symbol}</strong></td>
+      <td>${dirBadge}</td>
+      <td>${waveBadge(s.wave_state)}</td>
+      <td style="color:${rsiColor(s.rsi)}">${s.rsi !== null ? s.rsi.toFixed(1) : '-'}</td>
+      <td>${s.current_price !== null ? formatPrice(s.current_price) : '-'}</td>
+      <td>${s.open_positions}</td>
+      <td>${statusIcon}${reasonText}</td>
+      <td style="white-space:nowrap">
+        <button class="btn-open-long" onclick="openPosition('${s.symbol}', 'LONG', this)"
+          ${!s.direction ? 'disabled' : ''}>Long</button>
+        <button class="btn-open-short" onclick="openPosition('${s.symbol}', 'SHORT', this)"
+          ${!s.direction ? 'disabled' : ''}>Short</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function openPosition(symbol, direction, btn) {
+  if (!confirm(`Open ${direction} position on ${symbol}?`)) return;
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = 'Opening...';
+
+  try {
+    const res = await fetch('/api/open-position', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
+      body: JSON.stringify({ symbol, direction }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.textContent = 'Opened!';
+      fetchData();
+      fetchScannerData(document.getElementById('scan-btn'));
+      setTimeout(() => { btn.disabled = false; btn.textContent = origText; }, 1500);
+    } else {
+      alert(data.message || 'Failed to open position');
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+async function openManualPosition(btn) {
+  const symbolSel = document.getElementById('manual-symbol');
+  const dirSel = document.getElementById('manual-direction');
+  const msg = document.getElementById('manual-msg');
+  msg.textContent = '';
+
+  const symbol = symbolSel.value;
+  const direction = dirSel.value;
+
+  if (!symbol) {
+    msg.style.color = '#f85149';
+    msg.textContent = 'Select a symbol first';
+    return;
+  }
+
+  if (!confirm(`Open ${direction} position on ${symbol}?`)) return;
+  btn.disabled = true;
+  btn.textContent = 'Opening...';
+
+  try {
+    const res = await fetch('/api/open-position', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
+      body: JSON.stringify({ symbol, direction }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      msg.style.color = '#3fb950';
+      msg.textContent = `Opened ${direction} on ${symbol} @ ${formatPrice(data.position.entry_price).replace(/<[^>]+>/g, '')}`;
+      fetchData();
+      fetchScannerData(document.getElementById('scan-btn'));
+    } else {
+      msg.style.color = '#f85149';
+      msg.textContent = data.message || 'Failed to open position';
+    }
+  } catch (e) {
+    msg.style.color = '#f85149';
+    msg.textContent = 'Error: ' + e.message;
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Open Position';
 }
 
 async function resetAll(btn) {
