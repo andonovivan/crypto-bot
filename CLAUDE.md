@@ -11,12 +11,15 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 - **app** — Dashboard web server (port 8090, runs migrations on startup)
 - **bot** — Continuous scan loop (`bot:run`, configurable scan interval, default 30s)
 - **scheduler** — Laravel scheduler (`schedule:run` loop)
-- App runs migrations; bot/scheduler wait for app to start first
+- **ws-worker** — Long-running WebSocket worker (`bot:ws-prices`) that subscribes to Binance `!markPrice@arr` and writes to the `binance:prices` cache key (30s TTL). `BinanceExchange::getPrice()` reads that cache, so this replaces 10s REST polling with sub-second push updates. Has `extra_hosts: fstream.binance.com:18.178.11.87` to bypass ISP DNS hijacking (host `/etc/hosts` propagation only covers `fapi.binance.com`). If the worker dies, cache entries expire in 30s and `getPrice()` falls back to REST transparently.
+- App runs migrations; bot/scheduler/ws-worker wait for app to start first
 
 ### Exchange Abstraction
 - `ExchangeInterface` — contract for all exchange operations
 - `BinanceExchange` — real Binance Futures API (HMAC-SHA256 signed requests)
 - `DryRunExchange` — wraps real exchange for market data, simulates trades in DB
+- `ExchangeDispatcher` — implements `ExchangeInterface` and is the binding for `ExchangeInterface::class` in the container. On every call it reads `Settings::get('dry_run')` and delegates to either the live or dry instance. This makes the dashboard `dry_run` toggle effective at the next bot cycle without a container restart.
+- **CAUTION**: flipping `dry_run` while positions are open will route their closes to the newly-active exchange (which won't know about them). **Close all open positions before toggling.**
 - **Account data**: `getAccountData()` returns wallet balance, available balance, unrealized profit, margin balance, position margin, maintenance margin
   - BinanceExchange: calls `/fapi/v2/account` (cached 10s)
   - DryRunExchange: calculates from DB — margin = `position_size_usdt / leverage` (not full notional). Wallet balance includes realized P&L + closed funding + open funding.
@@ -41,7 +44,7 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 3. **15m downtrend (Strict rule)**:
    - EMA fast (default 9) < EMA slow (default 21) on BOTH current and prior 15m candle
    - Current price (close of last closed candle) < EMA fast
-   - Last CLOSED 15m candle is red (close < open) — uses `candles[last-1]`, not the in-progress candle
+   - **Last N CLOSED 15m candles are red** (close < open) — where N = `min_red_candles` (default 2). Checks `candles[last-1]` and `candles[last-2]`, not the in-progress candle. Filters dead-cat-bounce setups.
    - Candle body of last closed candle <= `max_candle_body_pct` (default 3%) — skips frenzied volatility
 4. **Funding guard**: current funding rate >= -0.05% (avoid paying heavy funding against us)
 5. **Capacity gates**: trading not paused, global `max_positions` not hit, no open position on this symbol, cooldown cleared
@@ -67,15 +70,17 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 - **Kline cache**: 15-second TTL in-memory cache prevents duplicate API calls within same loop iteration
 
 ### Position Management (SHORT-only)
-- **SHORT entry**: `TradingEngine::openShort(ShortSignal)` — calculates qty from margin × leverage / entry price, places STOP_MARKET SL + TAKE_PROFIT_MARKET TP brackets
+- **SHORT entry**: `TradingEngine::openShort(ShortSignal)` — calculates qty from margin × leverage / entry price, places SHORT via `placeEntryOrder()`, then STOP_MARKET SL + TAKE_PROFIT_MARKET TP brackets
+- **Entry flow (`placeEntryOrder`)**: if `use_post_only_entry` is true, attempt a LIMIT SELL at best ask with `timeInForce=GTX` (post-only, maker-only). Poll order status every 500ms for `limit_order_timeout_seconds` (default 3s). On full fill → return `entry_type=LIMIT_MAKER`. On partial fill + timeout → cancel, MARKET the remainder → `entry_type=MIXED`. On timeout with no fill, or post-only rejection (Binance -2021/-2010) → MARKET the full qty → `entry_type=MARKET_FALLBACK`. If `use_post_only_entry=false`, skip straight to MARKET (`entry_type=MARKET`). LONG entries (via `reversePosition`) always use MARKET.
+- **Maker fee discount**: When `entry_type=LIMIT_MAKER`, entry-side fees use the maker rate instead of taker. MIXED/MARKET_FALLBACK/MARKET use taker.
 - **One position per symbol (invariant)**: enforced in `openShort` via open-position existence check. Not a user setting.
 - **SL/TP order tracking**: Each position stores `sl_order_id` and `tp_order_id`. On close, only that position's orders are cancelled.
 - **SL/TP fail-safe**: If SL or TP order placement fails after opening, the position is immediately closed and any partial orders cancelled. No unprotected positions.
 - **Margin check**: Before opening, verifies `availableBalance >= margin`
 - **P&L (SHORT)**: `(entry - current) × qty`
-- **Fees**: Deducted on close — entry fee + exit fee (taker rate on notional). Stored in `Trade.fees`.
+- **Fees**: Deducted on close — entry fee + exit fee. Exit is always taker (MARKET close). Entry is maker or taker depending on `entry_type`. Stored in `Trade.fees`.
 - **Funding fees**: Accumulated per position via `FundingSettlementService` at 8h boundaries. Snapshotted into `Trade.funding_fee` on close.
-- **Manual actions** (dashboard): `addToPosition` averages entry with new margin; `reversePosition` closes the SHORT and opens a LONG with the same USDT size (LONG positions created this way still get checked for TP/SL/expiry by the engine but are never auto-opened).
+- **Manual actions** (dashboard): `addToPosition` averages entry with new margin (also routed through `placeEntryOrder`); `reversePosition` closes the SHORT and opens a LONG with the same USDT size (LONG positions created this way still get checked for TP/SL/expiry by the engine but are never auto-opened).
 
 ### Funding Rate Tracking
 - **Mechanism**: Binance perpetual futures settle funding every 8h (00:00, 08:00, 16:00 UTC). Positive rate = longs pay shorts; negative = shorts pay longs.
@@ -93,16 +98,18 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 | `app/Services/ShortAnalysis.php` | Readonly DTO: EMA fast/slow, candle state, funding rate, downtrendOk, blockedReason |
 | `app/Services/ShortSignal.php` | Lightweight DTO for `TradingEngine::openShort` |
 | `app/Services/TechnicalAnalysis.php` | EMA calculations |
-| `app/Services/TradingEngine.php` | SHORT open/close/checkPosition, manual add/reverse helpers |
-| `app/Services/Settings.php` | DB-first settings with config fallback (19 keys total) |
+| `app/Services/TradingEngine.php` | SHORT open/close/checkPosition, `placeEntryOrder` (post-only → MARKET fallback), manual add/reverse helpers |
+| `app/Services/Settings.php` | DB-first settings with config fallback |
 | `app/Services/FundingSettlementService.php` | 8h funding rate settlement for open positions |
 | `app/Services/Exchange/ExchangeInterface.php` | Contract for all exchange operations |
 | `app/Services/Exchange/BinanceExchange.php` | Binance Futures API (LONG + SHORT) |
 | `app/Services/Exchange/DryRunExchange.php` | Paper trading simulation |
+| `app/Services/Exchange/ExchangeDispatcher.php` | Runtime router: reads `Settings::get('dry_run')` on each call, delegates to live or dry |
 | `app/Http/Controllers/DashboardController.php` | All API endpoints |
 | `resources/views/dashboard.blade.php` | Single-page dark theme dashboard |
 | `routes/web.php` | Route definitions |
 | `app/Console/Commands/BotRun.php` | Continuous scan+monitor loop with graceful shutdown |
+| `app/Console/Commands/BotWsPrices.php` | Long-running WebSocket worker for `!markPrice@arr` → `binance:prices` cache |
 | `app/Console/Commands/BotStatus.php` | CLI status overview |
 | `bootstrap/app.php` | CSRF exemption for `api/*` routes |
 | `config/crypto.php` | Default config values |
@@ -115,11 +122,12 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 | `position_size_pct` | 10.0 | Margin as % of wallet (aggressive sizing) |
 | `max_positions` | 10 | Max concurrent open positions across all symbols |
 | `leverage` | 25 | Futures leverage |
-| `dry_run` | true | Paper trading mode |
+| `dry_run` | true | Paper trading mode (runtime toggle via `ExchangeDispatcher` — close positions before flipping) |
 | `starting_balance` | 10000 | Simulated starting balance |
-| `dry_run_fee_rate` | 0.0005 | Dry-run simulated fee rate (0.05%) |
+| `dry_run_fee_rate` | 0.0005 | Dry-run simulated taker fee rate (0.05%); maker uses half |
 | `trading_paused` | false | Pause new-position opening (existing positions still managed) |
 | `funding_tracking_enabled` | true | Track funding fees per position |
+| `ws_prices_enabled` | true | WebSocket price stream (documentation toggle; worker is process-level) |
 
 ### Short-Scalp Strategy
 | Key | Default | Description |
@@ -135,6 +143,9 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 | `max_hold_minutes` | 120 | Hard expiry (2h) |
 | `cooldown_minutes` | 120 | Post-close wait before re-entering same symbol (2h) |
 | `max_candle_body_pct` | 3.0 | Reject if last 15m candle body exceeds this (frenzied volatility filter) |
+| `min_red_candles` | 2 | Minimum consecutive closed 15m red candles required (1 = old behavior, 2 = default, 3 = conservative) |
+| `use_post_only_entry` | true | Attempt LIMIT maker entry at best ask; fall back to MARKET on timeout/rejection |
+| `limit_order_timeout_seconds` | 3 | Poll window for post-only fill before MARKET fallback |
 
 ## API Endpoints
 
@@ -176,13 +187,14 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 
 - **Ticker scan**: `getFuturesTickers()` — 1 API weight per cycle, returns 24h stats for ALL USDT perps
 - **Per-candidate klines**: `getKlines(symbol, '15m', 30)` — 1 weight per candidate, 15s in-memory cache dedupes within cycle
-- **Price cache**: 10s TTL in database cache for `getPrice()`
+- **Price cache** (`binance:prices`): populated every ~1s by `ws-worker` via WebSocket `!markPrice@arr` stream (30s TTL). `BinanceExchange::getPrice()` reads from here first; falls back to REST (10s TTL) if the key is missing.
 - **Account data cache**: 10s TTL (`binance:account_data`)
 - **Commission rate cache**: 1h TTL per symbol (`binance:commission:{symbol}`)
 - **Funding rate cache**: 60s TTL (`binance:funding_rates`)
 - **Exchange info cache**: 1h TTL. Used by `isTradable()` and LOT_SIZE rounding in `calculateQuantity()` / `formatQuantity()`
 - **Rate limiting**: Tracks `X-MBX-USED-WEIGHT-1M` header from Binance. Warns at 1800/2400. Pauses at 2300/2400.
 - **Bot loop**: Default 30s cycle. One `getFuturesTickers` call + N klines calls (where N = candidates passing cheap gates). Responsive shutdown via sub-second sleep chunks.
+- **ws-worker**: independent process, exponential reconnect backoff (1s→60s cap), SIGTERM/SIGINT graceful shutdown. Cache key is shared so `bot` benefits transparently.
 
 ## Fee, Funding & Balance Tracking
 
@@ -215,10 +227,11 @@ Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
 ## Known Issues & Gotchas
 
 - **CSRF**: POST routes under `/api/*` are excluded from CSRF verification in `bootstrap/app.php`
-- **Binance DNS blocking**: Some ISPs block `fapi.binance.com`. Workaround: `/etc/hosts` entries pointing to real IPs (resolved via Cloudflare 1.1.1.1)
+- **Binance DNS blocking**: Some ISPs hijack `*.binance.com` — Docker Desktop's host `/etc/hosts` entry handles `fapi.binance.com`, but `fstream.binance.com` (WebSocket) needs an explicit `extra_hosts` mapping on the `ws-worker` service (resolved via `dig +short fstream.binance.com @1.1.1.1`). Without it the TLS handshake fails with a `*.ioh.co.id` certificate mismatch.
 - **BINANCE_TESTNET env**: Must use `filter_var(env(...), FILTER_VALIDATE_BOOLEAN)` because `env()` returns string "false" which is truthy in PHP
 - **DB settings override**: Old settings in `bot_settings` table override new config defaults. After major changes, reset via `POST /api/settings` or `POST /api/reset`
 - **Rebuild required**: After code changes, must `./develop down && ./develop build && ./develop up -d`
 - **Dual SL/TP checking**: Bot checks SL/TP in code every cycle AND places exchange-side SL/TP orders as safety net. If a Binance SL/TP triggers between bot checks, the bot reconciles on next cycle.
 - **Live trading readiness**: Per-order cancellation ensures closing one position doesn't destroy other symbols' orders. Fail-safe ensures no unprotected positions. DB may briefly be out of sync until next check cycle if exchange SL/TP triggers independently.
 - **LONG positions**: The bot never auto-opens LONG positions. A LONG can only exist if created manually via the `Reverse` button (SHORT → LONG). `checkPosition`/`closePosition`/`calculatePnl` still handle both sides for these manually-created positions.
+- **`dry_run` toggle caveat**: `ExchangeDispatcher` reads the setting on every call, so flipping the dashboard toggle takes effect on the next bot cycle. **But open positions are tied to whichever exchange created them** (real orders on Binance vs DB-only rows with `is_dry_run=true`). Flipping mid-flight routes close orders to the wrong side. **Always close all open positions before toggling `dry_run`.**
