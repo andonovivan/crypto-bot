@@ -6,9 +6,9 @@ use App\Models\Position;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
 use App\Services\Settings;
+use App\Services\ShortScanner;
+use App\Services\ShortSignal;
 use App\Services\TradingEngine;
-use App\Services\WaveScanner;
-use App\Services\WaveSignal;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -25,7 +25,6 @@ class DashboardController extends Controller
             ->orderByDesc('opened_at')
             ->get();
 
-        // Refresh live prices for open positions (per-symbol, cached — 1 weight each vs 40 for getPrices)
         if ($openPositions->isNotEmpty()) {
             try {
                 foreach ($openPositions as $position) {
@@ -55,29 +54,25 @@ class DashboardController extends Controller
         $losingTrades = Trade::where('pnl', '<', 0)->count();
         $winRate = $totalTrades > 0 ? round(($winningTrades / $totalTrades) * 100, 1) : 0;
 
-        $unrealizedPnl = $openPositions->sum('unrealized_pnl');
         $totalInvested = $openPositions->sum('position_size_usdt');
         $totalFees = Trade::sum('fees');
 
         $accountData = $exchange->getAccountData();
 
-        // Fetch current funding rates (cached 60s, for display in positions table)
         $fundingRates = [];
         if ($openPositions->isNotEmpty()) {
             try {
                 $fundingRates = $exchange->getFundingRates();
             } catch (\Throwable) {
-                // Funding rate display is non-critical
+                // non-critical
             }
         }
 
-        // Estimate fees for open positions (entry + projected exit at current price)
         $feeRateCache = [];
 
         $positionsData = $openPositions->map(function (Position $p) use ($exchange, &$feeRateCache, $fundingRates) {
             $currentPrice = $p->current_price ?? $p->entry_price;
 
-            // Get taker fee rate (cached per symbol)
             if (! isset($feeRateCache[$p->symbol])) {
                 try {
                     $rates = $exchange->getCommissionRate($p->symbol);
@@ -112,23 +107,18 @@ class DashboardController extends Controller
                 'funding_fee' => round($fundingFee, 4),
                 'funding_rate' => $fundingRates[$p->symbol]['fundingRate'] ?? null,
                 'net_pnl' => $netPnl,
-                'best_price' => $p->best_price,
                 'stop_loss_price' => $p->stop_loss_price,
                 'take_profit_price' => $p->take_profit_price,
                 'leverage' => $p->leverage,
-                'layer_count' => $p->layer_count,
                 'is_dry_run' => $p->is_dry_run,
                 'opened_at' => $p->opened_at->timestamp,
                 'expires_at' => $p->expires_at?->timestamp,
             ];
         });
 
-        // Net P&L: Trade.pnl already has trading fees deducted, add closed funding + open net P&L
         $closedFunding = Trade::sum('funding_fee');
         $openNetPnl = $positionsData->sum('net_pnl');
         $totalNetPnl = round($totalPnl + $closedFunding + $openNetPnl, 4);
-
-        // Total funding across all positions (open + closed)
         $totalFunding = round($positionsData->sum('funding_fee') + $closedFunding, 4);
 
         return response()->json([
@@ -173,84 +163,75 @@ class DashboardController extends Controller
         ]);
     }
 
-    public function scanNow(WaveScanner $waveScanner, TradingEngine $engine, Request $request): JsonResponse
+    public function scanNow(ShortScanner $scanner, TradingEngine $engine, Request $request): JsonResponse
     {
         $autoTrade = $request->boolean('auto_trade', false);
-        $skipRsi = ! Settings::get('grid_rsi_filter');
+        $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
+        $maxPositions = (int) Settings::get('max_positions') ?: 10;
+        $paused = (bool) Settings::get('trading_paused');
+
+        $candidates = $scanner->getCandidates();
+        $results = [];
         $trades = [];
-        $signals = [];
 
-        foreach ($waveScanner->getWatchlist() as $symbol) {
-            $wave = $waveScanner->analyze($symbol, skipRsiFilter: $skipRsi);
-            if ($wave) {
-                $signals[] = [
-                    'symbol' => $symbol,
-                    'direction' => $wave->direction,
-                    'state' => $wave->waveState,
-                    'rsi' => $wave->rsi,
-                ];
+        foreach ($candidates as $candidate) {
+            $analysis = $scanner->analyze15m($candidate->symbol);
+            $blockedReasons = [];
 
-                $canEnter = in_array($wave->waveState, ['new_wave', 'riding']);
+            if ($paused) {
+                $blockedReasons[] = 'Trading paused';
+            }
+            if (Position::open()->count() >= $maxPositions) {
+                $blockedReasons[] = 'Max total positions';
+            }
+            if (Position::open()->where('symbol', $candidate->symbol)->exists()) {
+                $blockedReasons[] = 'Already open';
+            }
+            if (Trade::where('symbol', $candidate->symbol)->where('created_at', '>=', now()->subMinutes($cooldown))->exists()) {
+                $blockedReasons[] = "Cooldown ({$cooldown}m)";
+            }
+            if ($analysis && ! $analysis->downtrendOk) {
+                $blockedReasons[] = $analysis->blockedReason ?? '15m trend not down';
+            }
+            if (! $analysis) {
+                $blockedReasons[] = 'Insufficient klines';
+            }
 
-                // Cooldown check
-                if ($autoTrade && $canEnter) {
-                    $cooldown = (int) Settings::get('grid_cooldown_minutes') ?: 1;
-                    if (Trade::where('symbol', $symbol)->where('created_at', '>=', now()->subMinutes($cooldown))->exists()) {
-                        $canEnter = false;
-                    }
-                }
+            $canEnter = empty($blockedReasons);
 
-                // Per-symbol count check
-                if ($autoTrade && $canEnter) {
-                    $maxPerSymbol = (int) Settings::get('grid_max_per_symbol') ?: 10;
-                    $symbolPositions = Position::open()->where('symbol', $symbol)->get();
-                    if ($symbolPositions->count() >= $maxPerSymbol) {
-                        $canEnter = false;
-                    }
+            $results[] = [
+                'symbol' => $candidate->symbol,
+                'price_change_pct' => $candidate->priceChangePct,
+                'volume' => $candidate->volume,
+                'price' => $candidate->price,
+                'reason' => $candidate->reason,
+                'ema_fast' => $analysis?->emaFast,
+                'ema_slow' => $analysis?->emaSlow,
+                'candle_body_pct' => $analysis?->candleBodyPct,
+                'last_candle_red' => $analysis?->lastCandleRed,
+                'funding_rate' => $analysis?->fundingRate,
+                'downtrend_ok' => $analysis?->downtrendOk ?? false,
+                'can_enter' => $canEnter,
+                'blocked_reasons' => $blockedReasons,
+            ];
 
-                    // Direction conflict: don't open if existing positions are in opposite direction
-                    if ($canEnter && $symbolPositions->contains(fn ($p) => $p->side !== $wave->direction)) {
-                        $canEnter = false;
-                    }
-
-                    // Grid spacing check
-                    if ($canEnter) {
-                        $spacingPct = (float) Settings::get('grid_spacing_pct') ?: 0.5;
-                        foreach ($symbolPositions as $existing) {
-                            $distancePct = abs($wave->currentPrice - $existing->entry_price) / $existing->entry_price * 100;
-                            if ($distancePct < $spacingPct) {
-                                $canEnter = false;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                // Pause check
-                if ($autoTrade && $canEnter && Settings::get('trading_paused')) {
-                    $canEnter = false;
-                }
-
-                if ($autoTrade && $canEnter) {
-                    $signal = new WaveSignal(
-                        symbol: $symbol,
-                        direction: $wave->direction,
-                        atr_value: $wave->atr,
-                        currentPrice: $wave->currentPrice,
-                        rsi: $wave->rsi,
-                    );
-                    $position = $engine->openPosition($signal, $wave->direction);
-                    if ($position) {
-                        $trades[] = $position->symbol;
-                    }
+            if ($autoTrade && $canEnter && $analysis) {
+                $signal = new ShortSignal(
+                    symbol: $candidate->symbol,
+                    priceChangePct: $candidate->priceChangePct,
+                    reason: $candidate->reason,
+                );
+                $position = $engine->openShort($signal);
+                if ($position) {
+                    $trades[] = $position->symbol;
                 }
             }
         }
 
         return response()->json([
             'ok' => true,
-            'signals' => $signals,
-            'signal_count' => count($signals),
+            'candidates' => $results,
+            'candidate_count' => count($results),
             'trades_opened' => $trades,
         ]);
     }
@@ -266,6 +247,31 @@ class DashboardController extends Controller
             'ok' => true,
             'pnl' => $trade->pnl,
             'exit_price' => $trade->exit_price,
+        ]);
+    }
+
+    public function closeAll(TradingEngine $engine): JsonResponse
+    {
+        $positions = Position::open()->get();
+        $closed = 0;
+        $failed = [];
+        $totalPnl = 0.0;
+
+        foreach ($positions as $position) {
+            try {
+                $trade = $engine->closePosition($position, reason: \App\Enums\CloseReason::Manual);
+                $closed++;
+                $totalPnl += (float) $trade->pnl;
+            } catch (\Throwable $e) {
+                $failed[] = ['symbol' => $position->symbol, 'error' => $e->getMessage()];
+            }
+        }
+
+        return response()->json([
+            'ok' => empty($failed),
+            'closed' => $closed,
+            'failed' => $failed,
+            'total_pnl' => round($totalPnl, 4),
         ]);
     }
 
@@ -290,7 +296,6 @@ class DashboardController extends Controller
                     'position_size_usdt' => $updated->position_size_usdt,
                     'stop_loss_price' => $updated->stop_loss_price,
                     'take_profit_price' => $updated->take_profit_price,
-                    'layer_count' => $updated->layer_count,
                 ],
             ]);
         } catch (\RuntimeException $e) {
@@ -372,113 +377,52 @@ class DashboardController extends Controller
         return response()->json(['ok' => true]);
     }
 
-    public function scannerData(WaveScanner $waveScanner): JsonResponse
+    public function scannerData(ShortScanner $scanner): JsonResponse
     {
-        $watchlist = $waveScanner->getWatchlist();
+        $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
+        $maxPositions = (int) Settings::get('max_positions') ?: 10;
+        $paused = (bool) Settings::get('trading_paused');
 
-        // Read settings once
-        $rsiFilterEnabled = (bool) Settings::get('grid_rsi_filter');
-        $rsiOverbought = (int) Settings::get('grid_rsi_overbought') ?: 80;
-        $rsiOversold = (int) Settings::get('grid_rsi_oversold') ?: 20;
-        $cooldownMinutes = (int) Settings::get('grid_cooldown_minutes') ?: 1;
-        $maxPerSymbol = (int) Settings::get('grid_max_per_symbol') ?: 10;
-        $spacingPct = (float) Settings::get('grid_spacing_pct') ?: 0.5;
-        $maxPositions = (int) Settings::get('max_positions') ?: 30;
-        $tradingPaused = (bool) Settings::get('trading_paused');
+        $candidates = $scanner->getCandidates();
+        $totalOpen = Position::open()->count();
 
-        $totalOpenCount = Position::open()->count();
-
-        $symbols = [];
-
-        foreach ($watchlist as $symbol) {
-            // Always skip RSI filter so we can display all signals
-            $wave = $waveScanner->analyze($symbol, skipRsiFilter: true);
-
-            if ($wave === null) {
-                // No data / dead market
-                $symbols[] = [
-                    'symbol' => $symbol,
-                    'direction' => null,
-                    'wave_state' => null,
-                    'rsi' => null,
-                    'atr' => null,
-                    'ema_gap' => null,
-                    'current_price' => null,
-                    'open_positions' => Position::open()->where('symbol', $symbol)->count(),
-                    'can_enter' => false,
-                    'blocked_reasons' => ['No signal data'],
-                ];
-
-                continue;
-            }
-
-            $symbolPositions = Position::open()->where('symbol', $symbol)->get();
+        $rows = [];
+        foreach ($candidates as $candidate) {
+            $analysis = $scanner->analyze15m($candidate->symbol);
+            $symbolOpen = Position::open()->where('symbol', $candidate->symbol)->count();
             $blockedReasons = [];
 
-            // Trading paused
-            if ($tradingPaused) {
+            if ($paused) {
                 $blockedReasons[] = 'Trading paused';
             }
-
-            // Max total positions
-            if ($totalOpenCount >= $maxPositions) {
-                $blockedReasons[] = "Max total positions ({$totalOpenCount}/{$maxPositions})";
+            if ($totalOpen >= $maxPositions) {
+                $blockedReasons[] = "Max total ({$totalOpen}/{$maxPositions})";
+            }
+            if ($symbolOpen > 0) {
+                $blockedReasons[] = 'Already open';
+            }
+            if (Trade::where('symbol', $candidate->symbol)->where('created_at', '>=', now()->subMinutes($cooldown))->exists()) {
+                $blockedReasons[] = "Cooldown ({$cooldown}m)";
+            }
+            if (! $analysis) {
+                $blockedReasons[] = 'No klines';
+            } elseif (! $analysis->downtrendOk) {
+                $blockedReasons[] = $analysis->blockedReason ?? '15m not down';
             }
 
-            // Wave state
-            if (! in_array($wave->waveState, ['new_wave', 'riding'])) {
-                $blockedReasons[] = 'Wave weakening';
-            }
-
-            // RSI filter
-            if ($rsiFilterEnabled) {
-                if ($wave->direction === 'LONG' && $wave->rsi > $rsiOverbought) {
-                    $blockedReasons[] = "RSI filtered ({$wave->rsi} > {$rsiOverbought})";
-                }
-                if ($wave->direction === 'SHORT' && $wave->rsi < $rsiOversold) {
-                    $blockedReasons[] = "RSI filtered ({$wave->rsi} < {$rsiOversold})";
-                }
-            }
-
-            // Cooldown
-            $recentClose = Trade::where('symbol', $symbol)
-                ->where('created_at', '>=', now()->subMinutes($cooldownMinutes))
-                ->exists();
-            if ($recentClose) {
-                $blockedReasons[] = "Cooldown ({$cooldownMinutes}m)";
-            }
-
-            // Max per symbol
-            if ($symbolPositions->count() >= $maxPerSymbol) {
-                $blockedReasons[] = "Max per symbol ({$symbolPositions->count()}/{$maxPerSymbol})";
-            }
-
-            // Direction conflict
-            $hasConflict = $symbolPositions->contains(fn ($p) => $p->side !== $wave->direction);
-            if ($hasConflict) {
-                $existingSide = $symbolPositions->first()?->side;
-                $blockedReasons[] = "Direction conflict (existing {$existingSide})";
-            }
-
-            // Grid spacing
-            foreach ($symbolPositions as $existing) {
-                $distancePct = abs($wave->currentPrice - $existing->entry_price) / $existing->entry_price * 100;
-                if ($distancePct < $spacingPct) {
-                    $blockedReasons[] = 'Too close to grid (' . round($distancePct, 2) . '%)';
-
-                    break;
-                }
-            }
-
-            $symbols[] = [
-                'symbol' => $symbol,
-                'direction' => $wave->direction,
-                'wave_state' => $wave->waveState,
-                'rsi' => $wave->rsi,
-                'atr' => round($wave->atr, 4),
-                'ema_gap' => $wave->emaGap,
-                'current_price' => $wave->currentPrice,
-                'open_positions' => $symbolPositions->count(),
+            $rows[] = [
+                'symbol' => $candidate->symbol,
+                'price_change_pct' => $candidate->priceChangePct,
+                'volume' => $candidate->volume,
+                'price' => $candidate->price,
+                'reason' => $candidate->reason,
+                'ema_fast' => $analysis?->emaFast !== null ? round($analysis->emaFast, 6) : null,
+                'ema_slow' => $analysis?->emaSlow !== null ? round($analysis->emaSlow, 6) : null,
+                'candle_body_pct' => $analysis?->candleBodyPct,
+                'last_candle_red' => $analysis?->lastCandleRed,
+                'funding_rate' => $analysis?->fundingRate,
+                'downtrend_ok' => $analysis?->downtrendOk ?? false,
+                'open_positions' => $symbolOpen,
                 'can_enter' => empty($blockedReasons),
                 'blocked_reasons' => $blockedReasons,
             ];
@@ -486,43 +430,26 @@ class DashboardController extends Controller
 
         return response()->json([
             'ok' => true,
-            'symbols' => $symbols,
+            'candidates' => $rows,
             'scanned_at' => now()->timestamp,
         ]);
     }
 
-    public function openPosition(Request $request, WaveScanner $waveScanner, TradingEngine $engine, ExchangeInterface $exchange): JsonResponse
+    public function openPosition(Request $request, TradingEngine $engine): JsonResponse
     {
         $request->validate([
             'symbol' => 'required|string',
-            'direction' => 'required|in:LONG,SHORT',
         ]);
 
-        $symbol = $request->input('symbol');
-        $direction = $request->input('direction');
+        $symbol = strtoupper($request->input('symbol'));
 
-        // Check symbol is in watchlist
-        $watchlist = $waveScanner->getWatchlist();
-        if (! in_array($symbol, $watchlist)) {
-            return response()->json([
-                'ok' => false,
-                'message' => "Symbol {$symbol} is not in the watchlist.",
-            ], 422);
-        }
-
-        // Build WaveSignal DTO — use analysis for ATR/RSI if available
-        $wave = $waveScanner->analyze($symbol, skipRsiFilter: true);
-        $currentPrice = $wave?->currentPrice ?? $exchange->getPrice($symbol);
-
-        $signal = new WaveSignal(
+        $signal = new ShortSignal(
             symbol: $symbol,
-            direction: $direction,
-            atr_value: $wave?->atr ?? 0,
-            currentPrice: $currentPrice,
-            rsi: $wave?->rsi ?? 50.0,
+            priceChangePct: 0.0,
+            reason: 'manual',
         );
 
-        $position = $engine->openPosition($signal, $direction);
+        $position = $engine->openShort($signal);
 
         if (! $position) {
             return response()->json([

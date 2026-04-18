@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Grid Trading Bot</title>
+<title>Short-Scalp Bot</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
@@ -74,10 +74,6 @@
   .btn-pause:hover { background: #484f58; }
   .btn-pause[data-paused] { background: #da3633; color: #fff; border-color: #da3633; }
   .btn-pause[data-paused]:hover { background: #f85149; }
-  .btn-open-long { background: #238636; color: #fff; border: none; border-radius: 4px;
-    padding: 3px 10px; cursor: pointer; font-size: 0.75em; white-space: nowrap; margin-right: 4px; }
-  .btn-open-long:hover { background: #2ea043; }
-  .btn-open-long:disabled { opacity: 0.4; cursor: default; }
   .btn-open-short { background: #da3633; color: #fff; border: none; border-radius: 4px;
     padding: 3px 10px; cursor: pointer; font-size: 0.75em; white-space: nowrap; }
   .btn-open-short:hover { background: #f85149; }
@@ -86,8 +82,15 @@
     padding: 8px 16px; cursor: pointer; font-size: 0.9em; }
   .btn-scan:hover { background: #388bfd; }
   .btn-scan:disabled { opacity: 0.5; cursor: default; }
-  .wave-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 0.7em;
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 0.7em;
     font-weight: bold; text-transform: uppercase; letter-spacing: 0.03em; }
+  .pill-pump { background: #238636; color: #fff; }
+  .pill-dump { background: #da3633; color: #fff; }
+  .pill-down { background: #238636; color: #fff; }
+  .pill-up { background: #da3633; color: #fff; }
+  .pill-flat { background: #484f58; color: #c9d1d9; }
+  .pill-red { background: #238636; color: #fff; }
+  .pill-green { background: #da3633; color: #fff; }
   .settings-msg { font-size: 0.85em; margin-bottom: 12px; min-height: 1.4em; }
   .footer { color: #484f58; font-size: 0.75em; margin-top: 24px; }
   .empty { color: #484f58; text-align: center; padding: 20px; }
@@ -99,7 +102,7 @@
 </style>
 </head>
 <body>
-<h1>Grid Trading Bot <span id="badge"></span></h1>
+<h1>Short-Scalp Bot <span id="badge"></span></h1>
 <p class="subtitle">
   <span id="positions-count-sub">-</span> open positions &middot;
   Updated <span id="updated">-</span>
@@ -145,7 +148,10 @@
     </div>
   </div>
 
-  <h2 class="section-title">Open Positions</h2>
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-top:24px; margin-bottom:12px;">
+    <h2 class="section-title" style="margin:0;">Open Positions</h2>
+    <button id="close-all-btn" class="btn-close-pos" style="padding:6px 14px; font-size:0.85em;" onclick="closeAll(this)">Close All</button>
+  </div>
   <table>
     <thead>
       <tr>
@@ -169,7 +175,7 @@
 <!-- Scanner Tab -->
 <div id="tab-scanner" class="tab-pane">
   <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-    <h2 class="section-title" style="margin:0;">Market Scanner</h2>
+    <h2 class="section-title" style="margin:0;">Market Scanner — Pumps &amp; Dumps</h2>
     <div style="display:flex; align-items:center;">
       <span class="settings-msg" id="scan-msg" style="margin-right:8px;"></span>
       <button class="btn-pause" id="pause-btn" onclick="togglePause(this)" style="margin-top:0;">⏸ Pause</button>
@@ -181,28 +187,26 @@
     <thead>
       <tr>
         <th onclick="sortTable('scanner', 'symbol')">Symbol <span class="sort-arrow" id="scan-sort-symbol"></span></th>
-        <th onclick="sortTable('scanner', 'direction')">Direction <span class="sort-arrow" id="scan-sort-direction"></span></th>
-        <th onclick="sortTable('scanner', 'wave_state')">Wave State <span class="sort-arrow" id="scan-sort-wave_state"></span></th>
-        <th onclick="sortTable('scanner', 'rsi')">RSI <span class="sort-arrow" id="scan-sort-rsi"></span></th>
-        <th onclick="sortTable('scanner', 'current_price')">Price <span class="sort-arrow" id="scan-sort-current_price"></span></th>
-        <th onclick="sortTable('scanner', 'open_positions')">Positions <span class="sort-arrow" id="scan-sort-open_positions"></span></th>
+        <th onclick="sortTable('scanner', 'price_change_pct')">24h % <span class="sort-arrow" id="scan-sort-price_change_pct"></span></th>
+        <th onclick="sortTable('scanner', 'volume')">Volume <span class="sort-arrow" id="scan-sort-volume"></span></th>
+        <th onclick="sortTable('scanner', 'price')">Price <span class="sort-arrow" id="scan-sort-price"></span></th>
+        <th>15m Trend</th>
+        <th onclick="sortTable('scanner', 'candle_body_pct')">Last Candle <span class="sort-arrow" id="scan-sort-candle_body_pct"></span></th>
+        <th onclick="sortTable('scanner', 'funding_rate')">Funding <span class="sort-arrow" id="scan-sort-funding_rate"></span></th>
+        <th onclick="sortTable('scanner', 'open_positions')">Pos <span class="sort-arrow" id="scan-sort-open_positions"></span></th>
         <th>Status</th>
         <th>Actions</th>
       </tr>
     </thead>
-    <tbody id="scanner-body"><tr><td colspan="8" class="empty">Click Scan to analyze watchlist symbols</td></tr></tbody>
+    <tbody id="scanner-body"><tr><td colspan="10" class="empty">Click Scan to find pump/dump candidates</td></tr></tbody>
   </table>
 
   <div style="margin-top:16px; padding:16px; background:#161b22; border:1px solid #30363d; border-radius:8px; display:flex; align-items:center; gap:12px;">
-    <span style="color:#8b949e; font-size:0.85em; white-space:nowrap;">Manual Open:</span>
+    <span style="color:#8b949e; font-size:0.85em; white-space:nowrap;">Manual Open SHORT:</span>
     <select id="manual-symbol" style="background:#0d1117; border:1px solid #30363d; border-radius:4px; color:#c9d1d9; padding:6px 10px; font-size:0.85em;">
       <option value="">Select symbol...</option>
     </select>
-    <select id="manual-direction" style="background:#0d1117; border:1px solid #30363d; border-radius:4px; color:#c9d1d9; padding:6px 10px; font-size:0.85em;">
-      <option value="LONG">LONG</option>
-      <option value="SHORT">SHORT</option>
-    </select>
-    <button class="btn-open-long" style="padding:6px 16px; font-size:0.85em;" onclick="openManualPosition(this)">Open Position</button>
+    <button class="btn-open-short" style="padding:6px 16px; font-size:0.85em;" onclick="openManualPosition(this)">Open SHORT</button>
     <span id="manual-msg" class="settings-msg" style="margin:0;"></span>
   </div>
 </div>
@@ -251,7 +255,7 @@
   </div>
 </div>
 
-<div class="footer">Auto-refreshes every 10s</div>
+<div class="footer">Dashboard auto-refreshes every 10s · Scanner auto-refreshes every 15s when visible</div>
 
 <script>
 const PAGE_SIZE = 15;
@@ -261,20 +265,46 @@ let lastData = null;
 const sortState = {
   positions: { key: 'opened_at', asc: false },
   history: { key: 'created_at', asc: false },
-  scanner: { key: 'symbol', asc: true },
+  scanner: { key: 'price_change_pct', asc: false },
 };
 let scannerData = null;
 let scannerLoaded = false;
+let scannerTimer = null;
+let activeTab = 'dashboard';
 
 function switchTab(name) {
+  activeTab = name;
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   document.querySelector('.tab-btn[onclick*="' + name + '"]').classList.add('active');
-  if (name === 'scanner' && !scannerLoaded) {
-    fetchScannerData(document.getElementById('scan-btn'));
+  if (name === 'scanner') {
+    if (!scannerLoaded) {
+      fetchScannerData(document.getElementById('scan-btn'));
+    }
+    startScannerAutoRefresh();
+  } else {
+    stopScannerAutoRefresh();
   }
 }
+
+function startScannerAutoRefresh() {
+  stopScannerAutoRefresh();
+  scannerTimer = setInterval(() => {
+    if (activeTab === 'scanner' && !document.hidden) {
+      fetchScannerData(null);
+    }
+  }, 15000);
+}
+
+function stopScannerAutoRefresh() {
+  if (scannerTimer) { clearInterval(scannerTimer); scannerTimer = null; }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopScannerAutoRefresh();
+  else if (activeTab === 'scanner') startScannerAutoRefresh();
+});
 
 function sortData(items, key, asc) {
   return [...items].sort((a, b) => {
@@ -298,6 +328,14 @@ function fmtNum(val, decimals) {
   return val.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
+function fmtVolume(v) {
+  if (v === null || v === undefined) return '-';
+  if (v >= 1e9) return '$' + (v / 1e9).toFixed(2) + 'B';
+  if (v >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
+  if (v >= 1e3) return '$' + (v / 1e3).toFixed(1) + 'K';
+  return '$' + fmtNum(v, 0);
+}
+
 function pnlColor(val) {
   if (val > 0) return '#3fb950';
   if (val < 0) return '#f85149';
@@ -311,7 +349,6 @@ function pnlStr(val) {
 }
 
 function fundingColor(side, rate) {
-  // Earning: LONG + negative rate, or SHORT + positive rate
   const earning = (side === 'LONG' && rate < 0) || (side === 'SHORT' && rate > 0);
   return earning ? '#3fb950' : '#f85149';
 }
@@ -326,21 +363,16 @@ function formatPrice(val) {
   if (val === 0) return '$0';
   const abs = Math.abs(val);
   const sign = val < 0 ? '-' : '';
-  // For prices >= 100, use 2 decimal places
   if (abs >= 100) return sign + '$' + fmtNum(abs, 2);
-  // For prices >= 1, use 4 decimal places
   if (abs >= 1) return sign + '$' + fmtNum(abs, 4);
-  // For prices < 1, check for leading zeros after decimal
   const str = abs.toFixed(20).replace(/0+$/, '');
   const zeros = (str.match(/^0\.(0+)/) || [null, ''])[1].length;
   if (zeros >= 3) {
-    // Subscript notation: 0.0₃160 means 0.000160
-    const sigStart = zeros + 2; // skip "0."
+    const sigStart = zeros + 2;
     const sigDigits = str.slice(sigStart, sigStart + 4).replace(/0+$/, '') || '0';
     const subscript = String(zeros).split('').map(d => '₀₁₂₃₄₅₆₇₈₉'[d]).join('');
     return sign + '$0.0' + '<sub>' + subscript + '</sub>' + sigDigits;
   }
-  // Small price with 0-2 leading zeros — show 6 significant digits
   return sign + '$' + parseFloat(abs.toPrecision(6));
 }
 
@@ -411,6 +443,31 @@ async function closePosition(id, btn) {
   }
 }
 
+async function closeAll(btn) {
+  if (!confirm('Close ALL open positions at market price?')) return;
+  btn.disabled = true;
+  btn.textContent = 'Closing all...';
+  try {
+    const res = await fetch('/api/close-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.textContent = `Closed ${data.closed}`;
+    } else {
+      const msg = data.failed?.map(f => `${f.symbol}: ${f.error}`).join('\n') || 'Unknown error';
+      alert(`Closed ${data.closed}, failed ${data.failed?.length || 0}:\n${msg}`);
+    }
+    fetchData();
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Close All'; }, 2000);
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Close All';
+  }
+}
+
 async function addToPosition(id, btn) {
   const input = document.getElementById('add-amt-' + id);
   const amount = parseFloat(input?.value);
@@ -446,7 +503,7 @@ async function addToPosition(id, btn) {
 }
 
 async function reversePosition(id, btn) {
-  if (!confirm('Reverse this position? This will close it and open a new one in the opposite direction with the same USDT size.')) return;
+  if (!confirm('Reverse this position? This will close it and open a new one in the opposite direction with the same USDT size.\n\nNote: the bot only manages SHORT positions. A reversed LONG will need to be closed manually.')) return;
   btn.disabled = true;
   btn.textContent = 'Reversing...';
   try {
@@ -484,19 +541,15 @@ function render(data) {
   lastData = data;
   const s = data.summary;
 
-  // Badge
   document.getElementById('badge').innerHTML = s.dry_run
     ? '<span class="dry-run-badge">DRY RUN</span>'
     : '<span class="live-badge">LIVE</span>';
 
-  // Pause button state
   updatePauseButton(s.trading_paused);
 
-  // Subtitle
   document.getElementById('positions-count-sub').textContent = s.open_positions;
   document.getElementById('updated').textContent = new Date(data.ts * 1000).toLocaleTimeString();
 
-  // Cards
   document.getElementById('balance').textContent = '$' + fmtNum(s.wallet_balance, 2);
   document.getElementById('available-balance').textContent = '$' + fmtNum(s.available_balance, 2);
   document.getElementById('margin-in-use').textContent = '$' + fmtNum(s.margin_in_use, 2);
@@ -515,7 +568,6 @@ function render(data) {
   document.getElementById('winrate').style.color = s.win_rate >= 50 ? '#3fb950' : s.win_rate > 0 ? '#f85149' : '#c9d1d9';
   document.getElementById('winrate').textContent = s.win_rate + '% (' + s.winning_trades + '/' + s.total_trades + ')';
 
-  // Positions table
   const posBody = document.getElementById('positions-body');
   if (data.positions.length === 0) {
     posBody.innerHTML = '<tr><td colspan="11" class="empty">No open positions</td></tr>';
@@ -527,7 +579,6 @@ function render(data) {
         ${sideBadge(p.side)}
         <span style="color:#8b949e;font-size:0.7em;margin-left:2px">${p.leverage || '-'}x</span>
         ${p.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.55em">DRY</span>' : ''}
-        ${p.layer_count > 1 ? `<span style="color:#d29922;font-size:0.65em;margin-left:2px">x${p.layer_count}</span>` : ''}
       </td>
       <td>${formatPrice(p.entry_price)}</td>
       <td>${formatPrice(p.current_price)}</td>
@@ -547,7 +598,6 @@ function render(data) {
     </tr>`).join('');
   }
 
-  // History table
   const histBody = document.getElementById('history-body');
   if (data.recent_trades.length === 0) {
     histBody.innerHTML = '<tr><td colspan="10" class="empty">No closed trades yet</td></tr>';
@@ -698,14 +748,13 @@ async function scanNow(btn) {
     });
     const data = await res.json();
     if (data.ok) {
-      let text = `Found ${data.signal_count} signal(s)`;
+      let text = `Found ${data.candidate_count} candidate(s)`;
       if (data.trades_opened && data.trades_opened.length > 0) {
         text += ` — opened: ${data.trades_opened.join(', ')}`;
       }
       msg.style.color = '#3fb950';
       msg.textContent = text;
       fetchData();
-      // Refresh scanner table with latest data
       fetchScannerData(document.getElementById('scan-btn'));
     }
   } catch (e) {
@@ -726,11 +775,10 @@ async function fetchScannerData(btn) {
       scannerData = data;
       scannerLoaded = true;
       renderScanner(data);
-      // Populate manual open dropdown
       const sel = document.getElementById('manual-symbol');
       const current = sel.value;
       sel.innerHTML = '<option value="">Select symbol...</option>' +
-        data.symbols.map(s => `<option value="${s.symbol}" ${s.symbol === current ? 'selected' : ''}>${s.symbol}</option>`).join('');
+        data.candidates.map(s => `<option value="${s.symbol}" ${s.symbol === current ? 'selected' : ''}>${s.symbol}</option>`).join('');
     }
   } catch (e) {
     console.error('Scanner fetch failed:', e);
@@ -738,62 +786,76 @@ async function fetchScannerData(btn) {
   if (btn) { btn.disabled = false; btn.textContent = 'Scan'; }
 }
 
-function waveBadge(state) {
-  if (!state) return '<span style="color:#484f58">-</span>';
-  const colors = {
-    new_wave: { bg: '#238636', fg: '#fff' },
-    riding: { bg: '#1f6feb', fg: '#fff' },
-    weakening: { bg: '#9e6a03', fg: '#fff' },
-  };
-  const c = colors[state] || { bg: '#30363d', fg: '#8b949e' };
-  const label = state.replace('_', ' ');
-  return `<span class="wave-badge" style="background:${c.bg};color:${c.fg}">${label}</span>`;
+function reasonPill(reason) {
+  if (reason === 'pump') return '<span class="pill pill-pump">PUMP</span>';
+  if (reason === 'dump') return '<span class="pill pill-dump">DUMP</span>';
+  return '';
 }
 
-function rsiColor(rsi) {
-  if (rsi === null) return '#8b949e';
-  if (rsi >= 70) return '#f85149';
-  if (rsi <= 30) return '#3fb950';
-  return '#c9d1d9';
+function trendPill(c) {
+  if (c.ema_fast === null || c.ema_slow === null) {
+    return '<span class="pill pill-flat">-</span>';
+  }
+  if (c.ema_fast < c.ema_slow) return '<span class="pill pill-down">DOWN</span>';
+  if (c.ema_fast > c.ema_slow) return '<span class="pill pill-up">UP</span>';
+  return '<span class="pill pill-flat">FLAT</span>';
+}
+
+function candleCell(c) {
+  if (c.last_candle_red === null || c.last_candle_red === undefined) return '-';
+  const pill = c.last_candle_red
+    ? '<span class="pill pill-red">RED</span>'
+    : '<span class="pill pill-green">GREEN</span>';
+  const body = c.candle_body_pct !== null && c.candle_body_pct !== undefined
+    ? ` <span style="color:#8b949e;font-size:0.8em">${c.candle_body_pct.toFixed(2)}%</span>`
+    : '';
+  return pill + body;
+}
+
+function fundingCell(rate) {
+  if (rate === null || rate === undefined) return '-';
+  const pct = (rate * 100).toFixed(4);
+  const color = rate < 0 ? '#f85149' : '#3fb950';
+  return `<span style="color:${color}">${rate >= 0 ? '+' : ''}${pct}%</span>`;
 }
 
 function renderScanner(data) {
   const body = document.getElementById('scanner-body');
-  if (!data.symbols || data.symbols.length === 0) {
-    body.innerHTML = '<tr><td colspan="8" class="empty">No watchlist symbols configured</td></tr>';
+  const candidates = data.candidates || [];
+  if (candidates.length === 0) {
+    body.innerHTML = '<tr><td colspan="10" class="empty">No pump/dump candidates right now</td></tr>';
     return;
   }
 
-  const sorted = sortData([...data.symbols], sortState.scanner.key, sortState.scanner.asc);
-  body.innerHTML = sorted.map(s => {
-    const dirBadge = s.direction ? sideBadge(s.direction) : '<span style="color:#484f58">No signal</span>';
-    const statusIcon = s.can_enter
+  const sorted = sortData([...candidates], sortState.scanner.key, sortState.scanner.asc);
+  body.innerHTML = sorted.map(c => {
+    const changeColor = c.price_change_pct >= 0 ? '#3fb950' : '#f85149';
+    const statusIcon = c.can_enter
       ? '<span style="color:#3fb950;font-weight:bold">&#10003;</span>'
       : '<span style="color:#f85149;font-weight:bold">&#10007;</span>';
-    const reasonText = s.blocked_reasons.length > 0
-      ? `<br><span style="color:#8b949e;font-size:0.75em" title="${s.blocked_reasons.join('\n')}">${s.blocked_reasons[0]}</span>`
+    const reasonText = c.blocked_reasons && c.blocked_reasons.length > 0
+      ? `<br><span style="color:#8b949e;font-size:0.75em" title="${c.blocked_reasons.join('\n')}">${c.blocked_reasons[0]}</span>`
       : '';
 
     return `<tr>
-      <td><strong>${s.symbol}</strong></td>
-      <td>${dirBadge}</td>
-      <td>${waveBadge(s.wave_state)}</td>
-      <td style="color:${rsiColor(s.rsi)}">${s.rsi !== null ? s.rsi.toFixed(1) : '-'}</td>
-      <td>${s.current_price !== null ? formatPrice(s.current_price) : '-'}</td>
-      <td>${s.open_positions}</td>
+      <td><strong>${c.symbol}</strong><br>${reasonPill(c.reason)}</td>
+      <td style="color:${changeColor};font-weight:bold">${c.price_change_pct >= 0 ? '+' : ''}${c.price_change_pct.toFixed(2)}%</td>
+      <td>${fmtVolume(c.volume)}</td>
+      <td>${formatPrice(c.price)}</td>
+      <td>${trendPill(c)}</td>
+      <td>${candleCell(c)}</td>
+      <td>${fundingCell(c.funding_rate)}</td>
+      <td>${c.open_positions}</td>
       <td>${statusIcon}${reasonText}</td>
       <td style="white-space:nowrap">
-        <button class="btn-open-long" onclick="openPosition('${s.symbol}', 'LONG', this)"
-          ${!s.direction ? 'disabled' : ''}>Long</button>
-        <button class="btn-open-short" onclick="openPosition('${s.symbol}', 'SHORT', this)"
-          ${!s.direction ? 'disabled' : ''}>Short</button>
+        <button class="btn-open-short" onclick="openPosition('${c.symbol}', this)">Short</button>
       </td>
     </tr>`;
   }).join('');
 }
 
-async function openPosition(symbol, direction, btn) {
-  if (!confirm(`Open ${direction} position on ${symbol}?`)) return;
+async function openPosition(symbol, btn) {
+  if (!confirm(`Open SHORT position on ${symbol}?`)) return;
   btn.disabled = true;
   const origText = btn.textContent;
   btn.textContent = 'Opening...';
@@ -802,7 +864,7 @@ async function openPosition(symbol, direction, btn) {
     const res = await fetch('/api/open-position', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
-      body: JSON.stringify({ symbol, direction }),
+      body: JSON.stringify({ symbol }),
     });
     const data = await res.json();
     if (data.ok) {
@@ -824,12 +886,10 @@ async function openPosition(symbol, direction, btn) {
 
 async function openManualPosition(btn) {
   const symbolSel = document.getElementById('manual-symbol');
-  const dirSel = document.getElementById('manual-direction');
   const msg = document.getElementById('manual-msg');
   msg.textContent = '';
 
   const symbol = symbolSel.value;
-  const direction = dirSel.value;
 
   if (!symbol) {
     msg.style.color = '#f85149';
@@ -837,7 +897,7 @@ async function openManualPosition(btn) {
     return;
   }
 
-  if (!confirm(`Open ${direction} position on ${symbol}?`)) return;
+  if (!confirm(`Open SHORT position on ${symbol}?`)) return;
   btn.disabled = true;
   btn.textContent = 'Opening...';
 
@@ -845,12 +905,12 @@ async function openManualPosition(btn) {
     const res = await fetch('/api/open-position', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
-      body: JSON.stringify({ symbol, direction }),
+      body: JSON.stringify({ symbol }),
     });
     const data = await res.json();
     if (data.ok) {
       msg.style.color = '#3fb950';
-      msg.textContent = `Opened ${direction} on ${symbol} @ ${formatPrice(data.position.entry_price).replace(/<[^>]+>/g, '')}`;
+      msg.textContent = `Opened SHORT on ${symbol} @ ${formatPrice(data.position.entry_price).replace(/<[^>]+>/g, '')}`;
       fetchData();
       fetchScannerData(document.getElementById('scan-btn'));
     } else {
@@ -863,7 +923,7 @@ async function openManualPosition(btn) {
   }
 
   btn.disabled = false;
-  btn.textContent = 'Open Position';
+  btn.textContent = 'Open SHORT';
 }
 
 async function resetAll(btn) {
@@ -898,7 +958,6 @@ async function fetchData() {
   }
 }
 
-// Initial load
 fetchData();
 loadSettings();
 setInterval(fetchData, 10000);

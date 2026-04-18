@@ -15,195 +15,126 @@ class TradingEngine
         private ExchangeInterface $exchange,
     ) {}
 
-    /**
-     * Open a position in the given direction based on a signal (WaveSignal DTO).
-     */
-    public function openPosition(object $signal, string $direction): ?Position
+    public function openShort(ShortSignal $signal): ?Position
     {
-        $maxPositions = Settings::get('max_positions');
-        $leverage = (int) Settings::get('leverage');
+        $maxPositions = (int) Settings::get('max_positions') ?: 10;
+        $leverage = (int) Settings::get('leverage') ?: 25;
+        $maxHoldMinutes = (int) Settings::get('max_hold_minutes') ?: 120;
         $isDryRun = (bool) Settings::get('dry_run');
 
-        // Expiry
-        $maxHoldMinutes = (int) Settings::get('grid_max_hold_minutes') ?: 1440;
-        $expiresAt = now()->addMinutes($maxHoldMinutes);
-
-        // Check if we've hit max total positions
-        $openCount = Position::open()->count();
-        if ($openCount >= $maxPositions) {
-            Log::warning('Max positions reached, skipping', [
-                'symbol' => $signal->symbol,
-                'open_positions' => $openCount,
-                'max' => $maxPositions,
-            ]);
+        if (Position::open()->count() >= $maxPositions) {
+            Log::warning('Max positions reached, skipping', ['symbol' => $signal->symbol]);
             return null;
         }
 
-        // Grid: allow multiple positions per symbol up to max
-        $maxPerSymbol = (int) Settings::get('grid_max_per_symbol') ?: 10;
-        if (Position::open()->where('symbol', $signal->symbol)->count() >= $maxPerSymbol) {
+        if (Position::open()->where('symbol', $signal->symbol)->exists()) {
             return null;
         }
 
-        // Calculate position size dynamically from wallet balance
-        // margin = walletBalance * (position_size_pct / 100)
-        // notional = margin * leverage
         $accountData = $this->exchange->getAccountData();
-        $positionSizePct = (float) Settings::get('position_size_pct') ?: 1.0;
+        $positionSizePct = (float) Settings::get('position_size_pct') ?: 10.0;
         $margin = $accountData['walletBalance'] * ($positionSizePct / 100);
         $positionSizeUsdt = round($margin * max($leverage, 1), 2);
 
-        // Check available margin before opening
-        $requiredMargin = $positionSizeUsdt / max($leverage, 1);
-        if ($accountData['availableBalance'] < $requiredMargin) {
+        if ($accountData['availableBalance'] < $margin) {
             Log::warning('Insufficient available balance for new position', [
                 'symbol' => $signal->symbol,
-                'required_margin' => $requiredMargin,
+                'required_margin' => $margin,
                 'available_balance' => $accountData['availableBalance'],
-                'position_size_usdt' => $positionSizeUsdt,
             ]);
             return null;
         }
 
-        // Verify the symbol is still tradable
         if (! $this->exchange->isTradable($signal->symbol)) {
-            Log::warning('Symbol not tradable, skipping', ['symbol' => $signal->symbol]);
+            Log::warning('Symbol not tradable', ['symbol' => $signal->symbol]);
             return null;
         }
 
         try {
             $price = $this->exchange->getPrice($signal->symbol);
-
-            // Set leverage
             $this->exchange->setLeverage($signal->symbol, $leverage);
 
-            // Calculate quantity
             $quantity = $this->exchange->calculateQuantity($signal->symbol, $positionSizeUsdt, $price);
-
             if ($quantity <= 0) {
-                Log::warning('Calculated quantity is zero', ['symbol' => $signal->symbol, 'price' => $price]);
+                Log::warning('Calculated quantity is zero', ['symbol' => $signal->symbol]);
                 return null;
             }
 
-            // Open position in the correct direction
-            $order = $direction === 'LONG'
-                ? $this->exchange->openLong($signal->symbol, $quantity)
-                : $this->exchange->openShort($signal->symbol, $quantity);
-
+            $order = $this->exchange->openShort($signal->symbol, $quantity);
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
-            // Place SL/TP orders via helper — fail-safe: close position if SL/TP can't be placed
-            $slTpResult = null;
             try {
-                // Create a temporary position-like object for replaceSlTpOrders
-                $tempPosition = new Position([
-                    'symbol' => $signal->symbol,
-                    'side' => $direction,
-                    'sl_order_id' => null,
-                    'tp_order_id' => null,
-                ]);
-                $slTpResult = $this->replaceSlTpOrders($tempPosition, $entryPrice, $order['quantity']);
+                $slTp = $this->placeBrackets($signal->symbol, $entryPrice, $order['quantity']);
             } catch (\Throwable $e) {
-                Log::error('Failed to set SL/TP orders — closing position for safety', [
+                Log::error('Failed to set SL/TP — closing position for safety', [
                     'symbol' => $signal->symbol,
                     'error' => $e->getMessage(),
                 ]);
 
-                // Fail-safe: close the position immediately
                 try {
-                    $direction === 'LONG'
-                        ? $this->exchange->closeLong($signal->symbol, $order['quantity'])
-                        : $this->exchange->closeShort($signal->symbol, $order['quantity']);
+                    $this->exchange->closeShort($signal->symbol, $order['quantity']);
                 } catch (\Throwable $closeErr) {
                     Log::error('CRITICAL: Failed to close unprotected position', [
                         'symbol' => $signal->symbol,
-                        'quantity' => $order['quantity'],
                         'error' => $closeErr->getMessage(),
                     ]);
                 }
-
                 return null;
             }
 
-            // Calculate initial entry fee for accurate P&L tracking
             $rates = $this->exchange->getCommissionRate($signal->symbol);
             $initialEntryFee = round($entryPrice * $order['quantity'] * $rates['taker'], 8);
 
             $position = Position::create([
                 'symbol' => $signal->symbol,
-                'side' => $direction,
+                'side' => 'SHORT',
                 'entry_price' => $entryPrice,
                 'quantity' => $order['quantity'],
                 'position_size_usdt' => $positionSizeUsdt,
-                'stop_loss_price' => $slTpResult['sl'],
-                'take_profit_price' => $slTpResult['tp'],
+                'stop_loss_price' => $slTp['sl'],
+                'take_profit_price' => $slTp['tp'],
                 'current_price' => $entryPrice,
-                'best_price' => $entryPrice,
                 'leverage' => $leverage,
-                'layer_count' => 1,
-                'atr_value' => $signal->atr_value ?? null,
                 'status' => PositionStatus::Open,
                 'exchange_order_id' => $order['orderId'],
-                'sl_order_id' => $slTpResult['sl_order_id'],
-                'tp_order_id' => $slTpResult['tp_order_id'],
+                'sl_order_id' => $slTp['sl_order_id'],
+                'tp_order_id' => $slTp['tp_order_id'],
                 'total_entry_fee' => $initialEntryFee,
                 'is_dry_run' => $isDryRun,
                 'opened_at' => now(),
-                'expires_at' => $expiresAt,
+                'expires_at' => now()->addMinutes($maxHoldMinutes),
             ]);
 
-            Log::info('Position opened', [
+            Log::info('SHORT opened', [
                 'symbol' => $signal->symbol,
-                'side' => $direction,
-                'entry_price' => $entryPrice,
-                'quantity' => $order['quantity'],
-                'stop_loss' => $slTpResult['sl'],
-                'take_profit' => $slTpResult['tp'],
-                'sl_order_id' => $slTpResult['sl_order_id'],
-                'tp_order_id' => $slTpResult['tp_order_id'],
-                'leverage' => $leverage,
+                'entry' => $entryPrice,
+                'qty' => $order['quantity'],
+                'sl' => $slTp['sl'],
+                'tp' => $slTp['tp'],
+                'reason' => $signal->reason,
+                '24h' => round($signal->priceChangePct, 2) . '%',
             ]);
 
             return $position;
-
         } catch (\Throwable $e) {
-            Log::error('Failed to open position', [
+            Log::error('Failed to open SHORT', [
                 'symbol' => $signal->symbol,
-                'side' => $direction,
                 'error' => $e->getMessage(),
             ]);
             return null;
         }
     }
 
-    /**
-     * Check a single position and close if SL/TP/expiry hit.
-     */
     public function checkPosition(Position $position, float $currentPrice): void
     {
-        $isLong = $position->side === 'LONG';
         $unrealizedPnl = $this->calculatePnl($position, $currentPrice);
-
-        // Track best price
-        $bestPrice = $position->best_price ?? $position->entry_price;
-        if ($isLong) {
-            if ($currentPrice > $bestPrice) {
-                $bestPrice = $currentPrice;
-            }
-        } else {
-            if ($currentPrice < $bestPrice) {
-                $bestPrice = $currentPrice;
-            }
-        }
 
         $position->update([
             'current_price' => $currentPrice,
-            'best_price' => $bestPrice,
             'unrealized_pnl' => $unrealizedPnl,
         ]);
 
-        // Check stop-loss
-        $slHit = $isLong
+        $slHit = $position->side === 'LONG'
             ? ($position->stop_loss_price && $currentPrice <= $position->stop_loss_price)
             : ($position->stop_loss_price && $currentPrice >= $position->stop_loss_price);
 
@@ -212,8 +143,7 @@ class TradingEngine
             return;
         }
 
-        // Check take-profit
-        $tpHit = $isLong
+        $tpHit = $position->side === 'LONG'
             ? ($position->take_profit_price && $currentPrice >= $position->take_profit_price)
             : ($position->take_profit_price && $currentPrice <= $position->take_profit_price);
 
@@ -222,62 +152,19 @@ class TradingEngine
             return;
         }
 
-        // Check time expiry
         if ($position->expires_at && now()->gte($position->expires_at)) {
             $this->closePosition($position, $currentPrice, CloseReason::Expired);
-            return;
         }
     }
 
-    /**
-     * Close a position. Supports both LONG and SHORT.
-     */
     public function closePosition(Position $position, ?float $exitPrice = null, CloseReason $reason = CloseReason::Manual): Trade
     {
         if ($exitPrice === null) {
             $exitPrice = $this->exchange->getPrice($position->symbol);
         }
 
-        // Cancel this position's SL/TP orders by ID (safe for grid — doesn't nuke sibling positions)
-        if ($position->sl_order_id || $position->tp_order_id) {
-            if ($position->sl_order_id) {
-                try {
-                    $this->exchange->cancelOrder($position->symbol, $position->sl_order_id);
-                } catch (\Throwable $e) {
-                    Log::warning('Failed to cancel SL order on close', [
-                        'symbol' => $position->symbol,
-                        'sl_order_id' => $position->sl_order_id,
-                        'error' => $e->getMessage(),
-                    ]);
-                }
-            }
+        $this->cancelBrackets($position);
 
-            if ($position->tp_order_id) {
-                try {
-                    $this->exchange->cancelOrder($position->symbol, $position->tp_order_id);
-                } catch (\Throwable $e) {
-                    Log::warning('Failed to cancel TP order on close', [
-                        'symbol' => $position->symbol,
-                        'tp_order_id' => $position->tp_order_id,
-                        'error' => $e->getMessage(),
-                    ]);
-                }
-            }
-        } else {
-            // Fallback for legacy positions without stored order IDs.
-            // Uses cancelOrders (cancels ALL orders for symbol) — only safe when
-            // this is the sole position on the symbol, or in dry-run mode.
-            try {
-                $this->exchange->cancelOrders($position->symbol);
-            } catch (\Throwable $e) {
-                Log::warning('Failed to cancel orders on close (legacy fallback)', [
-                    'symbol' => $position->symbol,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
-
-        // Close the position on exchange using the correct direction
         $order = $position->side === 'LONG'
             ? $this->exchange->closeLong($position->symbol, $position->quantity)
             : $this->exchange->closeShort($position->symbol, $position->quantity);
@@ -287,7 +174,6 @@ class TradingEngine
         $rawPnl = $this->calculatePnl($position, $actualExitPrice);
         $pnlPct = $this->calculatePnlPct($position, $actualExitPrice);
 
-        // Calculate trading fees (use tracked entry fee if available for multi-add accuracy)
         $rates = $this->exchange->getCommissionRate($position->symbol);
         $takerRate = $rates['taker'];
         $entryFee = $position->total_entry_fee
@@ -334,28 +220,21 @@ class TradingEngine
             'entry' => $position->entry_price,
             'exit' => $actualExitPrice,
             'pnl' => $pnl,
-            'fees' => $totalFees,
             'pnl_pct' => round($pnlPct, 2) . '%',
         ]);
 
         return $trade;
     }
 
-    /**
-     * Add margin/quantity to an existing open position.
-     * Places additional market order, recalculates weighted average entry, replaces SL/TP.
-     */
     public function addToPosition(Position $position, float $additionalUsdt): Position
     {
         if ($position->status !== PositionStatus::Open) {
             throw new \RuntimeException('Cannot add to a position that is not open');
         }
-
         if ($additionalUsdt <= 0) {
             throw new \RuntimeException('Additional amount must be greater than zero');
         }
 
-        // Check available margin
         $leverage = $position->leverage > 0 ? $position->leverage : 1;
         $requiredMargin = $additionalUsdt / $leverage;
         $accountData = $this->exchange->getAccountData();
@@ -366,15 +245,13 @@ class TradingEngine
             );
         }
 
-        // Get current price and calculate additional quantity
         $currentPrice = $this->exchange->getPrice($position->symbol);
         $additionalQty = $this->exchange->calculateQuantity($position->symbol, $additionalUsdt, $currentPrice);
 
         if ($additionalQty <= 0) {
-            throw new \RuntimeException('Amount too small — calculated quantity is zero for this symbol');
+            throw new \RuntimeException('Amount too small — calculated quantity is zero');
         }
 
-        // Place additional market order in the same direction
         $order = $position->side === 'LONG'
             ? $this->exchange->openLong($position->symbol, $additionalQty)
             : $this->exchange->openShort($position->symbol, $additionalQty);
@@ -382,66 +259,50 @@ class TradingEngine
         $fillPrice = $order['price'] > 0 ? $order['price'] : $currentPrice;
         $fillQty = $order['quantity'];
 
-        // Calculate weighted average entry price
         $oldQty = $position->quantity;
-        $oldEntry = $position->entry_price;
         $totalQty = $oldQty + $fillQty;
-        $newAvgEntry = round(($oldEntry * $oldQty + $fillPrice * $fillQty) / $totalQty, 8);
+        $newAvgEntry = round(($position->entry_price * $oldQty + $fillPrice * $fillQty) / $totalQty, 8);
         $totalUsdt = round($position->position_size_usdt + $additionalUsdt, 4);
 
-        // Track accumulated entry fee
         $rates = $this->exchange->getCommissionRate($position->symbol);
         $addFee = $fillPrice * $fillQty * $rates['taker'];
         $oldEntryFee = $position->total_entry_fee
             ?? ($position->entry_price * $position->quantity * $rates['taker']);
         $totalEntryFee = round($oldEntryFee + $addFee, 8);
 
-        // Replace SL/TP orders with new ones covering total quantity at new average entry
-        // If SL/TP placement fails, we can't undo the market order — update position anyway
-        $slTp = $this->calculateSlTp($newAvgEntry, $position->side);
-        $slTpResult = ['sl_order_id' => null, 'tp_order_id' => null, 'sl' => $slTp['sl'], 'tp' => $slTp['tp']];
+        $this->cancelBrackets($position);
         try {
-            $slTpResult = $this->replaceSlTpOrders($position, $newAvgEntry, $totalQty);
+            $slTp = $this->placeBrackets($position->symbol, $newAvgEntry, $totalQty, $position->side);
         } catch (\Throwable $e) {
-            Log::error('Failed to replace SL/TP after adding to position — software SL/TP still active', [
+            Log::error('Failed to replace SL/TP after add', [
                 'symbol' => $position->symbol,
                 'error' => $e->getMessage(),
             ]);
+            $calc = $this->calculateSlTp($newAvgEntry, $position->side);
+            $slTp = ['sl_order_id' => null, 'tp_order_id' => null, 'sl' => $calc['sl'], 'tp' => $calc['tp']];
         }
 
-        // Update position record
         $position->update([
             'entry_price' => $newAvgEntry,
             'quantity' => $totalQty,
             'position_size_usdt' => $totalUsdt,
-            'stop_loss_price' => $slTpResult['sl'],
-            'take_profit_price' => $slTpResult['tp'],
-            'sl_order_id' => $slTpResult['sl_order_id'],
-            'tp_order_id' => $slTpResult['tp_order_id'],
+            'stop_loss_price' => $slTp['sl'],
+            'take_profit_price' => $slTp['tp'],
+            'sl_order_id' => $slTp['sl_order_id'],
+            'tp_order_id' => $slTp['tp_order_id'],
             'total_entry_fee' => $totalEntryFee,
-            'layer_count' => $position->layer_count + 1,
         ]);
 
         Log::info('Position added to', [
             'symbol' => $position->symbol,
-            'side' => $position->side,
-            'old_entry' => $oldEntry,
             'new_entry' => $newAvgEntry,
-            'added_qty' => $fillQty,
             'total_qty' => $totalQty,
-            'total_usdt' => $totalUsdt,
-            'new_sl' => $slTpResult['sl'],
-            'new_tp' => $slTpResult['tp'],
-            'layer_count' => $position->layer_count,
         ]);
 
         return $position;
     }
 
     /**
-     * Reverse a position: close the current position and open a new one in the opposite direction
-     * with the same USDT size. Only allowed when this is the sole open position on the symbol.
-     *
      * @return array{trade: Trade, position: ?Position}
      */
     public function reversePosition(Position $position): array
@@ -450,46 +311,34 @@ class TradingEngine
             throw new \RuntimeException('Cannot reverse a position that is not open');
         }
 
-        // Only allow reversal when this is the sole position on the symbol (one-way mode safety)
         $symbolPositionCount = Position::open()->where('symbol', $position->symbol)->count();
         if ($symbolPositionCount > 1) {
             throw new \RuntimeException(
-                "Cannot reverse: {$position->symbol} has {$symbolPositionCount} open positions. "
-                . 'Close all other positions on this symbol first.'
+                "Cannot reverse: {$position->symbol} has {$symbolPositionCount} open positions."
             );
         }
 
-        // Capture state before closing
         $symbol = $position->symbol;
         $positionSizeUsdt = $position->position_size_usdt;
         $leverage = $position->leverage > 0 ? $position->leverage : 1;
         $isDryRun = $position->is_dry_run;
         $newDirection = $position->side === 'LONG' ? 'SHORT' : 'LONG';
+        $maxHoldMinutes = (int) Settings::get('max_hold_minutes') ?: 120;
 
-        // Step 1: Close the old position
         $trade = $this->closePosition($position, reason: CloseReason::Reversed);
 
-        // Step 2: Open new position in opposite direction
         try {
             $price = $this->exchange->getPrice($symbol);
-
-            // Check available margin (freed from close)
             $requiredMargin = $positionSizeUsdt / $leverage;
             $accountData = $this->exchange->getAccountData();
             if ($accountData['availableBalance'] < $requiredMargin) {
-                Log::warning('Insufficient balance for reverse open leg', [
-                    'symbol' => $symbol,
-                    'required_margin' => $requiredMargin,
-                    'available_balance' => $accountData['availableBalance'],
-                ]);
+                Log::warning('Insufficient balance for reverse leg', ['symbol' => $symbol]);
                 return ['trade' => $trade, 'position' => null];
             }
 
             $this->exchange->setLeverage($symbol, $leverage);
-
             $quantity = $this->exchange->calculateQuantity($symbol, $positionSizeUsdt, $price);
             if ($quantity <= 0) {
-                Log::warning('Reverse: calculated quantity is zero', ['symbol' => $symbol, 'price' => $price]);
                 return ['trade' => $trade, 'position' => null];
             }
 
@@ -499,43 +348,26 @@ class TradingEngine
 
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
-            // Place SL/TP — fail-safe: close if placement fails
-            $slTpResult = null;
             try {
-                $tempPosition = new Position([
-                    'symbol' => $symbol,
-                    'side' => $newDirection,
-                    'sl_order_id' => null,
-                    'tp_order_id' => null,
-                ]);
-                $slTpResult = $this->replaceSlTpOrders($tempPosition, $entryPrice, $order['quantity']);
+                $slTp = $this->placeBrackets($symbol, $entryPrice, $order['quantity'], $newDirection);
             } catch (\Throwable $e) {
-                Log::error('Reverse: failed to set SL/TP — closing new position for safety', [
-                    'symbol' => $symbol,
-                    'direction' => $newDirection,
-                    'error' => $e->getMessage(),
+                Log::error('Reverse: failed to set SL/TP — closing for safety', [
+                    'symbol' => $symbol, 'error' => $e->getMessage(),
                 ]);
-
                 try {
                     $newDirection === 'LONG'
                         ? $this->exchange->closeLong($symbol, $order['quantity'])
                         : $this->exchange->closeShort($symbol, $order['quantity']);
                 } catch (\Throwable $closeErr) {
                     Log::error('CRITICAL: Failed to close unprotected reversed position', [
-                        'symbol' => $symbol,
-                        'quantity' => $order['quantity'],
-                        'error' => $closeErr->getMessage(),
+                        'symbol' => $symbol, 'error' => $closeErr->getMessage(),
                     ]);
                 }
-
                 return ['trade' => $trade, 'position' => null];
             }
 
-            // Calculate initial entry fee
             $rates = $this->exchange->getCommissionRate($symbol);
             $initialEntryFee = round($entryPrice * $order['quantity'] * $rates['taker'], 8);
-
-            $maxHoldMinutes = (int) Settings::get('grid_max_hold_minutes') ?: 1440;
 
             $newPosition = Position::create([
                 'symbol' => $symbol,
@@ -543,17 +375,14 @@ class TradingEngine
                 'entry_price' => $entryPrice,
                 'quantity' => $order['quantity'],
                 'position_size_usdt' => $positionSizeUsdt,
-                'stop_loss_price' => $slTpResult['sl'],
-                'take_profit_price' => $slTpResult['tp'],
+                'stop_loss_price' => $slTp['sl'],
+                'take_profit_price' => $slTp['tp'],
                 'current_price' => $entryPrice,
-                'best_price' => $entryPrice,
                 'leverage' => $leverage,
-                'layer_count' => 1,
-                'atr_value' => null,
                 'status' => PositionStatus::Open,
                 'exchange_order_id' => $order['orderId'],
-                'sl_order_id' => $slTpResult['sl_order_id'],
-                'tp_order_id' => $slTpResult['tp_order_id'],
+                'sl_order_id' => $slTp['sl_order_id'],
+                'tp_order_id' => $slTp['tp_order_id'],
                 'total_entry_fee' => $initialEntryFee,
                 'is_dry_run' => $isDryRun,
                 'opened_at' => now(),
@@ -564,63 +393,22 @@ class TradingEngine
                 'symbol' => $symbol,
                 'old_side' => $position->side,
                 'new_side' => $newDirection,
-                'entry_price' => $entryPrice,
-                'quantity' => $order['quantity'],
-                'stop_loss' => $slTpResult['sl'],
-                'take_profit' => $slTpResult['tp'],
             ]);
 
             return ['trade' => $trade, 'position' => $newPosition];
-
         } catch (\Throwable $e) {
-            Log::error('Reverse: open leg failed after close', [
-                'symbol' => $symbol,
-                'direction' => $newDirection,
-                'error' => $e->getMessage(),
-            ]);
-
+            Log::error('Reverse: open leg failed', ['symbol' => $symbol, 'error' => $e->getMessage()]);
             return ['trade' => $trade, 'position' => null];
         }
     }
 
     /**
-     * Cancel old SL/TP orders and place new ones for a position.
-     * Used by both openPosition() and addToPosition().
-     *
      * @return array{sl_order_id: ?string, tp_order_id: ?string, sl: float, tp: float}
-     * @throws \Throwable If SL/TP placement fails after retry
      */
-    private function replaceSlTpOrders(Position $position, float $entryPrice, float $totalQuantity): array
+    private function placeBrackets(string $symbol, float $entryPrice, float $quantity, string $side = 'SHORT'): array
     {
-        // Cancel existing SL/TP orders (if any)
-        if ($position->sl_order_id) {
-            try {
-                $this->exchange->cancelOrder($position->symbol, $position->sl_order_id);
-            } catch (\Throwable $e) {
-                Log::warning('Failed to cancel old SL order', [
-                    'symbol' => $position->symbol,
-                    'sl_order_id' => $position->sl_order_id,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
+        $slTp = $this->calculateSlTp($entryPrice, $side);
 
-        if ($position->tp_order_id) {
-            try {
-                $this->exchange->cancelOrder($position->symbol, $position->tp_order_id);
-            } catch (\Throwable $e) {
-                Log::warning('Failed to cancel old TP order', [
-                    'symbol' => $position->symbol,
-                    'tp_order_id' => $position->tp_order_id,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
-
-        // Calculate new SL/TP prices
-        $slTp = $this->calculateSlTp($entryPrice, $position->side);
-
-        // Place new SL/TP orders with retry
         $slOrderId = null;
         $tpOrderId = null;
         $lastError = null;
@@ -628,40 +416,24 @@ class TradingEngine
         for ($attempt = 1; $attempt <= 2; $attempt++) {
             try {
                 if ($slOrderId === null) {
-                    $slResult = $this->exchange->setStopLoss(
-                        $position->symbol, $slTp['sl'], $totalQuantity, $position->side
-                    );
+                    $slResult = $this->exchange->setStopLoss($symbol, $slTp['sl'], $quantity, $side);
                     $slOrderId = $slResult['orderId'] ?? null;
                 }
-
                 if ($tpOrderId === null) {
-                    $tpResult = $this->exchange->setTakeProfit(
-                        $position->symbol, $slTp['tp'], $totalQuantity, $position->side
-                    );
+                    $tpResult = $this->exchange->setTakeProfit($symbol, $slTp['tp'], $quantity, $side);
                     $tpOrderId = $tpResult['orderId'] ?? null;
                 }
-
-                // Both placed successfully
                 break;
             } catch (\Throwable $e) {
                 $lastError = $e;
                 if ($attempt === 1) {
-                    Log::warning('SL/TP placement failed, retrying...', [
-                        'symbol' => $position->symbol,
-                        'attempt' => $attempt,
-                        'error' => $e->getMessage(),
-                    ]);
-                    usleep(1_000_000); // 1 second retry delay
+                    usleep(1_000_000);
                 }
             }
         }
 
-        // If still failed after retry, log error but don't throw for addToPosition
-        // For openPosition, the caller wraps this in try/catch and closes the position
-        if ($slOrderId === null || $tpOrderId === null) {
-            if ($lastError) {
-                throw $lastError;
-            }
+        if (($slOrderId === null || $tpOrderId === null) && $lastError) {
+            throw $lastError;
         }
 
         return [
@@ -672,28 +444,57 @@ class TradingEngine
         ];
     }
 
+    private function cancelBrackets(Position $position): void
+    {
+        if (! $position->sl_order_id && ! $position->tp_order_id) {
+            try {
+                $this->exchange->cancelOrders($position->symbol);
+            } catch (\Throwable $e) {
+                Log::warning('Failed to cancel orders on close (legacy fallback)', [
+                    'symbol' => $position->symbol, 'error' => $e->getMessage(),
+                ]);
+            }
+            return;
+        }
+
+        if ($position->sl_order_id) {
+            try {
+                $this->exchange->cancelOrder($position->symbol, $position->sl_order_id);
+            } catch (\Throwable $e) {
+                Log::warning('Failed to cancel SL order', [
+                    'symbol' => $position->symbol,
+                    'sl_order_id' => $position->sl_order_id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+        if ($position->tp_order_id) {
+            try {
+                $this->exchange->cancelOrder($position->symbol, $position->tp_order_id);
+            } catch (\Throwable $e) {
+                Log::warning('Failed to cancel TP order', [
+                    'symbol' => $position->symbol,
+                    'tp_order_id' => $position->tp_order_id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+    }
+
     /**
-     * Calculate SL/TP prices. Direction-specific fixed percentages.
-     *
      * @return array{sl: float, tp: float}
      */
-    private function calculateSlTp(float $entryPrice, string $direction): array
+    private function calculateSlTp(float $entryPrice, string $side = 'SHORT'): array
     {
-        $fallbackTp = (float) Settings::get('grid_take_profit_pct') ?: 1.68;
-        $fallbackSl = (float) Settings::get('grid_stop_loss_pct') ?: 5.0;
+        $tpPct = (float) Settings::get('take_profit_pct') ?: 2.0;
+        $slPct = (float) Settings::get('stop_loss_pct') ?: 1.0;
 
-        if ($direction === 'LONG') {
-            $tpPct = (float) Settings::get('grid_long_tp_pct') ?: $fallbackTp;
-            $slPct = (float) Settings::get('grid_long_sl_pct') ?: $fallbackSl;
-
+        if ($side === 'LONG') {
             return [
                 'sl' => round($entryPrice * (1 - $slPct / 100), 8),
                 'tp' => round($entryPrice * (1 + $tpPct / 100), 8),
             ];
         }
-
-        $tpPct = (float) Settings::get('grid_short_tp_pct') ?: $fallbackTp;
-        $slPct = (float) Settings::get('grid_short_sl_pct') ?: $fallbackSl;
 
         return [
             'sl' => round($entryPrice * (1 + $slPct / 100), 8),
@@ -701,31 +502,22 @@ class TradingEngine
         ];
     }
 
-    /**
-     * Calculate P&L for a position based on its direction.
-     */
     private function calculatePnl(Position $position, float $currentPrice): float
     {
         if ($position->side === 'LONG') {
             return round(($currentPrice - $position->entry_price) * $position->quantity, 4);
         }
-
         return round(($position->entry_price - $currentPrice) * $position->quantity, 4);
     }
 
-    /**
-     * Calculate P&L percentage for a position based on its direction.
-     */
     private function calculatePnlPct(Position $position, float $currentPrice): float
     {
         if ($position->entry_price <= 0) {
             return 0;
         }
-
         if ($position->side === 'LONG') {
             return (($currentPrice - $position->entry_price) / $position->entry_price) * 100;
         }
-
         return (($position->entry_price - $currentPrice) / $position->entry_price) * 100;
     }
 }

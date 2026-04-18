@@ -59,8 +59,8 @@ class BotStatus extends Command
         }
 
         $this->newLine();
-        $this->line("Strategy: Grid Trading");
-        $this->line("Mode: " . (config('crypto.trading.dry_run') ? 'DRY RUN' : 'LIVE'));
+        $this->line("Strategy: Short-Scalp");
+        $this->line("Mode: " . (Settings::get('dry_run') ? 'DRY RUN' : 'LIVE'));
 
         return self::SUCCESS;
     }
