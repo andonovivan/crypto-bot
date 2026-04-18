@@ -43,11 +43,6 @@ class DashboardController extends Controller
             }
         }
 
-        $recentTrades = Trade::with('position')
-            ->orderByDesc('created_at')
-            ->limit(50)
-            ->get();
-
         $totalPnl = Trade::sum('pnl');
         $totalTrades = Trade::count();
         $winningTrades = Trade::where('pnl', '>', 0)->count();
@@ -123,24 +118,6 @@ class DashboardController extends Controller
 
         return response()->json([
             'positions' => $positionsData,
-            'recent_trades' => $recentTrades->map(fn (Trade $t) => [
-                'id' => $t->id,
-                'symbol' => $t->symbol,
-                'side' => $t->side,
-                'entry_price' => $t->entry_price,
-                'exit_price' => $t->exit_price,
-                'quantity' => $t->quantity,
-                'pnl' => $t->pnl,
-                'pnl_pct' => $t->pnl_pct,
-                'fees' => $t->fees,
-                'funding_fee' => $t->funding_fee,
-                'close_reason' => $t->close_reason->value,
-                'is_dry_run' => $t->is_dry_run,
-                'position_size_usdt' => $t->position?->position_size_usdt,
-                'leverage' => $t->position?->leverage,
-                'opened_at' => $t->position?->opened_at?->timestamp,
-                'created_at' => $t->created_at->timestamp,
-            ]),
             'summary' => [
                 'balance' => round($accountData['walletBalance'], 2),
                 'wallet_balance' => round($accountData['walletBalance'], 2),
@@ -160,6 +137,82 @@ class DashboardController extends Controller
                 'trading_paused' => (bool) Settings::get('trading_paused'),
             ],
             'ts' => now()->timestamp,
+        ]);
+    }
+
+    public function trades(Request $request): JsonResponse
+    {
+        $allowedPerPage = [25, 50, 100, 500];
+        $perPage = (int) $request->input('per_page', 50);
+        if (! in_array($perPage, $allowedPerPage, true)) {
+            $perPage = 50;
+        }
+        $page = max(1, (int) $request->input('page', 1));
+
+        $sortByRaw = (string) $request->input('sort_by', 'created_at');
+        $sortDir = strtolower((string) $request->input('sort_dir', 'desc')) === 'asc' ? 'asc' : 'desc';
+
+        // Whitelist: maps frontend keys to SQL columns or (for net_pnl) an expression.
+        $sortMap = [
+            'symbol'             => 'trades.symbol',
+            'entry_price'        => 'trades.entry_price',
+            'exit_price'         => 'trades.exit_price',
+            'pnl'                => 'trades.pnl',
+            'pnl_pct'            => 'trades.pnl_pct',
+            'fees'               => 'trades.fees',
+            'position_size_usdt' => 'positions.position_size_usdt',
+            'opened_at'          => 'positions.opened_at',
+            'created_at'         => 'trades.created_at',
+        ];
+
+        $query = Trade::query()
+            ->leftJoin('positions', 'positions.id', '=', 'trades.position_id')
+            ->select('trades.*');
+
+        if ($sortByRaw === 'net_pnl') {
+            $query->orderByRaw('(trades.pnl + COALESCE(trades.funding_fee, 0)) ' . $sortDir);
+        } else {
+            $column = $sortMap[$sortByRaw] ?? 'trades.created_at';
+            $query->orderBy($column, $sortDir);
+        }
+        // Stable tiebreaker so paging is deterministic when the sort key has duplicates.
+        $query->orderBy('trades.id', $sortDir);
+
+        $total = Trade::count();
+        $totalPages = max(1, (int) ceil($total / $perPage));
+        $page = min($page, $totalPages);
+
+        $trades = $query
+            ->with('position')
+            ->limit($perPage)
+            ->offset(($page - 1) * $perPage)
+            ->get();
+
+        return response()->json([
+            'data' => $trades->map(fn (Trade $t) => [
+                'id' => $t->id,
+                'symbol' => $t->symbol,
+                'side' => $t->side,
+                'entry_price' => $t->entry_price,
+                'exit_price' => $t->exit_price,
+                'quantity' => $t->quantity,
+                'pnl' => $t->pnl,
+                'pnl_pct' => $t->pnl_pct,
+                'fees' => $t->fees,
+                'funding_fee' => $t->funding_fee,
+                'close_reason' => $t->close_reason->value,
+                'is_dry_run' => $t->is_dry_run,
+                'position_size_usdt' => $t->position?->position_size_usdt,
+                'leverage' => $t->position?->leverage,
+                'opened_at' => $t->position?->opened_at?->timestamp,
+                'created_at' => $t->created_at->timestamp,
+            ]),
+            'page' => $page,
+            'per_page' => $perPage,
+            'total' => $total,
+            'total_pages' => $totalPages,
+            'sort_by' => $sortByRaw,
+            'sort_dir' => $sortDir,
         ]);
     }
 

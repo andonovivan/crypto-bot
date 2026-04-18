@@ -262,14 +262,22 @@
 <div class="footer">Dashboard auto-refreshes every 10s · Scanner auto-refreshes every 15s when visible</div>
 
 <script>
-const PAGE_SIZE = 15;
 let lastData = null;
 
 // Sorting state
 const sortState = {
   positions: { key: 'opened_at', asc: false },
-  history: { key: 'created_at', asc: false },
   scanner: { key: 'price_change_pct', asc: false },
+};
+const historyState = {
+  page: 1,
+  perPage: 50,
+  sortBy: 'created_at',
+  sortDir: 'desc',
+  total: 0,
+  totalPages: 1,
+  rows: [],
+  loaded: false,
 };
 let scannerData = null;
 let scannerLoaded = false;
@@ -289,6 +297,9 @@ function switchTab(name) {
     startScannerAutoRefresh();
   } else {
     stopScannerAutoRefresh();
+  }
+  if (name === 'history' && !historyState.loaded) {
+    fetchHistory();
   }
 }
 
@@ -321,6 +332,17 @@ function sortData(items, key, asc) {
 }
 
 function sortTable(table, key) {
+  if (table === 'history') {
+    if (historyState.sortBy === key) {
+      historyState.sortDir = historyState.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      historyState.sortBy = key;
+      historyState.sortDir = 'asc';
+    }
+    historyState.page = 1;
+    fetchHistory();
+    return;
+  }
   const state = sortState[table];
   if (state.key === key) { state.asc = !state.asc; }
   else { state.key = key; state.asc = true; }
@@ -435,6 +457,7 @@ async function closePosition(id, btn) {
     if (data.ok) {
       btn.textContent = 'Closed';
       fetchData();
+      invalidateHistory();
     } else {
       alert(data.message || 'Failed to close');
       btn.disabled = false;
@@ -464,6 +487,7 @@ async function closeAll(btn) {
       alert(`Closed ${data.closed}, failed ${data.failed?.length || 0}:\n${msg}`);
     }
     fetchData();
+    invalidateHistory();
     setTimeout(() => { btn.disabled = false; btn.textContent = 'Close All'; }, 2000);
   } catch (e) {
     alert('Error: ' + e.message);
@@ -523,6 +547,7 @@ async function reversePosition(id, btn) {
       }
       btn.textContent = 'Reversed!';
       fetchData();
+      invalidateHistory();
     } else {
       alert(data.message || 'Failed to reverse');
       btn.disabled = false;
@@ -602,14 +627,52 @@ function render(data) {
     </tr>`).join('');
   }
 
-  const histBody = document.getElementById('history-body');
-  if (data.recent_trades.length === 0) {
-    histBody.innerHTML = '<tr><td colspan="10" class="empty">No closed trades yet</td></tr>';
+}
+
+function invalidateHistory() {
+  historyState.loaded = false;
+  if (activeTab === 'history') fetchHistory();
+}
+
+let historyAbort = null;
+
+async function fetchHistory() {
+  if (historyAbort) historyAbort.abort();
+  historyAbort = new AbortController();
+  const signal = historyAbort.signal;
+  const body = document.getElementById('history-body');
+  if (!historyState.loaded) {
+    body.innerHTML = '<tr><td colspan="10" class="empty">Loading...</td></tr>';
+  }
+  try {
+    const qs = new URLSearchParams({
+      page: String(historyState.page),
+      per_page: String(historyState.perPage),
+      sort_by: historyState.sortBy,
+      sort_dir: historyState.sortDir,
+    });
+    const res = await fetch('/api/trades?' + qs.toString(), { signal });
+    const data = await res.json();
+    historyState.rows = (data.data || []).map(t => ({ ...t, net_pnl: t.pnl + (t.funding_fee || 0) }));
+    historyState.page = data.page || 1;
+    historyState.perPage = data.per_page || historyState.perPage;
+    historyState.total = data.total || 0;
+    historyState.totalPages = data.total_pages || 1;
+    historyState.loaded = true;
+    renderHistory();
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    console.error('Failed to fetch history:', e);
+    body.innerHTML = '<tr><td colspan="10" class="empty">Failed to load trades</td></tr>';
+  }
+}
+
+function renderHistory() {
+  const body = document.getElementById('history-body');
+  if (historyState.rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="10" class="empty">No closed trades yet</td></tr>';
   } else {
-    const trades = data.recent_trades.map(t => ({ ...t, net_pnl: t.pnl + (t.funding_fee || 0) }));
-    const sorted = sortData(trades, sortState.history.key, sortState.history.asc);
-    histBody.innerHTML = sorted.map(t => {
-      return `<tr>
+    body.innerHTML = historyState.rows.map(t => `<tr>
       <td>
         <strong>${t.symbol}</strong><br>
         ${sideBadge(t.side)}
@@ -625,9 +688,57 @@ function render(data) {
       <td>${reasonBadge(t.close_reason)}</td>
       <td style="font-size:0.85em">${formatTimestamp(t.opened_at)}</td>
       <td style="font-size:0.85em">${formatTimestamp(t.created_at)}</td>
-    </tr>`;
-    }).join('');
+    </tr>`).join('');
   }
+  renderHistoryPagination();
+  updateHistorySortArrows();
+}
+
+function renderHistoryPagination() {
+  const el = document.getElementById('history-pagination');
+  const { page, perPage, total, totalPages } = historyState;
+  const from = total === 0 ? 0 : (page - 1) * perPage + 1;
+  const to = Math.min(page * perPage, total);
+  const opts = [25, 50, 100, 500].map(n =>
+    `<option value="${n}" ${n === perPage ? 'selected' : ''}>${n}</option>`
+  ).join('');
+  el.innerHTML = `
+    <span style="color:#8b949e; font-size:0.85em">Showing ${fmtNum(from, 0)}–${fmtNum(to, 0)} of ${fmtNum(total, 0)} trades</span>
+    <span style="margin-left:auto; color:#8b949e; font-size:0.85em">Rows per page:</span>
+    <select id="history-per-page" onchange="changeHistoryPerPage(this.value)"
+      style="background:#0d1117; border:1px solid #30363d; border-radius:4px; color:#c9d1d9; padding:4px 8px; font-size:0.8em;">
+      ${opts}
+    </select>
+    <button onclick="goToHistoryPage(1)" ${page <= 1 ? 'disabled' : ''}>&laquo; First</button>
+    <button onclick="goToHistoryPage(${page - 1})" ${page <= 1 ? 'disabled' : ''}>&lsaquo; Prev</button>
+    <span style="color:#c9d1d9; font-size:0.85em">Page ${page} of ${totalPages}</span>
+    <button onclick="goToHistoryPage(${page + 1})" ${page >= totalPages ? 'disabled' : ''}>Next &rsaquo;</button>
+    <button onclick="goToHistoryPage(${totalPages})" ${page >= totalPages ? 'disabled' : ''}>Last &raquo;</button>
+  `;
+}
+
+function goToHistoryPage(page) {
+  const p = Math.max(1, Math.min(page, historyState.totalPages));
+  if (p === historyState.page) return;
+  historyState.page = p;
+  fetchHistory();
+}
+
+function changeHistoryPerPage(val) {
+  const n = parseInt(val, 10);
+  if (![25, 50, 100, 500].includes(n)) return;
+  historyState.perPage = n;
+  historyState.page = 1;
+  fetchHistory();
+}
+
+function updateHistorySortArrows() {
+  const keys = ['symbol', 'entry_price', 'exit_price', 'net_pnl', 'pnl_pct', 'position_size_usdt', 'fees', 'opened_at', 'created_at'];
+  keys.forEach(k => {
+    const el = document.getElementById('hist-sort-' + k);
+    if (!el) return;
+    el.textContent = historyState.sortBy === k ? (historyState.sortDir === 'asc' ? '\u25B2' : '\u25BC') : '';
+  });
 }
 
 async function loadSettings() {
@@ -944,6 +1055,9 @@ async function resetAll(btn) {
     if (data.ok) {
       btn.textContent = 'Done';
       fetchData();
+      historyState.loaded = false;
+      historyState.page = 1;
+      if (activeTab === 'history') fetchHistory();
       setTimeout(() => { btn.disabled = false; btn.textContent = 'Reset'; }, 2000);
     }
   } catch (e) {
