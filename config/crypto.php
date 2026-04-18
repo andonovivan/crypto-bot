@@ -36,6 +36,7 @@ return [
         'dry_run_fee_rate' => (float) env('DRY_RUN_FEE_RATE', 0.0005),
         'trading_paused' => filter_var(env('TRADING_PAUSED', false), FILTER_VALIDATE_BOOLEAN),
         'funding_tracking_enabled' => filter_var(env('FUNDING_TRACKING_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+        'ws_prices_enabled' => filter_var(env('WS_PRICES_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
     ],
 
     /*
@@ -57,5 +58,8 @@ return [
         'max_hold_minutes' => (int) env('MAX_HOLD_MINUTES', 120),
         'cooldown_minutes' => (int) env('COOLDOWN_MINUTES', 120),
         'max_candle_body_pct' => (float) env('MAX_CANDLE_BODY_PCT', 3.0),
+        'min_red_candles' => (int) env('MIN_RED_CANDLES', 2),
+        'use_post_only_entry' => filter_var(env('USE_POST_ONLY_ENTRY', true), FILTER_VALIDATE_BOOLEAN),
+        'limit_order_timeout_seconds' => (int) env('LIMIT_ORDER_TIMEOUT_SECONDS', 3),
     ],
 ];

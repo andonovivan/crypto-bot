@@ -15,6 +15,7 @@ class BinanceExchange implements ExchangeInterface
     private const PRICE_CACHE_TTL = 10; // seconds
     private const EXCHANGE_INFO_CACHE_TTL = 3600; // 1 hour
     private const FUNDING_RATE_CACHE_TTL = 60; // 1 minute (rates change every 8h)
+    private const BOOK_TICKER_CACHE_TTL = 2; // 2s — fresh enough for entry, dampens burst load
     private const RATE_LIMIT_WARN_THRESHOLD = 1800; // warn at 75% of 2400
 
     public function __construct()
@@ -620,5 +621,64 @@ class BinanceExchange implements ExchangeInterface
         }
 
         return $rates;
+    }
+
+    public function getOrderBookTop(string $symbol): array
+    {
+        $cacheKey = "binance:book_ticker:{$symbol}";
+        $cached = Cache::get($cacheKey);
+        if ($cached !== null) {
+            return $cached;
+        }
+
+        $response = $this->publicRequest('GET', '/fapi/v1/ticker/bookTicker', [
+            'symbol' => $symbol,
+        ]);
+
+        $top = [
+            'bid' => (float) ($response['bidPrice'] ?? 0),
+            'ask' => (float) ($response['askPrice'] ?? 0),
+        ];
+
+        Cache::put($cacheKey, $top, self::BOOK_TICKER_CACHE_TTL);
+
+        return $top;
+    }
+
+    public function openShortLimit(string $symbol, float $quantity, float $price, bool $postOnly = true): array
+    {
+        $params = [
+            'symbol' => $symbol,
+            'side' => 'SELL',
+            'type' => 'LIMIT',
+            'quantity' => $this->formatQuantity($quantity, $symbol),
+            'price' => $this->formatPrice($price),
+            'timeInForce' => $postOnly ? 'GTX' : 'GTC',
+        ];
+
+        $response = $this->signedRequest('POST', '/fapi/v1/order', $params);
+
+        return [
+            'orderId' => (string) $response['orderId'],
+            'price' => (float) ($response['price'] ?? $price),
+            'quantity' => (float) ($response['origQty'] ?? $quantity),
+            'status' => (string) ($response['status'] ?? 'NEW'),
+        ];
+    }
+
+    public function getOrderStatus(string $symbol, string $orderId): array
+    {
+        $response = $this->signedRequest('GET', '/fapi/v1/order', [
+            'symbol' => $symbol,
+            'orderId' => $orderId,
+        ]);
+
+        return [
+            'orderId' => (string) $response['orderId'],
+            'status' => (string) ($response['status'] ?? 'UNKNOWN'),
+            'executedQty' => (float) ($response['executedQty'] ?? 0),
+            'avgPrice' => (float) ($response['avgPrice'] ?? 0),
+            'origQty' => (float) ($response['origQty'] ?? 0),
+        ];
     }
 }

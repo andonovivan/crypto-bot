@@ -16,6 +16,7 @@ class Settings
         'dry_run_fee_rate' => ['config' => 'crypto.trading.dry_run_fee_rate', 'type' => 'float', 'label' => 'Dry Run Fee Rate (0.0005 = 0.05%)'],
         'trading_paused' => ['config' => 'crypto.trading.trading_paused', 'type' => 'bool', 'label' => 'Pause New Positions'],
         'funding_tracking_enabled' => ['config' => 'crypto.trading.funding_tracking_enabled', 'type' => 'bool', 'label' => 'Track Funding Fees'],
+        'ws_prices_enabled' => ['config' => 'crypto.trading.ws_prices_enabled', 'type' => 'bool', 'label' => 'WebSocket Price Stream'],
 
         // Short-scalp strategy
         'scan_interval' => ['config' => 'crypto.scalp.scan_interval', 'type' => 'int', 'label' => 'Scan Interval (seconds)'],
@@ -29,6 +30,9 @@ class Settings
         'max_hold_minutes' => ['config' => 'crypto.scalp.max_hold_minutes', 'type' => 'int', 'label' => 'Max Hold (minutes)'],
         'cooldown_minutes' => ['config' => 'crypto.scalp.cooldown_minutes', 'type' => 'int', 'label' => 'Cooldown After Close (minutes)'],
         'max_candle_body_pct' => ['config' => 'crypto.scalp.max_candle_body_pct', 'type' => 'float', 'label' => 'Max 15m Candle Body (%)'],
+        'min_red_candles' => ['config' => 'crypto.scalp.min_red_candles', 'type' => 'int', 'label' => 'Min Consecutive Red Candles'],
+        'use_post_only_entry' => ['config' => 'crypto.scalp.use_post_only_entry', 'type' => 'bool', 'label' => 'Post-Only Limit Entry (maker fee)'],
+        'limit_order_timeout_seconds' => ['config' => 'crypto.scalp.limit_order_timeout_seconds', 'type' => 'int', 'label' => 'Post-Only Fill Timeout (sec)'],
     ];
 
     public static function get(string $key): mixed

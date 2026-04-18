@@ -5,6 +5,7 @@ namespace App\Services\Exchange;
 use App\Enums\PositionStatus;
 use App\Models\Position;
 use App\Services\Settings;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -202,7 +203,7 @@ class DryRunExchange implements ExchangeInterface
         $rate = (float) Settings::get('dry_run_fee_rate');
 
         return [
-            'maker' => $rate,
+            'maker' => round($rate * 0.5, 8),
             'taker' => $rate,
         ];
     }
@@ -241,5 +242,84 @@ class DryRunExchange implements ExchangeInterface
     public function getFundingRates(?string $symbol = null): array
     {
         return $this->realExchange->getFundingRates($symbol);
+    }
+
+    public function getOrderBookTop(string $symbol): array
+    {
+        $price = $this->getPrice($symbol);
+
+        return [
+            'bid' => round($price * 0.9999, 8),
+            'ask' => round($price * 1.0001, 8),
+        ];
+    }
+
+    public function openShortLimit(string $symbol, float $quantity, float $price, bool $postOnly = true): array
+    {
+        $mark = $this->getPrice($symbol);
+
+        // Post-only SELL rejects if price would immediately cross (price at or below mark).
+        // Binance returns error -2021 / -2010 in this case.
+        if ($postOnly && $price < $mark) {
+            Log::warning("[DRY RUN] Post-only SELL rejected (would cross)", [
+                'symbol' => $symbol,
+                'limit_price' => $price,
+                'mark' => $mark,
+            ]);
+            throw new \RuntimeException("Post-only order would cross (simulated -2021)");
+        }
+
+        $orderId = 'dry_lim_' . uniqid('', true);
+
+        // Valid maker SELL at or above mark: simulate immediate fill at limit price.
+        $status = 'FILLED';
+        $avgPrice = $price;
+
+        Cache::put("dry:order:{$orderId}", [
+            'symbol' => $symbol,
+            'status' => $status,
+            'executedQty' => $quantity,
+            'avgPrice' => $avgPrice,
+            'origQty' => $quantity,
+        ], 300);
+
+        Log::info("[DRY RUN] Open short LIMIT", [
+            'symbol' => $symbol,
+            'quantity' => $quantity,
+            'price' => $price,
+            'postOnly' => $postOnly,
+            'status' => $status,
+            'orderId' => $orderId,
+        ]);
+
+        return [
+            'orderId' => $orderId,
+            'price' => $avgPrice,
+            'quantity' => $quantity,
+            'status' => $status,
+        ];
+    }
+
+    public function getOrderStatus(string $symbol, string $orderId): array
+    {
+        $cached = Cache::get("dry:order:{$orderId}");
+
+        if ($cached === null) {
+            return [
+                'orderId' => $orderId,
+                'status' => 'UNKNOWN',
+                'executedQty' => 0.0,
+                'avgPrice' => 0.0,
+                'origQty' => 0.0,
+            ];
+        }
+
+        return [
+            'orderId' => $orderId,
+            'status' => $cached['status'],
+            'executedQty' => (float) $cached['executedQty'],
+            'avgPrice' => (float) $cached['avgPrice'],
+            'origQty' => (float) $cached['origQty'],
+        ];
     }
 }

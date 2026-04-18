@@ -10,6 +10,7 @@ class ShortAnalysis
         public readonly float $emaSlow,
         public readonly float $candleBodyPct,
         public readonly bool $lastCandleRed,
+        public readonly bool $priorCandleRed,
         public readonly ?float $fundingRate,
         public readonly bool $downtrendOk,
         public readonly ?string $blockedReason,

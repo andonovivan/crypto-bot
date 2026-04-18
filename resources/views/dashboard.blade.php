@@ -89,8 +89,12 @@
   .pill-down { background: #238636; color: #fff; }
   .pill-up { background: #da3633; color: #fff; }
   .pill-flat { background: #484f58; color: #c9d1d9; }
+  /*noinspection CssUnusedSymbol*/
   .pill-red { background: #238636; color: #fff; }
+  /*noinspection CssUnusedSymbol*/
   .pill-green { background: #da3633; color: #fff; }
+  /*noinspection CssUnusedSymbol*/
+  .pill-amber { background: #9e6a03; color: #fff; }
   .settings-msg { font-size: 0.85em; margin-bottom: 12px; min-height: 1.4em; }
   .footer { color: #484f58; font-size: 0.75em; margin-top: 24px; }
   .empty { color: #484f58; text-align: center; padding: 20px; }
@@ -803,9 +807,10 @@ function trendPill(c) {
 
 function candleCell(c) {
   if (c.last_candle_red === null || c.last_candle_red === undefined) return '-';
-  const pill = c.last_candle_red
-    ? '<span class="pill pill-red">RED</span>'
-    : '<span class="pill pill-green">GREEN</span>';
+  const redCount = (c.last_candle_red ? 1 : 0) + (c.prior_candle_red ? 1 : 0);
+  const pillClass = redCount === 2 ? 'pill-red' : (redCount === 1 ? 'pill-amber' : 'pill-green');
+  const label = redCount === 2 ? '2/2 RED' : (redCount === 1 ? '1/2 RED' : '0/2 RED');
+  const pill = `<span class="pill ${pillClass}">${label}</span>`;
   const body = c.candle_body_pct !== null && c.candle_body_pct !== undefined
     ? ` <span style="color:#8b949e;font-size:0.8em">${c.candle_body_pct.toFixed(2)}%</span>`
     : '';

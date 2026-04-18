@@ -76,6 +76,7 @@ class ShortScanner
         $emaFastPeriod = (int) Settings::get('ema_fast') ?: 9;
         $emaSlowPeriod = (int) Settings::get('ema_slow') ?: 21;
         $maxBodyPct = (float) Settings::get('max_candle_body_pct') ?: 3.0;
+        $minRedCandles = max(1, (int) Settings::get('min_red_candles') ?: 2);
 
         $klines = $this->getCachedKlines($symbol);
         if ($klines === null || count($klines) < $emaSlowPeriod + 3) {
@@ -102,6 +103,14 @@ class ShortScanner
         $lastCandleRed = $close < $open;
         $bodyPct = $open > 0 ? abs($close - $open) / $open * 100 : 0;
 
+        // Prior closed candle (one before the most recent) — for the 2-red-candle gate.
+        $priorCandle = $klines[$prev - 1] ?? null;
+        $priorCandleRed = $priorCandle
+            ? ((float) $priorCandle['close'] < (float) $priorCandle['open'])
+            : false;
+
+        $redCount = ($lastCandleRed ? 1 : 0) + ($priorCandleRed ? 1 : 0);
+
         $fundingRate = $this->getFundingRate($symbol);
 
         $blocked = null;
@@ -111,8 +120,8 @@ class ShortScanner
             $blocked = 'EMA just crossed (prior candle up)';
         } elseif (! ($currentPrice < $emaFastNow)) {
             $blocked = 'Price above fast EMA';
-        } elseif (! $lastCandleRed) {
-            $blocked = 'Last closed candle green';
+        } elseif ($redCount < $minRedCandles) {
+            $blocked = "Red candles {$redCount}/{$minRedCandles}";
         } elseif ($bodyPct > $maxBodyPct) {
             $blocked = "Candle body {$this->fmt($bodyPct)}% > {$maxBodyPct}%";
         } elseif ($fundingRate !== null && $fundingRate < self::FUNDING_MIN_RATE) {
@@ -125,6 +134,7 @@ class ShortScanner
             emaSlow: $emaSlowNow,
             candleBodyPct: round($bodyPct, 3),
             lastCandleRed: $lastCandleRed,
+            priorCandleRed: $priorCandleRed,
             fundingRate: $fundingRate,
             downtrendOk: $blocked === null,
             blockedReason: $blocked,

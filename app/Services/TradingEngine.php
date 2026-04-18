@@ -60,7 +60,7 @@ class TradingEngine
                 return null;
             }
 
-            $order = $this->exchange->openShort($signal->symbol, $quantity);
+            $order = $this->placeEntryOrder($signal->symbol, $quantity, 'SHORT');
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
             try {
@@ -83,7 +83,10 @@ class TradingEngine
             }
 
             $rates = $this->exchange->getCommissionRate($signal->symbol);
-            $initialEntryFee = round($entryPrice * $order['quantity'] * $rates['taker'], 8);
+            $entryFeeRate = ($order['entry_type'] ?? 'MARKET') === 'LIMIT_MAKER'
+                ? $rates['maker']
+                : $rates['taker'];
+            $initialEntryFee = round($entryPrice * $order['quantity'] * $entryFeeRate, 8);
 
             $position = Position::create([
                 'symbol' => $signal->symbol,
@@ -113,6 +116,7 @@ class TradingEngine
                 'tp' => $slTp['tp'],
                 'reason' => $signal->reason,
                 '24h' => round($signal->priceChangePct, 2) . '%',
+                'entry_type' => $order['entry_type'] ?? 'MARKET',
             ]);
 
             return $position;
@@ -252,9 +256,7 @@ class TradingEngine
             throw new \RuntimeException('Amount too small — calculated quantity is zero');
         }
 
-        $order = $position->side === 'LONG'
-            ? $this->exchange->openLong($position->symbol, $additionalQty)
-            : $this->exchange->openShort($position->symbol, $additionalQty);
+        $order = $this->placeEntryOrder($position->symbol, $additionalQty, $position->side);
 
         $fillPrice = $order['price'] > 0 ? $order['price'] : $currentPrice;
         $fillQty = $order['quantity'];
@@ -265,7 +267,10 @@ class TradingEngine
         $totalUsdt = round($position->position_size_usdt + $additionalUsdt, 4);
 
         $rates = $this->exchange->getCommissionRate($position->symbol);
-        $addFee = $fillPrice * $fillQty * $rates['taker'];
+        $addFeeRate = ($order['entry_type'] ?? 'MARKET') === 'LIMIT_MAKER'
+            ? $rates['maker']
+            : $rates['taker'];
+        $addFee = $fillPrice * $fillQty * $addFeeRate;
         $oldEntryFee = $position->total_entry_fee
             ?? ($position->entry_price * $position->quantity * $rates['taker']);
         $totalEntryFee = round($oldEntryFee + $addFee, 8);
@@ -342,10 +347,7 @@ class TradingEngine
                 return ['trade' => $trade, 'position' => null];
             }
 
-            $order = $newDirection === 'LONG'
-                ? $this->exchange->openLong($symbol, $quantity)
-                : $this->exchange->openShort($symbol, $quantity);
-
+            $order = $this->placeEntryOrder($symbol, $quantity, $newDirection);
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
             try {
@@ -367,7 +369,10 @@ class TradingEngine
             }
 
             $rates = $this->exchange->getCommissionRate($symbol);
-            $initialEntryFee = round($entryPrice * $order['quantity'] * $rates['taker'], 8);
+            $entryFeeRate = ($order['entry_type'] ?? 'MARKET') === 'LIMIT_MAKER'
+                ? $rates['maker']
+                : $rates['taker'];
+            $initialEntryFee = round($entryPrice * $order['quantity'] * $entryFeeRate, 8);
 
             $newPosition = Position::create([
                 'symbol' => $symbol,
@@ -519,5 +524,146 @@ class TradingEngine
             return (($currentPrice - $position->entry_price) / $position->entry_price) * 100;
         }
         return (($position->entry_price - $currentPrice) / $position->entry_price) * 100;
+    }
+
+    /**
+     * Place an entry order. For SHORTs (when `use_post_only_entry` is on), tries a
+     * post-only LIMIT at best ask first and falls back to MARKET on reject, timeout,
+     * or partial fill. For LONGs, always uses MARKET.
+     *
+     * @return array{orderId: string, price: float, quantity: float, entry_type: string}
+     */
+    private function placeEntryOrder(string $symbol, float $quantity, string $side): array
+    {
+        $usePostOnly = (bool) Settings::get('use_post_only_entry');
+
+        if ($side !== 'SHORT' || ! $usePostOnly) {
+            $order = $side === 'LONG'
+                ? $this->exchange->openLong($symbol, $quantity)
+                : $this->exchange->openShort($symbol, $quantity);
+
+            return [
+                'orderId' => $order['orderId'],
+                'price' => (float) $order['price'],
+                'quantity' => (float) $order['quantity'],
+                'entry_type' => 'MARKET',
+            ];
+        }
+
+        try {
+            $book = $this->exchange->getOrderBookTop($symbol);
+            $limitPrice = (float) ($book['ask'] ?? 0);
+            if ($limitPrice <= 0) {
+                throw new \RuntimeException('Invalid ask price from orderbook');
+            }
+
+            $limit = $this->exchange->openShortLimit($symbol, $quantity, $limitPrice, postOnly: true);
+
+            if ($limit['status'] === 'FILLED') {
+                Log::info('Entry filled as LIMIT_MAKER', [
+                    'symbol' => $symbol,
+                    'price' => $limit['price'],
+                    'qty' => $limit['quantity'],
+                    'orderId' => $limit['orderId'],
+                ]);
+                return [
+                    'orderId' => (string) $limit['orderId'],
+                    'price' => (float) $limit['price'],
+                    'quantity' => (float) $limit['quantity'],
+                    'entry_type' => 'LIMIT_MAKER',
+                ];
+            }
+
+            $timeout = max(1, (int) Settings::get('limit_order_timeout_seconds') ?: 3);
+            $deadline = microtime(true) + $timeout;
+            $lastStatus = null;
+
+            while (microtime(true) < $deadline) {
+                usleep(500_000);
+                $lastStatus = $this->exchange->getOrderStatus($symbol, $limit['orderId']);
+                if ($lastStatus['status'] === 'FILLED') {
+                    Log::info('Entry filled as LIMIT_MAKER (polled)', [
+                        'symbol' => $symbol,
+                        'price' => $lastStatus['avgPrice'],
+                        'qty' => $lastStatus['executedQty'],
+                        'orderId' => $limit['orderId'],
+                    ]);
+                    return [
+                        'orderId' => (string) $limit['orderId'],
+                        'price' => (float) $lastStatus['avgPrice'],
+                        'quantity' => (float) $lastStatus['executedQty'],
+                        'entry_type' => 'LIMIT_MAKER',
+                    ];
+                }
+            }
+
+            try {
+                $this->exchange->cancelOrder($symbol, (string) $limit['orderId']);
+            } catch (\Throwable $e) {
+                Log::warning('Failed to cancel LIMIT on timeout', [
+                    'symbol' => $symbol,
+                    'orderId' => $limit['orderId'],
+                    'error' => $e->getMessage(),
+                ]);
+            }
+
+            $final = null;
+            try {
+                $final = $this->exchange->getOrderStatus($symbol, (string) $limit['orderId']);
+            } catch (\Throwable) {
+                // use $lastStatus if final query fails
+            }
+            $filled = (float) ($final['executedQty'] ?? $lastStatus['executedQty'] ?? 0);
+
+            if ($filled >= $quantity) {
+                return [
+                    'orderId' => (string) $limit['orderId'],
+                    'price' => (float) ($final['avgPrice'] ?? $lastStatus['avgPrice'] ?? $limitPrice),
+                    'quantity' => $filled,
+                    'entry_type' => 'LIMIT_MAKER',
+                ];
+            }
+
+            $remaining = $quantity - $filled;
+            Log::info('LIMIT timeout, falling back to MARKET', [
+                'symbol' => $symbol,
+                'filled' => $filled,
+                'remaining' => $remaining,
+            ]);
+
+            $market = $this->exchange->openShort($symbol, $remaining);
+
+            if ($filled > 0) {
+                $limitFillPrice = (float) ($final['avgPrice'] ?? $lastStatus['avgPrice'] ?? $limitPrice);
+                $totalQty = $filled + (float) $market['quantity'];
+                $avgPrice = ($limitFillPrice * $filled + (float) $market['price'] * (float) $market['quantity']) / $totalQty;
+                return [
+                    'orderId' => (string) $market['orderId'],
+                    'price' => round($avgPrice, 8),
+                    'quantity' => $totalQty,
+                    'entry_type' => 'MIXED',
+                ];
+            }
+
+            return [
+                'orderId' => (string) $market['orderId'],
+                'price' => (float) $market['price'],
+                'quantity' => (float) $market['quantity'],
+                'entry_type' => 'MARKET_FALLBACK',
+            ];
+        } catch (\Throwable $e) {
+            Log::info('Post-only path unavailable, using MARKET', [
+                'symbol' => $symbol,
+                'error' => $e->getMessage(),
+            ]);
+
+            $order = $this->exchange->openShort($symbol, $quantity);
+            return [
+                'orderId' => (string) $order['orderId'],
+                'price' => (float) $order['price'],
+                'quantity' => (float) $order['quantity'],
+                'entry_type' => 'MARKET_FALLBACK',
+            ];
+        }
     }
 }

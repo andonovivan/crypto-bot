@@ -135,4 +135,25 @@ interface ExchangeInterface
      * @return array<string, array{fundingRate: float, nextFundingTime: int, markPrice: float}>
      */
     public function getFundingRates(?string $symbol = null): array;
+
+    /**
+     * Get the top of the orderbook (best bid/ask) for a symbol.
+     *
+     * @return array{bid: float, ask: float}
+     */
+    public function getOrderBookTop(string $symbol): array;
+
+    /**
+     * Open a short position via LIMIT order. Use $postOnly=true for maker-only (timeInForce=GTX).
+     *
+     * @return array{orderId: string, price: float, quantity: float, status: string}
+     */
+    public function openShortLimit(string $symbol, float $quantity, float $price, bool $postOnly = true): array;
+
+    /**
+     * Query the current status of an order.
+     *
+     * @return array{orderId: string, status: string, executedQty: float, avgPrice: float, origQty: float}
+     */
+    public function getOrderStatus(string $symbol, string $orderId): array;
 }

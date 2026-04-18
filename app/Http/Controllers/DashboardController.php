@@ -420,6 +420,7 @@ class DashboardController extends Controller
                 'ema_slow' => $analysis?->emaSlow !== null ? round($analysis->emaSlow, 6) : null,
                 'candle_body_pct' => $analysis?->candleBodyPct,
                 'last_candle_red' => $analysis?->lastCandleRed,
+                'prior_candle_red' => $analysis?->priorCandleRed,
                 'funding_rate' => $analysis?->fundingRate,
                 'downtrend_ok' => $analysis?->downtrendOk ?? false,
                 'open_positions' => $symbolOpen,
