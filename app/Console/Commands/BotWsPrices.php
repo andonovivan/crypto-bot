@@ -2,6 +2,9 @@
 
 namespace App\Console\Commands;
 
+use App\Enums\PositionStatus;
+use App\Models\Position;
+use App\Services\TradingEngine;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -15,6 +18,12 @@ use React\EventLoop\Loop;
  * stream and writes mark prices to the shared `binance:prices` cache key.
  * BinanceExchange::getPrice() already reads from that key, so this
  * transparently replaces REST polling with sub-second WebSocket updates.
+ *
+ * Additionally, each incoming frame triggers TradingEngine::checkPosition
+ * for every open position whose symbol is in the frame — giving ~1s TP/SL
+ * reaction time (vs 30s via BotRun's cycle). BotRun still runs the same
+ * checks as a 30s fallback; checkPosition is idempotent via a status guard.
+ *
  * On disconnect, reconnects with exponential backoff up to 60s.
  */
 class BotWsPrices extends Command
@@ -28,16 +37,20 @@ class BotWsPrices extends Command
 
     private bool $shouldStop = false;
     private int $backoffSeconds = 1;
+    private TradingEngine $engine;
 
-    public function handle(): int
+    public function handle(TradingEngine $engine): int
     {
+        $this->engine = $engine;
+
         if (extension_loaded('pcntl')) {
             pcntl_async_signals(true);
             pcntl_signal(SIGTERM, fn () => $this->shouldStop = true);
             pcntl_signal(SIGINT, fn () => $this->shouldStop = true);
         }
 
-        $wsUrl = config('crypto.binance.ws_url') . '/stream?streams=!markPrice@arr';
+        // @1s gives 1-second push cadence (default is 3s). Tighter TP/SL reaction.
+        $wsUrl = config('crypto.binance.ws_url') . '/stream?streams=!markPrice@arr@1s';
 
         $this->info('WebSocket price worker starting');
         $this->info("  URL: {$wsUrl}");
@@ -138,6 +151,38 @@ class BotWsPrices extends Command
 
         if ($updates > 0) {
             Cache::put(self::CACHE_KEY, $prices, self::CACHE_TTL_SECONDS);
+            $this->checkOpenPositions($prices);
+        }
+    }
+
+    /**
+     * Event-driven position management: on each ws frame, look up open
+     * positions and call checkPosition with the fresh price. Gives ~1s
+     * TP/SL reaction without any REST polling. Per-position errors are
+     * caught so one bad symbol can't kill the ws loop.
+     */
+    private function checkOpenPositions(array $prices): void
+    {
+        try {
+            $positions = Position::where('status', PositionStatus::Open)->get();
+        } catch (\Throwable $e) {
+            Log::warning('ws position-check: load failed', ['error' => $e->getMessage()]);
+            return;
+        }
+
+        foreach ($positions as $position) {
+            $price = $prices[$position->symbol] ?? null;
+            if ($price === null) {
+                continue;
+            }
+            try {
+                $this->engine->checkPosition($position, (float) $price);
+            } catch (\Throwable $e) {
+                Log::warning('ws position-check: error', [
+                    'symbol' => $position->symbol,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 }

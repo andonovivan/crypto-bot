@@ -131,6 +131,14 @@ class TradingEngine
 
     public function checkPosition(Position $position, float $currentPrice): void
     {
+        // Idempotency guard: caller may hold a stale row. Refresh from DB
+        // and bail if the position has already been closed by a concurrent
+        // caller (ws-driven check vs BotRun fallback, or manual close).
+        $position->refresh();
+        if ($position->status !== PositionStatus::Open) {
+            return;
+        }
+
         $unrealizedPnl = $this->calculatePnl($position, $currentPrice);
 
         $position->update([

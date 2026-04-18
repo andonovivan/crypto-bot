@@ -11,7 +11,7 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 - **app** — Dashboard web server (port 8090, runs migrations on startup)
 - **bot** — Continuous scan loop (`bot:run`, configurable scan interval, default 30s)
 - **scheduler** — Laravel scheduler (`schedule:run` loop)
-- **ws-worker** — Long-running WebSocket worker (`bot:ws-prices`) that subscribes to Binance `!markPrice@arr` and writes to the `binance:prices` cache key (30s TTL). `BinanceExchange::getPrice()` reads that cache, so this replaces 10s REST polling with sub-second push updates. Has `extra_hosts: fstream.binance.com:18.178.11.87` to bypass ISP DNS hijacking (host `/etc/hosts` propagation only covers `fapi.binance.com`). If the worker dies, cache entries expire in 30s and `getPrice()` falls back to REST transparently.
+- **ws-worker** — Long-running WebSocket worker (`bot:ws-prices`) that subscribes to Binance `!markPrice@arr` and writes to the `binance:prices` cache key (30s TTL). `BinanceExchange::getPrice()` reads that cache, so this replaces 10s REST polling with sub-second push updates. Also drives **event-driven position management**: on each ws frame it loads open positions and calls `TradingEngine::checkPosition` with the fresh price, giving ~1s TP/SL reaction time (vs 30s via BotRun's cycle). Has `extra_hosts: fstream.binance.com:18.178.11.87` to bypass ISP DNS hijacking (host `/etc/hosts` propagation only covers `fapi.binance.com`). If the worker dies, cache entries expire in 30s, `getPrice()` falls back to REST, and BotRun's 30s cycle takes over position checks — degraded but still functional.
 - App runs migrations; bot/scheduler/ws-worker wait for app to start first
 
 ### Exchange Abstraction
@@ -31,10 +31,11 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 1. **BotRun** — continuous loop, default 30s interval
 2. **Per cycle**:
    - Settle funding fees at 8h UTC boundaries via `FundingSettlementService`
-   - **Manage open positions**: for each open position, fetch latest price, call `checkPosition()` to check TP/SL/expiry
+   - **Manage open positions** (fallback path): for each open position, fetch latest price, call `checkPosition()` to check TP/SL/expiry. Primary path is event-driven from `ws-worker` (~1s); this loop is the 30s reconciliation if ws-worker is down.
    - **Find new entries**: `ShortScanner::getCandidates()` returns pump/dump candidates (one API call for all tickers)
    - For each candidate: apply cheap gates (paused, max_positions, already-open-on-symbol, cooldown), then `analyze15m()` for the Strict downtrend check, then open SHORT via `TradingEngine::openShort()` if eligible
 3. **Cycle summary** logged: `Cycle: candidates=N analyzed=M opened=V openPositions=X`
+4. **Idempotency**: `TradingEngine::checkPosition` refreshes the row and bails if already closed, so ws-driven and BotRun-driven checks can't race into a double-close.
 
 ### Short-Scalp Strategy
 
