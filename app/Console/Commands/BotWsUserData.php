@@ -118,11 +118,25 @@ class BotWsUserData extends Command
 
                 $this->keepAliveTimer = $loop->addPeriodicTimer(
                     self::KEEPALIVE_INTERVAL_SECONDS,
-                    function () {
+                    function () use ($conn, $loop) {
                         try {
                             $this->exchange->keepAliveListenKey();
                         } catch (\Throwable $e) {
-                            Log::warning('listenKey keep-alive failed', ['error' => $e->getMessage()]);
+                            // A silent keep-alive failure means the listenKey is likely
+                            // dead but the WS connection is still up. Binance will stop
+                            // pushing events and we won't notice until the socket closes
+                            // on its own. Force a disconnect so the reconnect path
+                            // requests a fresh listenKey.
+                            Log::warning('listenKey keep-alive failed — forcing reconnect', [
+                                'error' => $e->getMessage(),
+                            ]);
+                            $this->warn("listenKey keep-alive failed — forcing reconnect: {$e->getMessage()}");
+                            $this->cancelKeepAlive($loop);
+                            try {
+                                $conn->close();
+                            } catch (\Throwable) {
+                                // close handler fires and schedules reconnect with fresh listenKey
+                            }
                         }
                     }
                 );

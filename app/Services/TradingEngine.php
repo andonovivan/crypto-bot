@@ -72,6 +72,17 @@ class TradingEngine
                     'error' => $e->getMessage(),
                 ]);
 
+                // Any bracket that did land before the failure would otherwise linger as a
+                // reduceOnly=true order on Binance. Best-effort cleanup.
+                try {
+                    $this->exchange->cancelOrders($signal->symbol);
+                } catch (\Throwable $cancelErr) {
+                    Log::warning('Failed to cancel stray bracket orders', [
+                        'symbol' => $signal->symbol,
+                        'error' => $cancelErr->getMessage(),
+                    ]);
+                }
+
                 $closeErrMsg = null;
                 try {
                     $this->exchange->closeShort($signal->symbol, $order['quantity']);
@@ -200,6 +211,20 @@ class TradingEngine
             return;
         }
 
+        // Safety: if the operator flipped `dry_run` while this position was open,
+        // the configured exchange no longer matches the one that opened it. Acting
+        // now would close a real Binance position via DryRunExchange (or vice-
+        // versa). Skip loudly — the operator must reconcile before anything else.
+        if ($this->isModeMismatch($position)) {
+            Log::warning('Skipping checkPosition: dry_run setting does not match position', [
+                'position_id' => $position->id,
+                'symbol' => $position->symbol,
+                'position_is_dry_run' => $position->is_dry_run,
+                'current_dry_run' => (bool) Settings::get('dry_run'),
+            ]);
+            return;
+        }
+
         $unrealizedPnl = $this->calculatePnl($position, $currentPrice);
 
         $position->update([
@@ -250,6 +275,32 @@ class TradingEngine
 
     public function closePosition(Position $position, ?float $exitPrice = null, CloseReason $reason = CloseReason::Manual): Trade
     {
+        // Idempotency guard: a concurrent ws-stream reconcile, safety poll, or
+        // racing manual close may have already flipped this row. Return the
+        // existing Trade rather than issuing a duplicate exchange call and
+        // writing a second Trade row for the same close.
+        $position->refresh();
+        if ($position->status !== PositionStatus::Open) {
+            $existing = Trade::where('position_id', $position->id)->latest('id')->first();
+            if ($existing) {
+                return $existing;
+            }
+            throw new \RuntimeException(
+                "Position #{$position->id} is not open and has no recorded close trade"
+            );
+        }
+
+        // Refuse if the current dry_run setting doesn't match the position's origin.
+        if ($this->isModeMismatch($position)) {
+            $current = (bool) Settings::get('dry_run');
+            throw new \RuntimeException(sprintf(
+                'Exchange-mode mismatch: position #%d is_dry_run=%s, current dry_run=%s. Flip dry_run back before closing.',
+                $position->id,
+                $position->is_dry_run ? 'true' : 'false',
+                $current ? 'true' : 'false',
+            ));
+        }
+
         if ($exitPrice === null) {
             $exitPrice = $this->exchange->getPrice($position->symbol);
         }
@@ -485,6 +536,11 @@ class TradingEngine
         if ($additionalUsdt <= 0) {
             throw new \RuntimeException('Additional amount must be greater than zero');
         }
+        if ($this->isModeMismatch($position)) {
+            throw new \RuntimeException(
+                'Cannot add: dry_run setting does not match position origin. Close the position first.'
+            );
+        }
 
         $leverage = $position->leverage > 0 ? $position->leverage : 1;
         $requiredMargin = $additionalUsdt / $leverage;
@@ -526,12 +582,52 @@ class TradingEngine
         try {
             $slTp = $this->placeBrackets($position->symbol, $newAvgEntry, $totalQty, $position->side);
         } catch (\Throwable $e) {
-            Log::error('Failed to replace SL/TP after add', [
+            Log::error('Failed to replace SL/TP after add — closing position for safety', [
                 'symbol' => $position->symbol,
                 'error' => $e->getMessage(),
             ]);
-            $calc = $this->calculateSlTp($newAvgEntry, $position->side);
-            $slTp = ['sl_order_id' => null, 'tp_order_id' => null, 'sl' => $calc['sl'], 'tp' => $calc['tp']];
+
+            // The add-leg market order already fired, so the exchange holds a larger
+            // position with no active brackets. In live mode, checkPosition no longer
+            // price-triggers SL/TP, so leaving this position open means it runs uncapped
+            // until expiry. Close the whole thing.
+            try {
+                $this->exchange->cancelOrders($position->symbol);
+            } catch (\Throwable $cancelErr) {
+                Log::warning('Failed to cancel stray orders after bracket re-place failure', [
+                    'symbol' => $position->symbol,
+                    'error' => $cancelErr->getMessage(),
+                ]);
+            }
+
+            $position->update([
+                'entry_price' => $newAvgEntry,
+                'quantity' => $totalQty,
+                'position_size_usdt' => $totalUsdt,
+                'stop_loss_price' => 0,
+                'take_profit_price' => 0,
+                'sl_order_id' => null,
+                'tp_order_id' => null,
+                'total_entry_fee' => $totalEntryFee,
+            ]);
+
+            try {
+                $this->closePosition($position, reason: CloseReason::Manual);
+            } catch (\Throwable $safetyCloseErr) {
+                Log::error('CRITICAL: safety close after bracket failure also failed', [
+                    'symbol' => $position->symbol,
+                    'bracket_error' => $e->getMessage(),
+                    'close_error' => $safetyCloseErr->getMessage(),
+                ]);
+                throw new \RuntimeException(
+                    'Failed to re-place brackets after add AND safety close also failed — position may be unprotected: '
+                    . $e->getMessage() . ' | close: ' . $safetyCloseErr->getMessage()
+                );
+            }
+
+            throw new \RuntimeException(
+                'Failed to re-place brackets after add; position was closed for safety: ' . $e->getMessage()
+            );
         }
 
         $position->update([
@@ -561,6 +657,11 @@ class TradingEngine
     {
         if ($position->status !== PositionStatus::Open) {
             throw new \RuntimeException('Cannot reverse a position that is not open');
+        }
+        if ($this->isModeMismatch($position)) {
+            throw new \RuntimeException(
+                'Cannot reverse: dry_run setting does not match position origin. Close the position first.'
+            );
         }
 
         $symbolPositionCount = Position::open()->where('symbol', $position->symbol)->count();
@@ -603,6 +704,13 @@ class TradingEngine
                 Log::error('Reverse: failed to set SL/TP — closing for safety', [
                     'symbol' => $symbol, 'error' => $e->getMessage(),
                 ]);
+                try {
+                    $this->exchange->cancelOrders($symbol);
+                } catch (\Throwable $cancelErr) {
+                    Log::warning('Reverse: failed to cancel stray brackets', [
+                        'symbol' => $symbol, 'error' => $cancelErr->getMessage(),
+                    ]);
+                }
                 try {
                     $newDirection === 'LONG'
                         ? $this->exchange->closeLong($symbol, $order['quantity'])
@@ -752,6 +860,17 @@ class TradingEngine
             'sl' => round($entryPrice * (1 + $slPct / 100), 8),
             'tp' => round($entryPrice * (1 - $tpPct / 100), 8),
         ];
+    }
+
+    /**
+     * Returns true if the current dry_run setting disagrees with the origin mode
+     * of this position. The ExchangeDispatcher routes to live or dry based on the
+     * current setting; acting on a mismatched position would either close a real
+     * Binance position via DryRunExchange or vice-versa. Callers must refuse.
+     */
+    private function isModeMismatch(Position $position): bool
+    {
+        return $position->is_dry_run !== (bool) Settings::get('dry_run');
     }
 
     private function calculatePnl(Position $position, float $currentPrice): float
