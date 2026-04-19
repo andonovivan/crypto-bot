@@ -45,8 +45,30 @@ class Settings
         'partial_tp_size_pct' => ['config' => 'crypto.scalp.partial_tp_size_pct', 'type' => 'float', 'label' => 'Partial TP Size (% of position)'],
     ];
 
+    /** Process-local overrides that shadow the DB for the duration of a single process. */
+    private static array $overrides = [];
+
+    /**
+     * Override a setting for this PHP process only — no DB write, no effect on
+     * other containers. Used by bot:backtest to flip dry_run=true and set a
+     * custom starting_balance without stomping on the live bot's shared state.
+     */
+    public static function override(string $key, mixed $value): void
+    {
+        self::$overrides[$key] = $value;
+    }
+
+    public static function clearOverrides(): void
+    {
+        self::$overrides = [];
+    }
+
     public static function get(string $key): mixed
     {
+        if (array_key_exists($key, self::$overrides)) {
+            return self::$overrides[$key];
+        }
+
         $meta = self::KEYS[$key] ?? null;
 
         if (! $meta) {
