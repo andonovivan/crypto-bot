@@ -829,4 +829,39 @@ class BinanceExchange implements ExchangeInterface
     {
         return $this;
     }
+
+    public function getUserTrades(string $symbol, int $sinceMs, int $limit = 500): array
+    {
+        $response = $this->signedRequest('GET', '/fapi/v1/userTrades', [
+            'symbol' => $symbol,
+            'startTime' => $sinceMs,
+            'limit' => min(1000, max(1, $limit)),
+        ]);
+
+        if (! is_array($response)) {
+            return [];
+        }
+
+        $rows = [];
+        foreach ($response as $t) {
+            if (! is_array($t)) {
+                continue;
+            }
+            $rows[] = [
+                'id' => (int) ($t['id'] ?? 0),
+                'orderId' => (string) ($t['orderId'] ?? ''),
+                'side' => (string) ($t['side'] ?? ''),
+                'positionSide' => (string) ($t['positionSide'] ?? ''),
+                'price' => (float) ($t['price'] ?? 0),
+                'qty' => (float) ($t['qty'] ?? 0),
+                'quoteQty' => (float) ($t['quoteQty'] ?? 0),
+                'realizedPnl' => (float) ($t['realizedPnl'] ?? 0),
+                'commission' => (float) ($t['commission'] ?? 0),
+                'commissionAsset' => (string) ($t['commissionAsset'] ?? ''),
+                'time' => (int) ($t['time'] ?? 0),
+            ];
+        }
+
+        return $rows;
+    }
 }

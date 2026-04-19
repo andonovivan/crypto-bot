@@ -175,4 +175,9 @@ class ExchangeDispatcher implements ExchangeInterface
     {
         return $this->active();
     }
+
+    public function getUserTrades(string $symbol, int $sinceMs, int $limit = 500): array
+    {
+        return $this->active()->getUserTrades($symbol, $sinceMs, $limit);
+    }
 }

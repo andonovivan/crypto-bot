@@ -368,4 +368,9 @@ class DryRunExchange implements ExchangeInterface
     {
         return $this;
     }
+
+    public function getUserTrades(string $symbol, int $sinceMs, int $limit = 500): array
+    {
+        return [];
+    }
 }

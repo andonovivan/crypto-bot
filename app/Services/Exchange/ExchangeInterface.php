@@ -201,4 +201,16 @@ interface ExchangeInterface
      * backend, avoiding mid-flight dry_run toggle route-splits.
      */
     public function resolve(): ExchangeInterface;
+
+    /**
+     * Fetch per-fill account trades for a symbol since a given timestamp.
+     * Used to reconstruct actual fill prices when bracket orders were
+     * cancelled externally (e.g. operator closed on Binance UI) and the
+     * ws-user-data stream missed the close event.
+     *
+     * @param  int  $sinceMs  Milliseconds-since-epoch lower bound (inclusive).
+     * @param  int  $limit    Max rows to return (Binance max = 1000).
+     * @return array<array{id: int, orderId: string, side: string, positionSide: string, price: float, qty: float, quoteQty: float, realizedPnl: float, commission: float, commissionAsset: string, time: int}>
+     */
+    public function getUserTrades(string $symbol, int $sinceMs, int $limit = 500): array;
 }

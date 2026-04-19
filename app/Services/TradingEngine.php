@@ -88,8 +88,9 @@ class TradingEngine
                 }
 
                 $closeErrMsg = null;
+                $closeOrder = null;
                 try {
-                    $exchange->closeShort($signal->symbol, $order['quantity']);
+                    $closeOrder = $exchange->closeShort($signal->symbol, $order['quantity']);
                 } catch (\Throwable $closeErr) {
                     $closeErrMsg = $closeErr->getMessage();
                     Log::error('CRITICAL: Failed to close unprotected position', [
@@ -102,7 +103,27 @@ class TradingEngine
                 if ($closeErrMsg) {
                     $msg .= ' | UNPROTECTED — close also failed: ' . $closeErrMsg;
                 }
-                $this->recordFailedEntry($signal, $leverage, $positionSizeUsdt, $entryPrice, $isDryRun, $msg, $order);
+
+                // If the close succeeded, record the entry+close as a real
+                // Position+Trade pair so the financial impact is tracked. The
+                // error_message preserves operational context. If the close
+                // failed, fall back to a Failed-entry row — operator must
+                // intervene manually on Binance.
+                if ($closeOrder !== null) {
+                    $this->recordFailsafeCloseAsTrade(
+                        $signal,
+                        $leverage,
+                        $positionSizeUsdt,
+                        $entryPrice,
+                        $isDryRun,
+                        $order,
+                        $closeOrder,
+                        $msg,
+                        $exchange,
+                    );
+                } else {
+                    $this->recordFailedEntry($signal, $leverage, $positionSizeUsdt, $entryPrice, $isDryRun, $msg, $order);
+                }
                 return null;
             }
 
@@ -202,6 +223,87 @@ class TradingEngine
                 'symbol' => $signal->symbol,
                 'error' => $persistErr->getMessage(),
             ]);
+        }
+    }
+
+    /**
+     * Record a bracket-failure-but-close-succeeded entry as a real Position+Trade
+     * pair so the financial impact is counted in P&L. Preserves the original
+     * bracket-failure error in `error_message` for post-hoc debugging.
+     *
+     * Prefers the actual fill price from /fapi/v1/userTrades when available; falls
+     * back to the closeShort response's avgPrice (also accurate for MARKET).
+     */
+    private function recordFailsafeCloseAsTrade(
+        ShortSignal $signal,
+        int $leverage,
+        float $positionSizeUsdt,
+        float $entryPrice,
+        bool $isDryRun,
+        array $entryOrder,
+        array $closeOrder,
+        string $errorMessage,
+        ExchangeInterface $exchange,
+    ): void {
+        try {
+            $rates = $exchange->getCommissionRate($signal->symbol);
+            $entryFeeRate = ($entryOrder['entry_type'] ?? 'MARKET') === 'LIMIT_MAKER'
+                ? $rates['maker']
+                : $rates['taker'];
+            $qty = (float) ($entryOrder['quantity'] ?? 0);
+            $initialEntryFee = round($entryPrice * $qty * $entryFeeRate, 8);
+
+            $position = Position::create([
+                'symbol' => $signal->symbol,
+                'side' => 'SHORT',
+                'entry_price' => $entryPrice,
+                'quantity' => $qty,
+                'position_size_usdt' => $positionSizeUsdt,
+                'stop_loss_price' => 0,
+                'take_profit_price' => 0,
+                'current_price' => $entryPrice,
+                'leverage' => $leverage,
+                'status' => PositionStatus::Open,
+                'exchange_order_id' => $entryOrder['orderId'] ?? null,
+                'total_entry_fee' => $initialEntryFee,
+                'is_dry_run' => $isDryRun,
+                'error_message' => $errorMessage,
+                'opened_at' => now(),
+            ]);
+
+            // Prefer userTrades (authoritative per-fill data). If unavailable or
+            // returns nothing yet (Binance sync lag is possible immediately after
+            // a MARKET fill), fall back to the closeShort response's avgPrice.
+            $closePrice = 0.0;
+            $closeOrderId = (string) ($closeOrder['orderId'] ?? '');
+            try {
+                $fill = $this->findCloseFromUserTrades($position, $exchange);
+                if ($fill !== null) {
+                    $closePrice = $fill['price'];
+                    $closeOrderId = $fill['orderId'];
+                }
+            } catch (\Throwable $ute) {
+                Log::warning('userTrades lookup failed in failsafe close path', [
+                    'symbol' => $signal->symbol,
+                    'error' => $ute->getMessage(),
+                ]);
+            }
+
+            if ($closePrice <= 0) {
+                $closePrice = (float) ($closeOrder['price'] ?? 0);
+            }
+            if ($closePrice <= 0) {
+                $closePrice = $entryPrice; // absolute last resort
+            }
+
+            $this->finalizeClose($position, $closePrice, $closeOrderId, CloseReason::Manual);
+        } catch (\Throwable $persistErr) {
+            Log::error('Failed to record failsafe-close Position+Trade', [
+                'symbol' => $signal->symbol,
+                'error' => $persistErr->getMessage(),
+            ]);
+            // Best-effort: fall back to Failed row so the event is at least visible.
+            $this->recordFailedEntry($signal, $leverage, $positionSizeUsdt, $entryPrice, $isDryRun, $errorMessage, $entryOrder);
         }
     }
 
@@ -325,10 +427,24 @@ class TradingEngine
                 if ($reconciled !== null) {
                     return $reconciled;
                 }
-                // Brackets didn't fill either — synthesize a close at last known price
-                // using the caller's reason. No exchange orderId available.
-                Log::warning('Close target already flat but no bracket fill found — synthesizing', [
+                // Brackets didn't fire either — query /fapi/v1/userTrades to find
+                // the actual fill (operator closed via Binance UI, etc.) instead
+                // of synthesizing from a stale mark price.
+                $fill = $this->findCloseFromUserTrades($position, $exchange);
+                if ($fill !== null) {
+                    Log::info('Close target already flat — reconciling from userTrades', [
+                        'symbol' => $position->symbol,
+                        'position_id' => $position->id,
+                        'reason' => $reason->value,
+                        'orderId' => $fill['orderId'],
+                        'exit' => $fill['price'],
+                    ]);
+                    return $this->finalizeClose($position, $fill['price'], $fill['orderId'], $reason);
+                }
+                // Last resort: synthesize at last known price.
+                Log::warning('Close target already flat; no bracket fill or userTrades match — synthesizing at last price', [
                     'symbol' => $position->symbol,
+                    'position_id' => $position->id,
                     'reason' => $reason->value,
                 ]);
                 return $this->finalizeClose($position, $exitPrice, '', $reason);
@@ -422,8 +538,25 @@ class TradingEngine
             return $reconciled;
         }
 
-        Log::warning('Position flat on exchange but no bracket fill found — closing as Manual', [
+        // Brackets didn't fire — operator likely closed on Binance UI, or the ws-user-data
+        // worker missed the fill event. Query /fapi/v1/userTrades for the real fill price
+        // rather than synthesizing one from the stale last-known price.
+        $exchange = $this->exchange->resolve();
+        $fill = $this->findCloseFromUserTrades($position, $exchange);
+        if ($fill !== null) {
+            Log::info('Reconciling missing position from userTrades', [
+                'symbol' => $position->symbol,
+                'position_id' => $position->id,
+                'orderId' => $fill['orderId'],
+                'exit' => $fill['price'],
+                'qty' => $fill['qty'],
+            ]);
+            return $this->finalizeClose($position, $fill['price'], $fill['orderId'], CloseReason::Manual);
+        }
+
+        Log::warning('Position flat on exchange but no bracket fill or userTrades match — closing as Manual at last known price', [
             'symbol' => $position->symbol,
+            'position_id' => $position->id,
         ]);
         $lastPrice = $position->current_price > 0
             ? (float) $position->current_price
@@ -546,6 +679,95 @@ class TradingEngine
 
             return $trade;
         });
+    }
+
+    /**
+     * Query /fapi/v1/userTrades and identify the actual close fill(s) for a
+     * position when neither bracket order shows FILLED (e.g. operator closed
+     * on Binance UI, ws-user-data missed the event, bracket was CANCELED).
+     *
+     * Strategy: fetch all fills since `opened_at`, keep rows whose `side`
+     * opposes the position's direction (BUY for SHORT, SELL for LONG), and
+     * group by orderId. Return the group whose summed qty is closest to the
+     * position's quantity; compute weighted-average price across the group.
+     *
+     * @return array{price: float, qty: float, orderId: string, time: int}|null
+     */
+    private function findCloseFromUserTrades(Position $position, ExchangeInterface $exchange): ?array
+    {
+        if (! $position->opened_at) {
+            return null;
+        }
+
+        $closeSide = $position->side === 'LONG' ? 'SELL' : 'BUY';
+        // Widen the window by 60s to absorb clock skew between our DB and Binance.
+        $sinceMs = ((int) $position->opened_at->timestamp - 60) * 1000;
+
+        try {
+            $trades = $exchange->getUserTrades($position->symbol, $sinceMs, 1000);
+        } catch (\Throwable $e) {
+            Log::warning('Failed to fetch userTrades during reconcile', [
+                'symbol' => $position->symbol,
+                'position_id' => $position->id,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+
+        if (empty($trades)) {
+            return null;
+        }
+
+        $groups = [];
+        foreach ($trades as $t) {
+            if (($t['side'] ?? '') !== $closeSide) {
+                continue;
+            }
+            $orderId = (string) ($t['orderId'] ?? '');
+            if ($orderId === '') {
+                continue;
+            }
+            if (! isset($groups[$orderId])) {
+                $groups[$orderId] = [
+                    'qty' => 0.0,
+                    'notional' => 0.0,
+                    'time' => 0,
+                ];
+            }
+            $qty = (float) ($t['qty'] ?? 0);
+            $price = (float) ($t['price'] ?? 0);
+            $groups[$orderId]['qty'] += $qty;
+            $groups[$orderId]['notional'] += $qty * $price;
+            $groups[$orderId]['time'] = max($groups[$orderId]['time'], (int) ($t['time'] ?? 0));
+        }
+
+        if (empty($groups)) {
+            return null;
+        }
+
+        $targetQty = (float) $position->quantity;
+        $best = null;
+        $bestDelta = INF;
+        foreach ($groups as $orderId => $g) {
+            $delta = abs($g['qty'] - $targetQty);
+            if ($delta < $bestDelta) {
+                $bestDelta = $delta;
+                $best = ['orderId' => (string) $orderId] + $g;
+            }
+        }
+
+        if ($best === null || $best['qty'] <= 0) {
+            return null;
+        }
+
+        $avgPrice = $best['notional'] / $best['qty'];
+
+        return [
+            'price' => $avgPrice,
+            'qty' => $best['qty'],
+            'orderId' => $best['orderId'],
+            'time' => $best['time'],
+        ];
     }
 
     /**
