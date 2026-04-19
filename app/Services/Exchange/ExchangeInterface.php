@@ -213,4 +213,11 @@ interface ExchangeInterface
      * @return array<array{id: int, orderId: string, side: string, positionSide: string, price: float, qty: float, quoteQty: float, realizedPnl: float, commission: float, commissionAsset: string, time: int}>
      */
     public function getUserTrades(string $symbol, int $sinceMs, int $limit = 500): array;
+
+    /**
+     * Return the maximum initial leverage allowed for this symbol at the
+     * smallest notional tier. Used to clamp the user-configured leverage to
+     * a value Binance won't reject with -4028 ("Leverage N is not valid").
+     */
+    public function getMaxLeverage(string $symbol): int;
 }

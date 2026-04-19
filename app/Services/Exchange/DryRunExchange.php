@@ -373,4 +373,9 @@ class DryRunExchange implements ExchangeInterface
     {
         return [];
     }
+
+    public function getMaxLeverage(string $symbol): int
+    {
+        return $this->realExchange->getMaxLeverage($symbol);
+    }
 }

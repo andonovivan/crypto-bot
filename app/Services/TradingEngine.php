@@ -34,6 +34,21 @@ class TradingEngine
 
         $exchange = $this->exchange->resolve();
 
+        // Clamp to the symbol's tier-1 max; Binance rejects -4028 otherwise and
+        // the entry becomes a Failed row. Smaller-tier symbols (maxLev 10/20)
+        // would exhaust the position_size_pct × maxLev notional instead of the
+        // configured leverage, which is fine — it just lowers exposure on the
+        // specific symbol.
+        $maxLev = $exchange->getMaxLeverage($signal->symbol);
+        if ($maxLev > 0 && $maxLev < $leverage) {
+            Log::info('Clamping leverage to symbol max', [
+                'symbol' => $signal->symbol,
+                'requested' => $leverage,
+                'max' => $maxLev,
+            ]);
+            $leverage = $maxLev;
+        }
+
         $accountData = $exchange->getAccountData();
         $positionSizePct = (float) Settings::get('position_size_pct') ?: 10.0;
         $margin = $accountData['walletBalance'] * ($positionSizePct / 100);
@@ -952,6 +967,18 @@ class TradingEngine
         $exchange = $this->exchange->resolve();
 
         try {
+            // Clamp to the symbol's tier-1 max; see openShort for rationale.
+            $maxLev = $exchange->getMaxLeverage($symbol);
+            if ($maxLev > 0 && $maxLev < $leverage) {
+                Log::info('Clamping reverse leverage to symbol max', [
+                    'symbol' => $symbol,
+                    'requested' => $leverage,
+                    'max' => $maxLev,
+                ]);
+                $leverage = $maxLev;
+                $positionSizeUsdt = round(($positionSizeUsdt / $position->leverage) * $leverage, 2);
+            }
+
             $price = $exchange->getPrice($symbol);
             $requiredMargin = $positionSizeUsdt / $leverage;
             $accountData = $exchange->getAccountData();

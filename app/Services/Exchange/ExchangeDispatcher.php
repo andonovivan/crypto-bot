@@ -180,4 +180,9 @@ class ExchangeDispatcher implements ExchangeInterface
     {
         return $this->active()->getUserTrades($symbol, $sinceMs, $limit);
     }
+
+    public function getMaxLeverage(string $symbol): int
+    {
+        return $this->active()->getMaxLeverage($symbol);
+    }
 }

@@ -895,4 +895,24 @@ class BinanceExchange implements ExchangeInterface
 
         return $rows;
     }
+
+    public function getMaxLeverage(string $symbol): int
+    {
+        return Cache::remember("binance:max_leverage:{$symbol}", self::EXCHANGE_INFO_CACHE_TTL, function () use ($symbol) {
+            $response = $this->signedRequest('GET', '/fapi/v1/leverageBracket', [
+                'symbol' => $symbol,
+            ]);
+
+            // Single-symbol response is [ { symbol, brackets: [...] } ].
+            $brackets = $response[0]['brackets'] ?? [];
+            $max = 0;
+            foreach ($brackets as $b) {
+                $max = max($max, (int) ($b['initialLeverage'] ?? 0));
+            }
+
+            // Fall back to a conservative value when the endpoint returns nothing
+            // (e.g. a newly-listed symbol not yet in the brackets response).
+            return $max > 0 ? $max : 20;
+        });
+    }
 }
