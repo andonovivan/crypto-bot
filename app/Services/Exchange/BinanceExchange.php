@@ -750,4 +750,9 @@ class BinanceExchange implements ExchangeInterface
 
         return is_array($json) ? $json : [];
     }
+
+    public function resolve(): ExchangeInterface
+    {
+        return $this;
+    }
 }

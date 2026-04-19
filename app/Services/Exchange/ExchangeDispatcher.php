@@ -160,4 +160,9 @@ class ExchangeDispatcher implements ExchangeInterface
     {
         $this->active()->closeListenKey();
     }
+
+    public function resolve(): ExchangeInterface
+    {
+        return $this->active();
+    }
 }

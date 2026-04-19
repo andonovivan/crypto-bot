@@ -343,4 +343,9 @@ class DryRunExchange implements ExchangeInterface
     {
         // no-op
     }
+
+    public function resolve(): ExchangeInterface
+    {
+        return $this;
+    }
 }

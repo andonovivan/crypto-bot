@@ -177,4 +177,11 @@ interface ExchangeInterface
      * Close the user-data listenKey (graceful shutdown).
      */
     public function closeListenKey(): void;
+
+    /**
+     * Resolve this exchange to a concrete (non-routing) implementation.
+     * Use at the top of multi-step flows to pin all calls to a single
+     * backend, avoiding mid-flight dry_run toggle route-splits.
+     */
+    public function resolve(): ExchangeInterface;
 }

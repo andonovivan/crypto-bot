@@ -7,6 +7,7 @@ use App\Enums\PositionStatus;
 use App\Models\Position;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class TradingEngine
@@ -31,7 +32,9 @@ class TradingEngine
             return null;
         }
 
-        $accountData = $this->exchange->getAccountData();
+        $exchange = $this->exchange->resolve();
+
+        $accountData = $exchange->getAccountData();
         $positionSizePct = (float) Settings::get('position_size_pct') ?: 10.0;
         $margin = $accountData['walletBalance'] * ($positionSizePct / 100);
         $positionSizeUsdt = round($margin * max($leverage, 1), 2);
@@ -45,28 +48,28 @@ class TradingEngine
             return null;
         }
 
-        if (! $this->exchange->isTradable($signal->symbol)) {
+        if (! $exchange->isTradable($signal->symbol)) {
             Log::warning('Symbol not tradable', ['symbol' => $signal->symbol]);
             return null;
         }
 
         $price = null;
         try {
-            $price = $this->exchange->getPrice($signal->symbol);
-            $this->exchange->setMarginType($signal->symbol, 'ISOLATED');
-            $this->exchange->setLeverage($signal->symbol, $leverage);
+            $price = $exchange->getPrice($signal->symbol);
+            $exchange->setMarginType($signal->symbol, 'ISOLATED');
+            $exchange->setLeverage($signal->symbol, $leverage);
 
-            $quantity = $this->exchange->calculateQuantity($signal->symbol, $positionSizeUsdt, $price);
+            $quantity = $exchange->calculateQuantity($signal->symbol, $positionSizeUsdt, $price);
             if ($quantity <= 0) {
                 Log::warning('Calculated quantity is zero', ['symbol' => $signal->symbol]);
                 return null;
             }
 
-            $order = $this->placeEntryOrder($signal->symbol, $quantity, 'SHORT');
+            $order = $this->placeEntryOrder($exchange, $signal->symbol, $quantity, 'SHORT');
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
             try {
-                $slTp = $this->placeBrackets($signal->symbol, $entryPrice, $order['quantity']);
+                $slTp = $this->placeBrackets($exchange, $signal->symbol, $entryPrice, $order['quantity']);
             } catch (\Throwable $e) {
                 Log::error('Failed to set SL/TP — closing position for safety', [
                     'symbol' => $signal->symbol,
@@ -76,7 +79,7 @@ class TradingEngine
                 // Any bracket that did land before the failure would otherwise linger as a
                 // reduceOnly=true order on Binance. Best-effort cleanup.
                 try {
-                    $this->exchange->cancelOrders($signal->symbol);
+                    $exchange->cancelOrders($signal->symbol);
                 } catch (\Throwable $cancelErr) {
                     Log::warning('Failed to cancel stray bracket orders', [
                         'symbol' => $signal->symbol,
@@ -86,7 +89,7 @@ class TradingEngine
 
                 $closeErrMsg = null;
                 try {
-                    $this->exchange->closeShort($signal->symbol, $order['quantity']);
+                    $exchange->closeShort($signal->symbol, $order['quantity']);
                 } catch (\Throwable $closeErr) {
                     $closeErrMsg = $closeErr->getMessage();
                     Log::error('CRITICAL: Failed to close unprotected position', [
@@ -103,7 +106,7 @@ class TradingEngine
                 return null;
             }
 
-            $rates = $this->exchange->getCommissionRate($signal->symbol);
+            $rates = $exchange->getCommissionRate($signal->symbol);
             $entryFeeRate = ($order['entry_type'] ?? 'MARKET') === 'LIMIT_MAKER'
                 ? $rates['maker']
                 : $rates['taker'];
@@ -302,16 +305,18 @@ class TradingEngine
             ));
         }
 
+        $exchange = $this->exchange->resolve();
+
         if ($exitPrice === null) {
-            $exitPrice = $this->exchange->getPrice($position->symbol);
+            $exitPrice = $exchange->getPrice($position->symbol);
         }
 
-        $this->cancelBrackets($position);
+        $this->cancelBrackets($exchange, $position);
 
         try {
             $order = $position->side === 'LONG'
-                ? $this->exchange->closeLong($position->symbol, $position->quantity)
-                : $this->exchange->closeShort($position->symbol, $position->quantity);
+                ? $exchange->closeLong($position->symbol, $position->quantity)
+                : $exchange->closeShort($position->symbol, $position->quantity);
         } catch (\Throwable $e) {
             // "Already flat" handling: Binance may have fired a bracket SL/TP just
             // before this manual/expiry close. Look up the actual fill and reconcile.
@@ -355,12 +360,14 @@ class TradingEngine
             return null;
         }
 
+        $exchange = $this->exchange->resolve();
+
         $siblingId = $reason === CloseReason::StopLoss
             ? $position->tp_order_id
             : $position->sl_order_id;
         if ($siblingId) {
             try {
-                $this->exchange->cancelOrder($position->symbol, $siblingId);
+                $exchange->cancelOrder($position->symbol, $siblingId);
             } catch (\Throwable $e) {
                 Log::warning('Failed to cancel sibling bracket after fill', [
                     'symbol' => $position->symbol,
@@ -401,6 +408,13 @@ class TradingEngine
             return null;
         }
 
+        // BotRun::safetyReconcile takes a getOpenPositions() snapshot then iterates
+        // DB rows. A position opened between snapshot and iteration is absent from
+        // the snapshot but legitimately open — don't close it as Manual.
+        if ($position->opened_at && $position->opened_at->gt(now()->subSeconds(10))) {
+            return null;
+        }
+
         $reconciled = $this->reconcileFromBrackets($position, CloseReason::Manual);
         if ($reconciled !== null) {
             return $reconciled;
@@ -422,6 +436,8 @@ class TradingEngine
      */
     private function reconcileFromBrackets(Position $position, CloseReason $fallbackReason): ?Trade
     {
+        $exchange = $this->exchange->resolve();
+
         foreach ([
             [$position->tp_order_id, CloseReason::TakeProfit],
             [$position->sl_order_id, CloseReason::StopLoss],
@@ -430,7 +446,7 @@ class TradingEngine
                 continue;
             }
             try {
-                $status = $this->exchange->getOrderStatus($position->symbol, $orderId);
+                $status = $exchange->getOrderStatus($position->symbol, $orderId);
             } catch (\Throwable $e) {
                 Log::warning('Bracket status check failed during reconcile', [
                     'symbol' => $position->symbol,
@@ -456,59 +472,76 @@ class TradingEngine
      */
     private function finalizeClose(Position $position, float $exitPrice, string $exchangeOrderId, CloseReason $reason): Trade
     {
-        $rawPnl = $this->calculatePnl($position, $exitPrice);
-        $pnlPct = $this->calculatePnlPct($position, $exitPrice);
-
         $rates = $this->exchange->getCommissionRate($position->symbol);
         $takerRate = $rates['taker'];
-        $entryFee = $position->total_entry_fee
-            ?? ($position->entry_price * $position->quantity * $takerRate);
-        $exitFee = $exitPrice * $position->quantity * $takerRate;
-        $totalFees = round($entryFee + $exitFee, 4);
-        $pnl = round($rawPnl - $totalFees, 4);
 
-        $status = match ($reason) {
-            CloseReason::StopLoss => PositionStatus::StoppedOut,
-            CloseReason::Expired => PositionStatus::Expired,
-            default => PositionStatus::Closed,
-        };
+        return DB::transaction(function () use ($position, $exitPrice, $exchangeOrderId, $reason, $takerRate) {
+            $locked = Position::where('id', $position->id)->lockForUpdate()->first();
+            if (! $locked || $locked->status !== PositionStatus::Open) {
+                $existing = Trade::where('position_id', $position->id)
+                    ->where('type', 'close')
+                    ->latest('id')
+                    ->first();
+                if ($existing) {
+                    return $existing;
+                }
+                throw new \RuntimeException("Position {$position->id} is not Open and no close Trade found");
+            }
 
-        $position->update([
-            'current_price' => $exitPrice,
-            'unrealized_pnl' => 0,
-            'status' => $status,
-        ]);
+            $rawPnl = $this->calculatePnl($locked, $exitPrice);
+            $pnlPct = $this->calculatePnlPct($locked, $exitPrice);
 
-        $fundingFee = $position->funding_fee ?? 0;
+            $entryFee = $locked->total_entry_fee
+                ?? ($locked->entry_price * $locked->quantity * $takerRate);
+            $exitFee = $exitPrice * $locked->quantity * $takerRate;
+            $totalFees = round($entryFee + $exitFee, 4);
+            $pnl = round($rawPnl - $totalFees, 4);
 
-        $trade = Trade::create([
-            'position_id' => $position->id,
-            'symbol' => $position->symbol,
-            'side' => $position->side,
-            'type' => 'close',
-            'entry_price' => $position->entry_price,
-            'exit_price' => $exitPrice,
-            'quantity' => $position->quantity,
-            'pnl' => $pnl,
-            'pnl_pct' => round($pnlPct, 4),
-            'fees' => $totalFees,
-            'funding_fee' => round($fundingFee, 4),
-            'close_reason' => $reason,
-            'exchange_order_id' => $exchangeOrderId,
-            'is_dry_run' => $position->is_dry_run,
-        ]);
+            $status = match ($reason) {
+                CloseReason::StopLoss => PositionStatus::StoppedOut,
+                CloseReason::Expired => PositionStatus::Expired,
+                default => PositionStatus::Closed,
+            };
 
-        Log::info('Position closed', [
-            'symbol' => $position->symbol,
-            'side' => $position->side,
-            'reason' => $reason->value,
-            'entry' => $position->entry_price,
-            'exit' => $exitPrice,
-            'pnl' => $pnl,
-            'pnl_pct' => round($pnlPct, 2) . '%',
-        ]);
+            $locked->update([
+                'current_price' => $exitPrice,
+                'unrealized_pnl' => 0,
+                'status' => $status,
+            ]);
 
-        return $trade;
+            $fundingFee = $locked->funding_fee ?? 0;
+
+            $trade = Trade::create([
+                'position_id' => $locked->id,
+                'symbol' => $locked->symbol,
+                'side' => $locked->side,
+                'type' => 'close',
+                'entry_price' => $locked->entry_price,
+                'exit_price' => $exitPrice,
+                'quantity' => $locked->quantity,
+                'pnl' => $pnl,
+                'pnl_pct' => round($pnlPct, 4),
+                'fees' => $totalFees,
+                'funding_fee' => round($fundingFee, 4),
+                'close_reason' => $reason,
+                'exchange_order_id' => $exchangeOrderId,
+                'is_dry_run' => $locked->is_dry_run,
+            ]);
+
+            Log::info('Position closed', [
+                'symbol' => $locked->symbol,
+                'side' => $locked->side,
+                'reason' => $reason->value,
+                'entry' => $locked->entry_price,
+                'exit' => $exitPrice,
+                'pnl' => $pnl,
+                'pnl_pct' => round($pnlPct, 2) . '%',
+            ]);
+
+            $position->setRawAttributes($locked->getAttributes(), true);
+
+            return $trade;
+        });
     }
 
     /**
@@ -543,9 +576,11 @@ class TradingEngine
             );
         }
 
+        $exchange = $this->exchange->resolve();
+
         $leverage = $position->leverage > 0 ? $position->leverage : 1;
         $requiredMargin = $additionalUsdt / $leverage;
-        $accountData = $this->exchange->getAccountData();
+        $accountData = $exchange->getAccountData();
 
         if ($accountData['availableBalance'] < $requiredMargin) {
             throw new \RuntimeException(
@@ -553,14 +588,14 @@ class TradingEngine
             );
         }
 
-        $currentPrice = $this->exchange->getPrice($position->symbol);
-        $additionalQty = $this->exchange->calculateQuantity($position->symbol, $additionalUsdt, $currentPrice);
+        $currentPrice = $exchange->getPrice($position->symbol);
+        $additionalQty = $exchange->calculateQuantity($position->symbol, $additionalUsdt, $currentPrice);
 
         if ($additionalQty <= 0) {
             throw new \RuntimeException('Amount too small — calculated quantity is zero');
         }
 
-        $order = $this->placeEntryOrder($position->symbol, $additionalQty, $position->side);
+        $order = $this->placeEntryOrder($exchange, $position->symbol, $additionalQty, $position->side);
 
         $fillPrice = $order['price'] > 0 ? $order['price'] : $currentPrice;
         $fillQty = $order['quantity'];
@@ -570,7 +605,7 @@ class TradingEngine
         $newAvgEntry = round(($position->entry_price * $oldQty + $fillPrice * $fillQty) / $totalQty, 8);
         $totalUsdt = round($position->position_size_usdt + $additionalUsdt, 4);
 
-        $rates = $this->exchange->getCommissionRate($position->symbol);
+        $rates = $exchange->getCommissionRate($position->symbol);
         $addFeeRate = ($order['entry_type'] ?? 'MARKET') === 'LIMIT_MAKER'
             ? $rates['maker']
             : $rates['taker'];
@@ -579,9 +614,9 @@ class TradingEngine
             ?? ($position->entry_price * $position->quantity * $rates['taker']);
         $totalEntryFee = round($oldEntryFee + $addFee, 8);
 
-        $this->cancelBrackets($position);
+        $this->cancelBrackets($exchange, $position);
         try {
-            $slTp = $this->placeBrackets($position->symbol, $newAvgEntry, $totalQty, $position->side);
+            $slTp = $this->placeBrackets($exchange, $position->symbol, $newAvgEntry, $totalQty, $position->side);
         } catch (\Throwable $e) {
             Log::error('Failed to replace SL/TP after add — closing position for safety', [
                 'symbol' => $position->symbol,
@@ -593,7 +628,7 @@ class TradingEngine
             // price-triggers SL/TP, so leaving this position open means it runs uncapped
             // until expiry. Close the whole thing.
             try {
-                $this->exchange->cancelOrders($position->symbol);
+                $exchange->cancelOrders($position->symbol);
             } catch (\Throwable $cancelErr) {
                 Log::warning('Failed to cancel stray orders after bracket re-place failure', [
                     'symbol' => $position->symbol,
@@ -681,33 +716,35 @@ class TradingEngine
 
         $trade = $this->closePosition($position, reason: CloseReason::Reversed);
 
+        $exchange = $this->exchange->resolve();
+
         try {
-            $price = $this->exchange->getPrice($symbol);
+            $price = $exchange->getPrice($symbol);
             $requiredMargin = $positionSizeUsdt / $leverage;
-            $accountData = $this->exchange->getAccountData();
+            $accountData = $exchange->getAccountData();
             if ($accountData['availableBalance'] < $requiredMargin) {
                 Log::warning('Insufficient balance for reverse leg', ['symbol' => $symbol]);
                 return ['trade' => $trade, 'position' => null];
             }
 
-            $this->exchange->setMarginType($symbol, 'ISOLATED');
-            $this->exchange->setLeverage($symbol, $leverage);
-            $quantity = $this->exchange->calculateQuantity($symbol, $positionSizeUsdt, $price);
+            $exchange->setMarginType($symbol, 'ISOLATED');
+            $exchange->setLeverage($symbol, $leverage);
+            $quantity = $exchange->calculateQuantity($symbol, $positionSizeUsdt, $price);
             if ($quantity <= 0) {
                 return ['trade' => $trade, 'position' => null];
             }
 
-            $order = $this->placeEntryOrder($symbol, $quantity, $newDirection);
+            $order = $this->placeEntryOrder($exchange, $symbol, $quantity, $newDirection);
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
             try {
-                $slTp = $this->placeBrackets($symbol, $entryPrice, $order['quantity'], $newDirection);
+                $slTp = $this->placeBrackets($exchange, $symbol, $entryPrice, $order['quantity'], $newDirection);
             } catch (\Throwable $e) {
                 Log::error('Reverse: failed to set SL/TP — closing for safety', [
                     'symbol' => $symbol, 'error' => $e->getMessage(),
                 ]);
                 try {
-                    $this->exchange->cancelOrders($symbol);
+                    $exchange->cancelOrders($symbol);
                 } catch (\Throwable $cancelErr) {
                     Log::warning('Reverse: failed to cancel stray brackets', [
                         'symbol' => $symbol, 'error' => $cancelErr->getMessage(),
@@ -715,8 +752,8 @@ class TradingEngine
                 }
                 try {
                     $newDirection === 'LONG'
-                        ? $this->exchange->closeLong($symbol, $order['quantity'])
-                        : $this->exchange->closeShort($symbol, $order['quantity']);
+                        ? $exchange->closeLong($symbol, $order['quantity'])
+                        : $exchange->closeShort($symbol, $order['quantity']);
                 } catch (\Throwable $closeErr) {
                     Log::error('CRITICAL: Failed to close unprotected reversed position', [
                         'symbol' => $symbol, 'error' => $closeErr->getMessage(),
@@ -725,7 +762,7 @@ class TradingEngine
                 return ['trade' => $trade, 'position' => null];
             }
 
-            $rates = $this->exchange->getCommissionRate($symbol);
+            $rates = $exchange->getCommissionRate($symbol);
             $entryFeeRate = ($order['entry_type'] ?? 'MARKET') === 'LIMIT_MAKER'
                 ? $rates['maker']
                 : $rates['taker'];
@@ -767,7 +804,7 @@ class TradingEngine
     /**
      * @return array{sl_order_id: ?string, tp_order_id: ?string, sl: float, tp: float}
      */
-    private function placeBrackets(string $symbol, float $entryPrice, float $quantity, string $side = 'SHORT'): array
+    private function placeBrackets(ExchangeInterface $exchange, string $symbol, float $entryPrice, float $quantity, string $side = 'SHORT'): array
     {
         $slTp = $this->calculateSlTp($entryPrice, $side);
 
@@ -778,11 +815,11 @@ class TradingEngine
         for ($attempt = 1; $attempt <= 2; $attempt++) {
             try {
                 if ($slOrderId === null) {
-                    $slResult = $this->exchange->setStopLoss($symbol, $slTp['sl'], $quantity, $side);
+                    $slResult = $exchange->setStopLoss($symbol, $slTp['sl'], $quantity, $side);
                     $slOrderId = $slResult['orderId'] ?? null;
                 }
                 if ($tpOrderId === null) {
-                    $tpResult = $this->exchange->setTakeProfit($symbol, $slTp['tp'], $quantity, $side);
+                    $tpResult = $exchange->setTakeProfit($symbol, $slTp['tp'], $quantity, $side);
                     $tpOrderId = $tpResult['orderId'] ?? null;
                 }
                 break;
@@ -806,11 +843,11 @@ class TradingEngine
         ];
     }
 
-    private function cancelBrackets(Position $position): void
+    private function cancelBrackets(ExchangeInterface $exchange, Position $position): void
     {
         if (! $position->sl_order_id && ! $position->tp_order_id) {
             try {
-                $this->exchange->cancelOrders($position->symbol);
+                $exchange->cancelOrders($position->symbol);
             } catch (\Throwable $e) {
                 Log::warning('Failed to cancel orders on close (legacy fallback)', [
                     'symbol' => $position->symbol, 'error' => $e->getMessage(),
@@ -821,7 +858,7 @@ class TradingEngine
 
         if ($position->sl_order_id) {
             try {
-                $this->exchange->cancelOrder($position->symbol, $position->sl_order_id);
+                $exchange->cancelOrder($position->symbol, $position->sl_order_id);
             } catch (\Throwable $e) {
                 Log::warning('Failed to cancel SL order', [
                     'symbol' => $position->symbol,
@@ -832,7 +869,7 @@ class TradingEngine
         }
         if ($position->tp_order_id) {
             try {
-                $this->exchange->cancelOrder($position->symbol, $position->tp_order_id);
+                $exchange->cancelOrder($position->symbol, $position->tp_order_id);
             } catch (\Throwable $e) {
                 Log::warning('Failed to cancel TP order', [
                     'symbol' => $position->symbol,
@@ -901,14 +938,14 @@ class TradingEngine
      *
      * @return array{orderId: string, price: float, quantity: float, entry_type: string}
      */
-    private function placeEntryOrder(string $symbol, float $quantity, string $side): array
+    private function placeEntryOrder(ExchangeInterface $exchange, string $symbol, float $quantity, string $side): array
     {
         $usePostOnly = (bool) Settings::get('use_post_only_entry');
 
         if ($side !== 'SHORT' || ! $usePostOnly) {
             $order = $side === 'LONG'
-                ? $this->exchange->openLong($symbol, $quantity)
-                : $this->exchange->openShort($symbol, $quantity);
+                ? $exchange->openLong($symbol, $quantity)
+                : $exchange->openShort($symbol, $quantity);
 
             return [
                 'orderId' => $order['orderId'],
@@ -919,13 +956,13 @@ class TradingEngine
         }
 
         try {
-            $book = $this->exchange->getOrderBookTop($symbol);
+            $book = $exchange->getOrderBookTop($symbol);
             $limitPrice = (float) ($book['ask'] ?? 0);
             if ($limitPrice <= 0) {
                 throw new \RuntimeException('Invalid ask price from orderbook');
             }
 
-            $limit = $this->exchange->openShortLimit($symbol, $quantity, $limitPrice, postOnly: true);
+            $limit = $exchange->openShortLimit($symbol, $quantity, $limitPrice, postOnly: true);
 
             if ($limit['status'] === 'FILLED') {
                 Log::info('Entry filled as LIMIT_MAKER', [
@@ -948,7 +985,7 @@ class TradingEngine
 
             while (microtime(true) < $deadline) {
                 usleep(500_000);
-                $lastStatus = $this->exchange->getOrderStatus($symbol, $limit['orderId']);
+                $lastStatus = $exchange->getOrderStatus($symbol, $limit['orderId']);
                 if ($lastStatus['status'] === 'FILLED') {
                     Log::info('Entry filled as LIMIT_MAKER (polled)', [
                         'symbol' => $symbol,
@@ -966,7 +1003,7 @@ class TradingEngine
             }
 
             try {
-                $this->exchange->cancelOrder($symbol, (string) $limit['orderId']);
+                $exchange->cancelOrder($symbol, (string) $limit['orderId']);
             } catch (\Throwable $e) {
                 Log::warning('Failed to cancel LIMIT on timeout', [
                     'symbol' => $symbol,
@@ -977,7 +1014,7 @@ class TradingEngine
 
             $final = null;
             try {
-                $final = $this->exchange->getOrderStatus($symbol, (string) $limit['orderId']);
+                $final = $exchange->getOrderStatus($symbol, (string) $limit['orderId']);
             } catch (\Throwable) {
                 // use $lastStatus if final query fails
             }
@@ -999,7 +1036,7 @@ class TradingEngine
                 'remaining' => $remaining,
             ]);
 
-            $market = $this->exchange->openShort($symbol, $remaining);
+            $market = $exchange->openShort($symbol, $remaining);
 
             if ($filled > 0) {
                 $limitFillPrice = (float) ($final['avgPrice'] ?? $lastStatus['avgPrice'] ?? $limitPrice);
@@ -1025,7 +1062,7 @@ class TradingEngine
                 'error' => $e->getMessage(),
             ]);
 
-            $order = $this->exchange->openShort($symbol, $quantity);
+            $order = $exchange->openShort($symbol, $quantity);
             return [
                 'orderId' => (string) $order['orderId'],
                 'price' => (float) $order['price'],
