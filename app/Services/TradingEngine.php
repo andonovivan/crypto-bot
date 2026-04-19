@@ -541,7 +541,14 @@ class TradingEngine
         // Brackets didn't fire — operator likely closed on Binance UI, or the ws-user-data
         // worker missed the fill event. Query /fapi/v1/userTrades for the real fill price
         // rather than synthesizing one from the stale last-known price.
+        //
+        // The position is flat on Binance, so any lingering bracket algos are orphans by
+        // definition. Cancel defensively — if reconcileFromBrackets misses an unexpected
+        // algoStatus in the future (we lost #203 ZRO's TP this way), the sibling leg would
+        // otherwise stay NEW on Binance forever.
         $exchange = $this->exchange->resolve();
+        $this->cancelBrackets($exchange, $position);
+
         $fill = $this->findCloseFromUserTrades($position, $exchange);
         if ($fill !== null) {
             Log::info('Reconciling missing position from userTrades', [
