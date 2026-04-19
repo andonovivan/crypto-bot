@@ -329,6 +329,26 @@ class DryRunExchange implements ExchangeInterface
         ];
     }
 
+    public function cancelAlgoOrder(string $symbol, string $algoId): bool
+    {
+        Log::info("[DRY RUN] Cancel algo order", ['symbol' => $symbol, 'algoId' => $algoId]);
+        return true;
+    }
+
+    public function getAlgoOrderStatus(string $symbol, string $algoId): array
+    {
+        // Dry-run brackets never rest on a real exchange — checkPosition() triggers
+        // closes via price comparison, so reconciliation paths that would query
+        // algo status never execute in dry-run. Return UNKNOWN as a safe default.
+        return [
+            'orderId' => $algoId,
+            'status' => 'UNKNOWN',
+            'executedQty' => 0.0,
+            'avgPrice' => 0.0,
+            'origQty' => 0.0,
+        ];
+    }
+
     public function createListenKey(): string
     {
         return 'dry_listenkey_' . uniqid('', true);

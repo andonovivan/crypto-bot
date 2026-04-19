@@ -164,6 +164,23 @@ interface ExchangeInterface
     public function getOrderStatus(string $symbol, string $orderId): array;
 
     /**
+     * Cancel a conditional (algo) order by its algoId. Conditional orders
+     * (STOP_MARKET / TAKE_PROFIT_MARKET brackets) live on /fapi/v1/algoOrder
+     * since 2025-12-09 and use a distinct ID space from regular orders.
+     *
+     * @return bool True if cancelled successfully (or already gone)
+     */
+    public function cancelAlgoOrder(string $symbol, string $algoId): bool;
+
+    /**
+     * Query the current status of a conditional (algo) order by its algoId.
+     * Returned shape matches getOrderStatus so callers can treat both uniformly.
+     *
+     * @return array{orderId: string, status: string, executedQty: float, avgPrice: float, origQty: float}
+     */
+    public function getAlgoOrderStatus(string $symbol, string $algoId): array;
+
+    /**
      * Create a user-data stream listenKey. Valid for 60 minutes; must be kept alive.
      */
     public function createListenKey(): string;

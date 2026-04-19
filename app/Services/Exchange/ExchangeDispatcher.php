@@ -146,6 +146,16 @@ class ExchangeDispatcher implements ExchangeInterface
         return $this->active()->getOrderStatus($symbol, $orderId);
     }
 
+    public function cancelAlgoOrder(string $symbol, string $algoId): bool
+    {
+        return $this->active()->cancelAlgoOrder($symbol, $algoId);
+    }
+
+    public function getAlgoOrderStatus(string $symbol, string $algoId): array
+    {
+        return $this->active()->getAlgoOrderStatus($symbol, $algoId);
+    }
+
     public function createListenKey(): string
     {
         return $this->active()->createListenKey();

@@ -367,7 +367,9 @@ class TradingEngine
             : $position->sl_order_id;
         if ($siblingId) {
             try {
-                $exchange->cancelOrder($position->symbol, $siblingId);
+                // sl_order_id / tp_order_id hold algoIds (Binance migrated brackets
+                // to /fapi/v1/algoOrder on 2025-12-09), so cancel via the algo path.
+                $exchange->cancelAlgoOrder($position->symbol, $siblingId);
             } catch (\Throwable $e) {
                 Log::warning('Failed to cancel sibling bracket after fill', [
                     'symbol' => $position->symbol,
@@ -446,7 +448,9 @@ class TradingEngine
                 continue;
             }
             try {
-                $status = $exchange->getOrderStatus($position->symbol, $orderId);
+                // Brackets live on /fapi/v1/algoOrder; sl_order_id / tp_order_id
+                // hold algoIds and must be queried via the algo endpoint.
+                $status = $exchange->getAlgoOrderStatus($position->symbol, $orderId);
             } catch (\Throwable $e) {
                 Log::warning('Bracket status check failed during reconcile', [
                     'symbol' => $position->symbol,
@@ -856,9 +860,12 @@ class TradingEngine
             return;
         }
 
+        // sl_order_id / tp_order_id are algoIds (Binance migrated STOP_MARKET /
+        // TAKE_PROFIT_MARKET off /fapi/v1/order onto /fapi/v1/algoOrder), so use
+        // the algo cancel path. Regular cancelOrder would 400 with -2013.
         if ($position->sl_order_id) {
             try {
-                $exchange->cancelOrder($position->symbol, $position->sl_order_id);
+                $exchange->cancelAlgoOrder($position->symbol, $position->sl_order_id);
             } catch (\Throwable $e) {
                 Log::warning('Failed to cancel SL order', [
                     'symbol' => $position->symbol,
@@ -869,7 +876,7 @@ class TradingEngine
         }
         if ($position->tp_order_id) {
             try {
-                $exchange->cancelOrder($position->symbol, $position->tp_order_id);
+                $exchange->cancelAlgoOrder($position->symbol, $position->tp_order_id);
             } catch (\Throwable $e) {
                 Log::warning('Failed to cancel TP order', [
                     'symbol' => $position->symbol,

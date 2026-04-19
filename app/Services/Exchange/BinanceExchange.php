@@ -225,11 +225,16 @@ class BinanceExchange implements ExchangeInterface
 
     public function openShort(string $symbol, float $quantity): array
     {
+        // newOrderRespType=RESULT makes the MARKET response synchronous — Binance
+        // waits for the fill and returns populated executedQty / avgPrice. Without
+        // it, ACK is returned (the default for MARKET/LIMIT) and both fields are 0,
+        // which then propagates into DB rows and later closeShort calls with qty=0.
         $response = $this->signedRequest('POST', '/fapi/v1/order', [
             'symbol' => $symbol,
             'side' => 'SELL',
             'type' => 'MARKET',
             'quantity' => $this->formatQuantity($quantity, $symbol),
+            'newOrderRespType' => 'RESULT',
         ]);
 
         return [
@@ -247,6 +252,7 @@ class BinanceExchange implements ExchangeInterface
             'type' => 'MARKET',
             'quantity' => $this->formatQuantity($quantity, $symbol),
             'reduceOnly' => 'true',
+            'newOrderRespType' => 'RESULT',
         ]);
 
         return [
@@ -263,6 +269,7 @@ class BinanceExchange implements ExchangeInterface
             'side' => 'BUY',
             'type' => 'MARKET',
             'quantity' => $this->formatQuantity($quantity, $symbol),
+            'newOrderRespType' => 'RESULT',
         ]);
 
         return [
@@ -280,6 +287,7 @@ class BinanceExchange implements ExchangeInterface
             'type' => 'MARKET',
             'quantity' => $this->formatQuantity($quantity, $symbol),
             'reduceOnly' => 'true',
+            'newOrderRespType' => 'RESULT',
         ]);
 
         return [
@@ -294,16 +302,21 @@ class BinanceExchange implements ExchangeInterface
         // For SHORT: SL triggers a BUY to close. For LONG: SL triggers a SELL to close.
         $closeSide = $side === 'LONG' ? 'SELL' : 'BUY';
 
-        $response = $this->signedRequest('POST', '/fapi/v1/order', [
+        // Binance migrated STOP_MARKET / TAKE_PROFIT_MARKET off /fapi/v1/order (-4120)
+        // onto /fapi/v1/algoOrder on 2025-12-09. Param renames: stopPrice -> triggerPrice.
+        // Response returns algoId (different ID universe from regular orderId); the bot
+        // stores it in sl_order_id/tp_order_id and must cancel/query via algo endpoints.
+        $response = $this->signedRequest('POST', '/fapi/v1/algoOrder', [
             'symbol' => $symbol,
             'side' => $closeSide,
             'type' => 'STOP_MARKET',
-            'stopPrice' => $this->formatPrice($stopPrice),
+            'algoType' => 'CONDITIONAL',
+            'triggerPrice' => $this->formatPrice($stopPrice),
             'quantity' => $this->formatQuantity($quantity, $symbol),
             'reduceOnly' => 'true',
         ]);
 
-        return ['orderId' => (string) $response['orderId']];
+        return ['orderId' => (string) ($response['algoId'] ?? $response['orderId'] ?? '')];
     }
 
     public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity, string $side = 'SHORT'): array
@@ -311,16 +324,17 @@ class BinanceExchange implements ExchangeInterface
         // For SHORT: TP triggers a BUY to close. For LONG: TP triggers a SELL to close.
         $closeSide = $side === 'LONG' ? 'SELL' : 'BUY';
 
-        $response = $this->signedRequest('POST', '/fapi/v1/order', [
+        $response = $this->signedRequest('POST', '/fapi/v1/algoOrder', [
             'symbol' => $symbol,
             'side' => $closeSide,
             'type' => 'TAKE_PROFIT_MARKET',
-            'stopPrice' => $this->formatPrice($takeProfitPrice),
+            'algoType' => 'CONDITIONAL',
+            'triggerPrice' => $this->formatPrice($takeProfitPrice),
             'quantity' => $this->formatQuantity($quantity, $symbol),
             'reduceOnly' => 'true',
         ]);
 
-        return ['orderId' => (string) $response['orderId']];
+        return ['orderId' => (string) ($response['algoId'] ?? $response['orderId'] ?? '')];
     }
 
     public function getBalance(): float
@@ -508,7 +522,11 @@ class BinanceExchange implements ExchangeInterface
         $response = match (strtoupper($method)) {
             'GET' => $response->get($url, $params),
             'POST' => $response->asForm()->post($url, $params),
-            'DELETE' => $response->delete($url, $params),
+            // Binance requires DELETE params (including `timestamp` and `signature`)
+            // in the query string, not the request body. Laravel's default
+            // `->delete($url, $data)` sends them as JSON body, which Binance rejects
+            // with -1102. Build the URL with the signed query and send no body.
+            'DELETE' => $response->delete($url . '?' . $queryString . '&signature=' . $signature),
             default => throw new \InvalidArgumentException("Unsupported method: {$method}"),
         };
 
@@ -700,6 +718,62 @@ class BinanceExchange implements ExchangeInterface
             'executedQty' => (float) ($response['executedQty'] ?? 0),
             'avgPrice' => (float) ($response['avgPrice'] ?? 0),
             'origQty' => (float) ($response['origQty'] ?? 0),
+        ];
+    }
+
+    public function cancelAlgoOrder(string $symbol, string $algoId): bool
+    {
+        try {
+            $this->signedRequest('DELETE', '/fapi/v1/algoOrder', [
+                'symbol' => $symbol,
+                'algoId' => $algoId,
+            ]);
+
+            return true;
+        } catch (\Throwable $e) {
+            // Algo may already be triggered, cancelled, or expired — treat as success.
+            // Error codes mirror regular orders but algo-specific messages vary.
+            if (str_contains($e->getMessage(), 'Unknown order')
+                || str_contains($e->getMessage(), 'UNKNOWN_ORDER')
+                || str_contains($e->getMessage(), '-2011')
+                || str_contains($e->getMessage(), '-2013')
+                || str_contains($e->getMessage(), 'Order does not exist')
+                || str_contains($e->getMessage(), 'algo order not found')
+            ) {
+                Log::info('Algo order already gone when cancelling', [
+                    'symbol' => $symbol,
+                    'algoId' => $algoId,
+                ]);
+
+                return true;
+            }
+
+            throw $e;
+        }
+    }
+
+    public function getAlgoOrderStatus(string $symbol, string $algoId): array
+    {
+        $response = $this->signedRequest('GET', '/fapi/v1/algoOrder', [
+            'symbol' => $symbol,
+            'algoId' => $algoId,
+        ]);
+
+        // Algo responses use a different status vocabulary: WORKING / TRIGGERED /
+        // CANCELLED / EXPIRED. Map TRIGGERED → FILLED so callers (reconcile paths)
+        // can treat both regular and algo results uniformly.
+        $rawStatus = (string) ($response['status'] ?? $response['algoStatus'] ?? 'UNKNOWN');
+        $status = match (strtoupper($rawStatus)) {
+            'TRIGGERED' => 'FILLED',
+            default => strtoupper($rawStatus),
+        };
+
+        return [
+            'orderId' => (string) ($response['algoId'] ?? $algoId),
+            'status' => $status,
+            'executedQty' => (float) ($response['executedQty'] ?? 0),
+            'avgPrice' => (float) ($response['avgPrice'] ?? $response['triggerPrice'] ?? 0),
+            'origQty' => (float) ($response['origQty'] ?? $response['quantity'] ?? 0),
         ];
     }
 
