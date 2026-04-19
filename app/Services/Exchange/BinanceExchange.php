@@ -124,7 +124,7 @@ class BinanceExchange implements ExchangeInterface
      * Get exchange info with tradability status and LOT_SIZE filters.
      * Cached for 1 hour.
      *
-     * @return array<string, array{status: string, stepSize: float, minQty: float, minNotional: float}>
+     * @return array<string, array{status: string, stepSize: float, minQty: float, minNotional: float, tickSize: float}>
      */
     public function getExchangeInfo(): array
     {
@@ -140,6 +140,7 @@ class BinanceExchange implements ExchangeInterface
             $stepSize = 1.0;
             $minQty = 0.0;
             $minNotional = 0.0;
+            $tickSize = 0.01;
 
             foreach ($symbol['filters'] ?? [] as $filter) {
                 if ($filter['filterType'] === 'LOT_SIZE') {
@@ -149,6 +150,9 @@ class BinanceExchange implements ExchangeInterface
                 if ($filter['filterType'] === 'MIN_NOTIONAL') {
                     $minNotional = (float) ($filter['notional'] ?? $filter['minNotional'] ?? 0);
                 }
+                if ($filter['filterType'] === 'PRICE_FILTER') {
+                    $tickSize = (float) $filter['tickSize'];
+                }
             }
 
             $info[$symbol['symbol']] = [
@@ -156,6 +160,7 @@ class BinanceExchange implements ExchangeInterface
                 'stepSize' => $stepSize,
                 'minQty' => $minQty,
                 'minNotional' => $minNotional,
+                'tickSize' => $tickSize,
             ];
         }
 
@@ -311,7 +316,7 @@ class BinanceExchange implements ExchangeInterface
             'side' => $closeSide,
             'type' => 'STOP_MARKET',
             'algoType' => 'CONDITIONAL',
-            'triggerPrice' => $this->formatPrice($stopPrice),
+            'triggerPrice' => $this->formatPrice($stopPrice, $symbol),
             'quantity' => $this->formatQuantity($quantity, $symbol),
             'reduceOnly' => 'true',
         ]);
@@ -329,7 +334,7 @@ class BinanceExchange implements ExchangeInterface
             'side' => $closeSide,
             'type' => 'TAKE_PROFIT_MARKET',
             'algoType' => 'CONDITIONAL',
-            'triggerPrice' => $this->formatPrice($takeProfitPrice),
+            'triggerPrice' => $this->formatPrice($takeProfitPrice, $symbol),
             'quantity' => $this->formatQuantity($quantity, $symbol),
             'reduceOnly' => 'true',
         ]);
@@ -584,9 +589,34 @@ class BinanceExchange implements ExchangeInterface
         return rtrim(rtrim(number_format($quantity, $decimals, '.', ''), '0'), '.');
     }
 
-    private function formatPrice(float $price): string
+    private function formatPrice(float $price, string $symbol = ''): string
     {
+        if ($symbol !== '') {
+            $info = $this->getExchangeInfo();
+            if (isset($info[$symbol]['tickSize']) && $info[$symbol]['tickSize'] > 0) {
+                $tickSize = (float) $info[$symbol]['tickSize'];
+                // Round to the nearest tick so trigger prices satisfy Binance's
+                // PRICE_FILTER. Without this, bracket placement 400s with -1111
+                // "Precision is over the maximum defined for this asset" on any
+                // symbol whose tickSize has fewer decimals than our 8-decimal
+                // default (e.g. MLNUSDT tickSize=0.001, THETAUSDT=0.0001).
+                $price = round($price / $tickSize) * $tickSize;
+                $decimals = $this->tickSizeDecimals($tickSize);
+                return number_format($price, $decimals, '.', '');
+            }
+        }
+
         return rtrim(rtrim(number_format($price, 8, '.', ''), '0'), '.');
+    }
+
+    private function tickSizeDecimals(float $tickSize): int
+    {
+        if ($tickSize >= 1) {
+            return 0;
+        }
+        $str = rtrim(number_format($tickSize, 12, '.', ''), '0');
+        $dot = strpos($str, '.');
+        return $dot === false ? 0 : strlen($str) - $dot - 1;
     }
 
     /**
@@ -691,7 +721,7 @@ class BinanceExchange implements ExchangeInterface
             'side' => 'SELL',
             'type' => 'LIMIT',
             'quantity' => $this->formatQuantity($quantity, $symbol),
-            'price' => $this->formatPrice($price),
+            'price' => $this->formatPrice($price, $symbol),
             'timeInForce' => $postOnly ? 'GTX' : 'GTC',
         ];
 
