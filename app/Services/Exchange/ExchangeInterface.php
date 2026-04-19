@@ -156,4 +156,19 @@ interface ExchangeInterface
      * @return array{orderId: string, status: string, executedQty: float, avgPrice: float, origQty: float}
      */
     public function getOrderStatus(string $symbol, string $orderId): array;
+
+    /**
+     * Create a user-data stream listenKey. Valid for 60 minutes; must be kept alive.
+     */
+    public function createListenKey(): string;
+
+    /**
+     * Keep an existing listenKey alive. Call every ~30 minutes.
+     */
+    public function keepAliveListenKey(): void;
+
+    /**
+     * Close the user-data listenKey (graceful shutdown).
+     */
+    public function closeListenKey(): void;
 }

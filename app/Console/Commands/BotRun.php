@@ -94,6 +94,17 @@ class BotRun extends Command
             }
         }
 
+        // Safety reconcile: in live mode, Binance closes SL/TP and the
+        // user-data ws worker is the primary reconciler. If a fill arrived
+        // while the ws was down or we missed an event, this cross-check
+        // catches DB positions that are flat on the exchange and reconciles
+        // them via the bracket order status. Skipped in dry-run since the
+        // DryRunExchange reads positions from the DB — the set always
+        // matches by construction.
+        if (! (bool) Settings::get('dry_run')) {
+            $this->safetyReconcile($engine, $exchange);
+        }
+
         $candidates = $scanner->getCandidates();
         $analyzed = 0;
         $opened = 0;
@@ -157,5 +168,37 @@ class BotRun extends Command
             $opened,
             Position::open()->count(),
         ));
+    }
+
+    private function safetyReconcile(TradingEngine $engine, ExchangeInterface $exchange): void
+    {
+        try {
+            $exchangeOpen = $exchange->getOpenPositions();
+        } catch (\Throwable $e) {
+            $this->error("Safety reconcile: getOpenPositions error: {$e->getMessage()}");
+            return;
+        }
+
+        $onExchange = [];
+        foreach ($exchangeOpen as $p) {
+            if (isset($p['symbol'])) {
+                $onExchange[$p['symbol']] = true;
+            }
+        }
+
+        foreach (Position::open()->get() as $position) {
+            if ($this->shouldStop) {
+                return;
+            }
+            if (isset($onExchange[$position->symbol])) {
+                continue;
+            }
+            $this->warn("  [{$position->symbol}] flat on exchange — reconciling from brackets");
+            try {
+                $engine->reconcileMissingPosition($position);
+            } catch (\Throwable $e) {
+                $this->error("  [{$position->symbol}] reconcile error: {$e->getMessage()}");
+            }
+        }
     }
 }

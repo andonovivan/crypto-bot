@@ -11,8 +11,9 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 - **app** — Dashboard web server (port 8090, runs migrations on startup)
 - **bot** — Continuous scan loop (`bot:run`, configurable scan interval, default 30s)
 - **scheduler** — Laravel scheduler (`schedule:run` loop)
-- **ws-worker** — Long-running WebSocket worker (`bot:ws-prices`) that subscribes to Binance `!markPrice@arr` and writes to the `binance:prices` cache key (30s TTL). `BinanceExchange::getPrice()` reads that cache, so this replaces 10s REST polling with sub-second push updates. Also drives **event-driven position management**: on each ws frame it loads open positions and calls `TradingEngine::checkPosition` with the fresh price, giving ~1s TP/SL reaction time (vs 30s via BotRun's cycle). Has `extra_hosts: fstream.binance.com:18.178.11.87` to bypass ISP DNS hijacking (host `/etc/hosts` propagation only covers `fapi.binance.com`). If the worker dies, cache entries expire in 30s, `getPrice()` falls back to REST, and BotRun's 30s cycle takes over position checks — degraded but still functional.
-- App runs migrations; bot/scheduler/ws-worker wait for app to start first
+- **ws-worker** — Long-running WebSocket worker (`bot:ws-prices`) that subscribes to Binance `!markPrice@arr` and writes to the `binance:prices` cache key (30s TTL). `BinanceExchange::getPrice()` reads that cache, so this replaces 10s REST polling with sub-second push updates. Also drives **event-driven position management**: on each ws frame it loads open positions and calls `TradingEngine::checkPosition` with the fresh price, giving ~1s TP/SL reaction time in dry-run mode (vs 30s via BotRun's cycle). Has `extra_hosts: fstream.binance.com:18.178.11.87` to bypass ISP DNS hijacking (host `/etc/hosts` propagation only covers `fapi.binance.com`). If the worker dies, cache entries expire in 30s, `getPrice()` falls back to REST, and BotRun's 30s cycle takes over position checks — degraded but still functional.
+- **ws-user-data** — Long-running WebSocket worker (`bot:ws-user-data`) for the Binance user-data stream. Creates a listenKey (`POST /fapi/v1/listenKey`), connects to `wss://fstream.binance.com/ws/{listenKey}`, and keeps it alive every 30 min (`PUT /fapi/v1/listenKey`). On `ORDER_TRADE_UPDATE` events with `X=FILLED` whose `o.i` matches a `Position.sl_order_id` or `Position.tp_order_id`, it calls `TradingEngine::reconcileFillFromStream()` to cancel the sibling bracket and record the `Trade` row. This is the **primary close-reconciliation path in live mode** since SL/TP are handled by Binance directly. Same DNS bypass via `extra_hosts`. On disconnect, reconnects with exponential backoff (1→60s) and always requests a fresh listenKey. Dry-run mode returns a fake listenKey so the ws connect fails quietly in a loop — that's benign since dry-run positions close via `checkPosition`'s price-trigger path and never emit real fills.
+- App runs migrations; bot/scheduler/ws-worker/ws-user-data wait for app to start first
 
 ### Exchange Abstraction
 - `ExchangeInterface` — contract for all exchange operations
@@ -31,11 +32,21 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 1. **BotRun** — continuous loop, default 30s interval
 2. **Per cycle**:
    - Settle funding fees at 8h UTC boundaries via `FundingSettlementService`
-   - **Manage open positions** (fallback path): for each open position, fetch latest price, call `checkPosition()` to check TP/SL/expiry. Primary path is event-driven from `ws-worker` (~1s); this loop is the 30s reconciliation if ws-worker is down.
+   - **Manage open positions**: for each open position, fetch latest price, call `checkPosition()` to update unrealized P&L and check TP/SL/expiry. `checkPosition()` behavior differs by mode — see "SL/TP close reconciliation" below.
+   - **Safety reconcile** (live only): call `getOpenPositions()` once and for any DB `Position::open()` missing from the exchange list, invoke `TradingEngine::reconcileMissingPosition()` which probes bracket order status via `getOrderStatus` and records the close.
    - **Find new entries**: `ShortScanner::getCandidates()` returns pump/dump candidates (one API call for all tickers)
    - For each candidate: apply cheap gates (paused, max_positions, already-open-on-symbol, cooldown), then `analyze15m()` for the Strict downtrend check, then open SHORT via `TradingEngine::openShort()` if eligible
 3. **Cycle summary** logged: `Cycle: candidates=N analyzed=M opened=V openPositions=X`
-4. **Idempotency**: `TradingEngine::checkPosition` refreshes the row and bails if already closed, so ws-driven and BotRun-driven checks can't race into a double-close.
+4. **Idempotency**: `TradingEngine::checkPosition`, `closePosition`, `reconcileFillFromStream`, and `reconcileMissingPosition` all refresh the row and bail if `status !== Open`. Multiple paths (ws-prices ticks, ws-user-data fills, BotRun cycle, manual dashboard actions) can race without double-counting.
+
+### SL/TP close reconciliation (mode-dependent)
+
+- **Dry-run mode**: `checkPosition()` compares live price to `stop_loss_price` / `take_profit_price` and triggers `closePosition()` directly. No bracket orders exist on a real exchange, so there is nothing to reconcile.
+- **Live mode**: `checkPosition()` does **not** price-check SL/TP. Binance owns the close via the `STOP_MARKET` / `TAKE_PROFIT_MARKET` brackets placed at open (`reduceOnly=true`). The bot reconciles via three paths, in priority order:
+  1. **ws-user-data** (primary, ~real-time): `ORDER_TRADE_UPDATE` with `X=FILLED` → `reconcileFillFromStream()` cancels the sibling bracket and writes the `Trade` row using the fill's `ap`/`L`/`z` fields.
+  2. **BotRun safety reconcile** (30s fallback): if a DB position is flat on Binance but still `Open` locally (ws missed the event), `reconcileMissingPosition()` queries `getOrderStatus` on both brackets and reconciles.
+  3. **Manual close idempotency**: if a user-initiated close races with a Binance SL/TP fill, `closePosition()` catches Binance error codes `-2022` / `-4046` ("already flat") and delegates to `reconcileFromBrackets()` so the Trade row still reflects the true SL/TP exit rather than a spurious Manual close.
+- **Expiry** (`max_hold_minutes`) is bot-driven in both modes — Binance has no time-based close order.
 
 ### Short-Scalp Strategy
 
@@ -99,7 +110,7 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 | `app/Services/ShortAnalysis.php` | Readonly DTO: EMA fast/slow, candle state, funding rate, downtrendOk, blockedReason |
 | `app/Services/ShortSignal.php` | Lightweight DTO for `TradingEngine::openShort` |
 | `app/Services/TechnicalAnalysis.php` | EMA calculations |
-| `app/Services/TradingEngine.php` | SHORT open/close/checkPosition, `placeEntryOrder` (post-only → MARKET fallback), manual add/reverse helpers |
+| `app/Services/TradingEngine.php` | SHORT open/close/checkPosition (dry-run SL/TP trigger + live expiry), `placeEntryOrder` (post-only → MARKET fallback), `reconcileFillFromStream` / `reconcileMissingPosition` / `reconcileFromBrackets` / `finalizeClose` (live reconciliation paths), manual add/reverse helpers |
 | `app/Services/Settings.php` | DB-first settings with config fallback |
 | `app/Services/FundingSettlementService.php` | 8h funding rate settlement for open positions |
 | `app/Services/Exchange/ExchangeInterface.php` | Contract for all exchange operations |
@@ -111,6 +122,7 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 | `routes/web.php` | Route definitions |
 | `app/Console/Commands/BotRun.php` | Continuous scan+monitor loop with graceful shutdown |
 | `app/Console/Commands/BotWsPrices.php` | Long-running WebSocket worker for `!markPrice@arr` → `binance:prices` cache |
+| `app/Console/Commands/BotWsUserData.php` | Long-running WebSocket worker for Binance user-data stream — reconciles SL/TP fills via `ORDER_TRADE_UPDATE` events |
 | `app/Console/Commands/BotStatus.php` | CLI status overview |
 | `bootstrap/app.php` | CSRF exemption for `api/*` routes |
 | `config/crypto.php` | Default config values |
@@ -228,11 +240,12 @@ Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
 ## Known Issues & Gotchas
 
 - **CSRF**: POST routes under `/api/*` are excluded from CSRF verification in `bootstrap/app.php`
-- **Binance DNS blocking**: Some ISPs hijack `*.binance.com` — Docker Desktop's host `/etc/hosts` entry handles `fapi.binance.com`, but `fstream.binance.com` (WebSocket) needs an explicit `extra_hosts` mapping on the `ws-worker` service (resolved via `dig +short fstream.binance.com @1.1.1.1`). Without it the TLS handshake fails with a `*.ioh.co.id` certificate mismatch.
+- **Binance DNS blocking**: Some ISPs hijack `*.binance.com` — Docker Desktop's host `/etc/hosts` entry handles `fapi.binance.com`, but `fstream.binance.com` (WebSocket) needs an explicit `extra_hosts` mapping on the `ws-worker` and `ws-user-data` services (resolved via `dig +short fstream.binance.com @1.1.1.1`). Without it the TLS handshake fails with a `*.ioh.co.id` certificate mismatch.
 - **BINANCE_TESTNET env**: Must use `filter_var(env(...), FILTER_VALIDATE_BOOLEAN)` because `env()` returns string "false" which is truthy in PHP
 - **DB settings override**: Old settings in `bot_settings` table override new config defaults. After major changes, reset via `POST /api/settings` or `POST /api/reset`
 - **Rebuild required**: After code changes, must `./develop down && ./develop build && ./develop up -d`
-- **Dual SL/TP checking**: Bot checks SL/TP in code every cycle AND places exchange-side SL/TP orders as safety net. If a Binance SL/TP triggers between bot checks, the bot reconciles on next cycle.
-- **Live trading readiness**: Per-order cancellation ensures closing one position doesn't destroy other symbols' orders. Fail-safe ensures no unprotected positions. DB may briefly be out of sync until next check cycle if exchange SL/TP triggers independently.
+- **Mode-dependent SL/TP close path**: In **dry-run** mode, `checkPosition()` price-triggers SL/TP and calls `closePosition()`. In **live** mode, Binance owns the close via `STOP_MARKET` / `TAKE_PROFIT_MARKET` brackets; the bot's `checkPosition()` only updates P&L and handles expiry. Live close reconciliation happens via `ws-user-data` (primary), `BotRun` safety reconcile (fallback), or `closePosition()`'s idempotent error path (race with manual close). This avoids the previous race where a bot-issued MARKET close would error out against a Binance SL/TP fill that already flattened the position.
+- **listenKey lifecycle**: Binance user-data listenKeys are valid 60 min and must be kept alive every 30 min or less via `PUT /fapi/v1/listenKey`. The `ws-user-data` worker schedules this; on any disconnect it requests a fresh listenKey (previous one may have silently expired). If the worker is down for longer than 60s, `BotRun`'s safety reconcile (every 30s cycle) picks up missed fills via `getOpenPositions` + `getOrderStatus`.
+- **Live trading readiness**: Per-order cancellation ensures closing one position doesn't destroy other symbols' orders. Fail-safe on open ensures no unprotected positions. Reconciliation converges through multiple paths (ws stream, safety poll, manual close) — all guarded by `status !== Open` refresh checks so idempotency holds.
 - **LONG positions**: The bot never auto-opens LONG positions. A LONG can only exist if created manually via the `Reverse` button (SHORT → LONG). `checkPosition`/`closePosition`/`calculatePnl` still handle both sides for these manually-created positions.
 - **`dry_run` toggle caveat**: `ExchangeDispatcher` reads the setting on every call, so flipping the dashboard toggle takes effect on the next bot cycle. **But open positions are tied to whichever exchange created them** (real orders on Binance vs DB-only rows with `is_dry_run=true`). Flipping mid-flight routes close orders to the wrong side. **Always close all open positions before toggling `dry_run`.**

@@ -322,4 +322,19 @@ class DryRunExchange implements ExchangeInterface
             'origQty' => (float) $cached['origQty'],
         ];
     }
+
+    public function createListenKey(): string
+    {
+        return 'dry_listenkey_' . uniqid('', true);
+    }
+
+    public function keepAliveListenKey(): void
+    {
+        // no-op
+    }
+
+    public function closeListenKey(): void
+    {
+        // no-op
+    }
 }

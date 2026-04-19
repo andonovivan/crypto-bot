@@ -69,5 +69,20 @@ services:
       db:
         condition: service_healthy
 
+  ws-user-data:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    command: php artisan bot:ws-user-data
+    extra_hosts:
+      - "fstream.binance.com:18.178.11.87"
+    volumes:
+      - ./storage/logs:/app/storage/logs
+    depends_on:
+      app:
+        condition: service_started
+      db:
+        condition: service_healthy
+
 volumes:
   dbdata:

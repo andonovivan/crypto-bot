@@ -140,4 +140,19 @@ class ExchangeDispatcher implements ExchangeInterface
     {
         return $this->active()->getOrderStatus($symbol, $orderId);
     }
+
+    public function createListenKey(): string
+    {
+        return $this->active()->createListenKey();
+    }
+
+    public function keepAliveListenKey(): void
+    {
+        $this->active()->keepAliveListenKey();
+    }
+
+    public function closeListenKey(): void
+    {
+        $this->active()->closeListenKey();
+    }
 }

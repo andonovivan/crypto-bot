@@ -681,4 +681,52 @@ class BinanceExchange implements ExchangeInterface
             'origQty' => (float) ($response['origQty'] ?? 0),
         ];
     }
+
+    public function createListenKey(): string
+    {
+        $response = $this->apiKeyRequest('POST', '/fapi/v1/listenKey');
+
+        return (string) ($response['listenKey'] ?? '');
+    }
+
+    public function keepAliveListenKey(): void
+    {
+        $this->apiKeyRequest('PUT', '/fapi/v1/listenKey');
+    }
+
+    public function closeListenKey(): void
+    {
+        $this->apiKeyRequest('DELETE', '/fapi/v1/listenKey');
+    }
+
+    /**
+     * Make an API-key-authenticated (but unsigned) request.
+     * Used by listenKey endpoints, which require the API key header but no HMAC signature.
+     */
+    private function apiKeyRequest(string $method, string $endpoint): array
+    {
+        $this->checkRateLimit();
+
+        $url = $this->baseUrl . $endpoint;
+
+        $response = Http::timeout(10)
+            ->withHeaders(['X-MBX-APIKEY' => $this->apiKey])
+            ->$method($url);
+
+        $this->trackRateLimit($response);
+
+        if ($response->failed()) {
+            Log::error('Binance listenKey API error', [
+                'endpoint' => $endpoint,
+                'method' => $method,
+                'status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+            throw new \RuntimeException("Binance listenKey error: {$response->body()}");
+        }
+
+        $json = $response->json();
+
+        return is_array($json) ? $json : [];
+    }
 }

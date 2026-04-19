@@ -146,27 +146,45 @@ class TradingEngine
             'unrealized_pnl' => $unrealizedPnl,
         ]);
 
-        $slHit = $position->side === 'LONG'
-            ? ($position->stop_loss_price && $currentPrice <= $position->stop_loss_price)
-            : ($position->stop_loss_price && $currentPrice >= $position->stop_loss_price);
-
-        if ($slHit) {
-            $this->closePosition($position, $currentPrice, CloseReason::StopLoss);
-            return;
+        // Dry-run: bot triggers SL/TP via price comparison (legacy behavior).
+        // Live: Binance's STOP_MARKET / TAKE_PROFIT_MARKET orders handle SL/TP;
+        // the user-data WS worker reconciles fills back into our DB.
+        $isDryRun = (bool) Settings::get('dry_run');
+        if ($isDryRun) {
+            if ($this->slHit($position, $currentPrice)) {
+                $this->closePosition($position, $currentPrice, CloseReason::StopLoss);
+                return;
+            }
+            if ($this->tpHit($position, $currentPrice)) {
+                $this->closePosition($position, $currentPrice, CloseReason::TakeProfit);
+                return;
+            }
         }
 
-        $tpHit = $position->side === 'LONG'
-            ? ($position->take_profit_price && $currentPrice >= $position->take_profit_price)
-            : ($position->take_profit_price && $currentPrice <= $position->take_profit_price);
-
-        if ($tpHit) {
-            $this->closePosition($position, $currentPrice, CloseReason::TakeProfit);
-            return;
-        }
-
+        // Expiry remains bot-driven in both modes — Binance has no time-based close.
         if ($position->expires_at && now()->gte($position->expires_at)) {
             $this->closePosition($position, $currentPrice, CloseReason::Expired);
         }
+    }
+
+    private function slHit(Position $position, float $currentPrice): bool
+    {
+        if (! $position->stop_loss_price) {
+            return false;
+        }
+        return $position->side === 'LONG'
+            ? $currentPrice <= $position->stop_loss_price
+            : $currentPrice >= $position->stop_loss_price;
+    }
+
+    private function tpHit(Position $position, float $currentPrice): bool
+    {
+        if (! $position->take_profit_price) {
+            return false;
+        }
+        return $position->side === 'LONG'
+            ? $currentPrice >= $position->take_profit_price
+            : $currentPrice <= $position->take_profit_price;
     }
 
     public function closePosition(Position $position, ?float $exitPrice = null, CloseReason $reason = CloseReason::Manual): Trade
@@ -177,20 +195,162 @@ class TradingEngine
 
         $this->cancelBrackets($position);
 
-        $order = $position->side === 'LONG'
-            ? $this->exchange->closeLong($position->symbol, $position->quantity)
-            : $this->exchange->closeShort($position->symbol, $position->quantity);
+        try {
+            $order = $position->side === 'LONG'
+                ? $this->exchange->closeLong($position->symbol, $position->quantity)
+                : $this->exchange->closeShort($position->symbol, $position->quantity);
+        } catch (\Throwable $e) {
+            // "Already flat" handling: Binance may have fired a bracket SL/TP just
+            // before this manual/expiry close. Look up the actual fill and reconcile.
+            if ($this->looksLikeAlreadyFlat($e)) {
+                $reconciled = $this->reconcileFromBrackets($position, $reason);
+                if ($reconciled !== null) {
+                    return $reconciled;
+                }
+                // Brackets didn't fill either — synthesize a close at last known price
+                // using the caller's reason. No exchange orderId available.
+                Log::warning('Close target already flat but no bracket fill found — synthesizing', [
+                    'symbol' => $position->symbol,
+                    'reason' => $reason->value,
+                ]);
+                return $this->finalizeClose($position, $exitPrice, '', $reason);
+            }
+            throw $e;
+        }
 
         $actualExitPrice = $order['price'] > 0 ? $order['price'] : $exitPrice;
 
-        $rawPnl = $this->calculatePnl($position, $actualExitPrice);
-        $pnlPct = $this->calculatePnlPct($position, $actualExitPrice);
+        return $this->finalizeClose($position, $actualExitPrice, (string) $order['orderId'], $reason);
+    }
+
+    /**
+     * Record a close that was triggered by a Binance bracket order fill (SL or TP).
+     * The user-data WS worker calls this on ORDER_TRADE_UPDATE X=FILLED events
+     * whose orderId matches a known Position.sl_order_id or Position.tp_order_id.
+     *
+     * Idempotent: if the position has already been closed by a concurrent
+     * reconciler (duplicate event, safety-poll race), returns null.
+     *
+     * @param array $fill Binance user-data order object (`o` envelope). Expected
+     *                    keys: i (orderId), X (execution status), ap (avg price),
+     *                    L (last fill price), z (cumulative filled qty).
+     */
+    public function reconcileFillFromStream(Position $position, array $fill, CloseReason $reason): ?Trade
+    {
+        $position->refresh();
+        if ($position->status !== PositionStatus::Open) {
+            return null;
+        }
+
+        $siblingId = $reason === CloseReason::StopLoss
+            ? $position->tp_order_id
+            : $position->sl_order_id;
+        if ($siblingId) {
+            try {
+                $this->exchange->cancelOrder($position->symbol, $siblingId);
+            } catch (\Throwable $e) {
+                Log::warning('Failed to cancel sibling bracket after fill', [
+                    'symbol' => $position->symbol,
+                    'sibling_order_id' => $siblingId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $exitPrice = (float) ($fill['ap'] ?? $fill['L'] ?? 0);
+        if ($exitPrice <= 0) {
+            $exitPrice = $reason === CloseReason::StopLoss
+                ? (float) $position->stop_loss_price
+                : (float) $position->take_profit_price;
+        }
+
+        $orderId = (string) ($fill['i'] ?? '');
+
+        Log::info('Reconciling position close from stream', [
+            'symbol' => $position->symbol,
+            'reason' => $reason->value,
+            'orderId' => $orderId,
+            'exit' => $exitPrice,
+        ]);
+
+        return $this->finalizeClose($position, $exitPrice, $orderId, $reason);
+    }
+
+    /**
+     * Safety reconcile for a DB position that's no longer open on Binance.
+     * Polls both bracket orders: if one is FILLED, reconcile with that reason.
+     * Otherwise fall back to a manual close at the last known price.
+     */
+    public function reconcileMissingPosition(Position $position): ?Trade
+    {
+        $position->refresh();
+        if ($position->status !== PositionStatus::Open) {
+            return null;
+        }
+
+        $reconciled = $this->reconcileFromBrackets($position, CloseReason::Manual);
+        if ($reconciled !== null) {
+            return $reconciled;
+        }
+
+        Log::warning('Position flat on exchange but no bracket fill found — closing as Manual', [
+            'symbol' => $position->symbol,
+        ]);
+        $lastPrice = $position->current_price > 0
+            ? (float) $position->current_price
+            : (float) $position->entry_price;
+        return $this->finalizeClose($position, $lastPrice, '', CloseReason::Manual);
+    }
+
+    /**
+     * Probe both bracket orders' statuses. If one is FILLED, synthesize a
+     * reconcile event for it and cancel the sibling. Returns null if neither
+     * bracket is filled.
+     */
+    private function reconcileFromBrackets(Position $position, CloseReason $fallbackReason): ?Trade
+    {
+        foreach ([
+            [$position->tp_order_id, CloseReason::TakeProfit],
+            [$position->sl_order_id, CloseReason::StopLoss],
+        ] as [$orderId, $reason]) {
+            if (! $orderId) {
+                continue;
+            }
+            try {
+                $status = $this->exchange->getOrderStatus($position->symbol, $orderId);
+            } catch (\Throwable $e) {
+                Log::warning('Bracket status check failed during reconcile', [
+                    'symbol' => $position->symbol,
+                    'orderId' => $orderId,
+                    'error' => $e->getMessage(),
+                ]);
+                continue;
+            }
+            if (($status['status'] ?? '') === 'FILLED') {
+                return $this->reconcileFillFromStream($position, [
+                    'i' => $orderId,
+                    'ap' => $status['avgPrice'] ?? 0,
+                    'z' => $status['executedQty'] ?? 0,
+                ], $reason);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Shared close-finalization: compute fees/PnL, update Position, create Trade.
+     * Does NOT issue any exchange orders — caller is responsible for that.
+     */
+    private function finalizeClose(Position $position, float $exitPrice, string $exchangeOrderId, CloseReason $reason): Trade
+    {
+        $rawPnl = $this->calculatePnl($position, $exitPrice);
+        $pnlPct = $this->calculatePnlPct($position, $exitPrice);
 
         $rates = $this->exchange->getCommissionRate($position->symbol);
         $takerRate = $rates['taker'];
         $entryFee = $position->total_entry_fee
             ?? ($position->entry_price * $position->quantity * $takerRate);
-        $exitFee = $actualExitPrice * $position->quantity * $takerRate;
+        $exitFee = $exitPrice * $position->quantity * $takerRate;
         $totalFees = round($entryFee + $exitFee, 4);
         $pnl = round($rawPnl - $totalFees, 4);
 
@@ -201,7 +361,7 @@ class TradingEngine
         };
 
         $position->update([
-            'current_price' => $actualExitPrice,
+            'current_price' => $exitPrice,
             'unrealized_pnl' => 0,
             'status' => $status,
         ]);
@@ -214,14 +374,14 @@ class TradingEngine
             'side' => $position->side,
             'type' => 'close',
             'entry_price' => $position->entry_price,
-            'exit_price' => $actualExitPrice,
+            'exit_price' => $exitPrice,
             'quantity' => $position->quantity,
             'pnl' => $pnl,
             'pnl_pct' => round($pnlPct, 4),
             'fees' => $totalFees,
             'funding_fee' => round($fundingFee, 4),
             'close_reason' => $reason,
-            'exchange_order_id' => $order['orderId'],
+            'exchange_order_id' => $exchangeOrderId,
             'is_dry_run' => $position->is_dry_run,
         ]);
 
@@ -230,12 +390,30 @@ class TradingEngine
             'side' => $position->side,
             'reason' => $reason->value,
             'entry' => $position->entry_price,
-            'exit' => $actualExitPrice,
+            'exit' => $exitPrice,
             'pnl' => $pnl,
             'pnl_pct' => round($pnlPct, 2) . '%',
         ]);
 
         return $trade;
+    }
+
+    /**
+     * Binance error signatures that indicate "the position doesn't exist /
+     * was already closed." Used to recognize when a manual or expiry close
+     * loses a race against an autonomous SL/TP trigger on Binance.
+     */
+    private function looksLikeAlreadyFlat(\Throwable $e): bool
+    {
+        $msg = $e->getMessage();
+        // -2022: "ReduceOnly Order is rejected" (no position to reduce)
+        // -4046: "No need to change position side"
+        // -2019: "Margin is insufficient" can also surface in this path
+        return str_contains($msg, '-2022')
+            || str_contains($msg, 'ReduceOnly')
+            || str_contains($msg, '-4046')
+            || str_contains($msg, 'position amount')
+            || str_contains($msg, 'is not valid');
     }
 
     public function addToPosition(Position $position, float $additionalUsdt): Position
