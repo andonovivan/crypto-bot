@@ -29,6 +29,7 @@ class Settings
         'stop_loss_pct' => ['config' => 'crypto.scalp.stop_loss_pct', 'type' => 'float', 'label' => 'Stop Loss (%)'],
         'max_hold_minutes' => ['config' => 'crypto.scalp.max_hold_minutes', 'type' => 'int', 'label' => 'Max Hold (minutes)'],
         'cooldown_minutes' => ['config' => 'crypto.scalp.cooldown_minutes', 'type' => 'int', 'label' => 'Cooldown After Close (minutes)'],
+        'failed_entry_cooldown_minutes' => ['config' => 'crypto.scalp.failed_entry_cooldown_minutes', 'type' => 'int', 'label' => 'Cooldown After Failed Entry (minutes)'],
         'max_candle_body_pct' => ['config' => 'crypto.scalp.max_candle_body_pct', 'type' => 'float', 'label' => 'Max 15m Candle Body (%)'],
         'min_red_candles' => ['config' => 'crypto.scalp.min_red_candles', 'type' => 'int', 'label' => 'Min Consecutive Red Candles'],
         'use_post_only_entry' => ['config' => 'crypto.scalp.use_post_only_entry', 'type' => 'bool', 'label' => 'Post-Only Limit Entry (maker fee)'],

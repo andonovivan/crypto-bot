@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Enums\PositionStatus;
 use App\Models\Position;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
@@ -78,6 +79,7 @@ class BotRun extends Command
     {
         $maxPositions = (int) Settings::get('max_positions') ?: 10;
         $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
+        $failedCooldown = (int) Settings::get('failed_entry_cooldown_minutes') ?: 360;
         $paused = (bool) Settings::get('trading_paused');
 
         // Manage existing open positions first
@@ -131,6 +133,14 @@ class BotRun extends Command
                 ->where('created_at', '>=', now()->subMinutes($cooldown))
                 ->exists();
             if ($recentClose) {
+                continue;
+            }
+
+            $recentFail = Position::where('symbol', $candidate->symbol)
+                ->where('status', PositionStatus::Failed)
+                ->where('created_at', '>=', now()->subMinutes($failedCooldown))
+                ->exists();
+            if ($recentFail) {
                 continue;
             }
 
