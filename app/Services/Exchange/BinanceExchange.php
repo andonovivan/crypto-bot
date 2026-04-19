@@ -789,12 +789,13 @@ class BinanceExchange implements ExchangeInterface
             'algoId' => $algoId,
         ]);
 
-        // Algo responses use a different status vocabulary: WORKING / TRIGGERED /
-        // CANCELLED / EXPIRED. Map TRIGGERED → FILLED so callers (reconcile paths)
-        // can treat both regular and algo results uniformly.
+        // Algo responses use a different status vocabulary: WORKING / NEW /
+        // TRIGGERED / FINISHED / CANCELLED / EXPIRED. Both TRIGGERED (the moment
+        // the trigger fires) and FINISHED (after the underlying MARKET order
+        // fills) indicate the bracket fired, so map both → FILLED.
         $rawStatus = (string) ($response['status'] ?? $response['algoStatus'] ?? 'UNKNOWN');
         $status = match (strtoupper($rawStatus)) {
-            'TRIGGERED' => 'FILLED',
+            'TRIGGERED', 'FINISHED' => 'FILLED',
             default => strtoupper($rawStatus),
         };
 
