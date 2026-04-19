@@ -53,6 +53,12 @@ class DryRunExchange implements ExchangeInterface
         return true;
     }
 
+    public function setMarginType(string $symbol, string $marginType): bool
+    {
+        Log::info("[DRY RUN] Set margin type", ['symbol' => $symbol, 'marginType' => $marginType]);
+        return true;
+    }
+
     public function openShort(string $symbol, float $quantity): array
     {
         $price = $this->getPrice($symbol);

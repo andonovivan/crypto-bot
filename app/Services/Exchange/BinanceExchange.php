@@ -202,6 +202,27 @@ class BinanceExchange implements ExchangeInterface
         return isset($response['leverage']);
     }
 
+    public function setMarginType(string $symbol, string $marginType): bool
+    {
+        try {
+            $this->signedRequest('POST', '/fapi/v1/marginType', [
+                'symbol' => $symbol,
+                'marginType' => $marginType,
+            ]);
+
+            return true;
+        } catch (\Throwable $e) {
+            // -4046: "No need to change margin type" — already set to the requested mode.
+            if (str_contains($e->getMessage(), '-4046')
+                || str_contains($e->getMessage(), 'No need to change margin type')
+            ) {
+                return true;
+            }
+
+            throw $e;
+        }
+    }
+
     public function openShort(string $symbol, float $quantity): array
     {
         $response = $this->signedRequest('POST', '/fapi/v1/order', [

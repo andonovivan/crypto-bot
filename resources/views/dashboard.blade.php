@@ -111,11 +111,16 @@
 </style>
 </head>
 <body>
-<h1>Short-Scalp Bot <span id="badge"></span></h1>
-<p class="subtitle">
-  <span id="positions-count-sub">-</span> open positions &middot;
-  Updated <span id="updated">-</span>
-</p>
+<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px;">
+  <div>
+    <h1 style="margin:0;">Short-Scalp Bot <span id="badge"></span></h1>
+    <p class="subtitle" style="margin-top:6px;">
+      <span id="positions-count-sub">-</span> open positions &middot;
+      Updated <span id="updated">-</span>
+    </p>
+  </div>
+  <button class="btn-pause" id="pause-btn" onclick="togglePause(this)" title="Pause opening new positions (existing positions keep running)" style="margin-top:0; margin-right:0;">⏸ Pause</button>
+</div>
 
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
@@ -210,7 +215,6 @@
     <h2 class="section-title" style="margin:0;">Market Scanner — Pumps &amp; Dumps</h2>
     <div style="display:flex; align-items:center;">
       <span class="settings-msg" id="scan-msg" style="margin-right:8px;"></span>
-      <button class="btn-pause" id="pause-btn" onclick="togglePause(this)" style="margin-top:0;">⏸ Pause</button>
       <button class="btn-scan" id="scan-btn" onclick="fetchScannerData(this)">Scan</button>
       <button class="btn-save" style="margin-top:0; margin-left:8px;" onclick="scanNow(this)">Scan + Auto Trade</button>
     </div>

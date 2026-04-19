@@ -51,6 +51,11 @@ class ExchangeDispatcher implements ExchangeInterface
         return $this->active()->setLeverage($symbol, $leverage);
     }
 
+    public function setMarginType(string $symbol, string $marginType): bool
+    {
+        return $this->active()->setMarginType($symbol, $marginType);
+    }
+
     public function openShort(string $symbol, float $quantity): array
     {
         return $this->active()->openShort($symbol, $quantity);

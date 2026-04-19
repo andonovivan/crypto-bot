@@ -53,6 +53,7 @@ class TradingEngine
         $price = null;
         try {
             $price = $this->exchange->getPrice($signal->symbol);
+            $this->exchange->setMarginType($signal->symbol, 'ISOLATED');
             $this->exchange->setLeverage($signal->symbol, $leverage);
 
             $quantity = $this->exchange->calculateQuantity($signal->symbol, $positionSizeUsdt, $price);
@@ -689,6 +690,7 @@ class TradingEngine
                 return ['trade' => $trade, 'position' => null];
             }
 
+            $this->exchange->setMarginType($symbol, 'ISOLATED');
             $this->exchange->setLeverage($symbol, $leverage);
             $quantity = $this->exchange->calculateQuantity($symbol, $positionSizeUsdt, $price);
             if ($quantity <= 0) {

@@ -37,6 +37,12 @@ interface ExchangeInterface
     public function setLeverage(string $symbol, int $leverage): bool;
 
     /**
+     * Set margin type for a symbol ('ISOLATED' or 'CROSSED').
+     * Idempotent: returns true if already set to the requested mode.
+     */
+    public function setMarginType(string $symbol, string $marginType): bool;
+
+    /**
      * Open a short position (market order).
      *
      * @return array{orderId: string, price: float, quantity: float}
