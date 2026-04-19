@@ -50,6 +50,7 @@ class TradingEngine
             return null;
         }
 
+        $price = null;
         try {
             $price = $this->exchange->getPrice($signal->symbol);
             $this->exchange->setLeverage($signal->symbol, $leverage);
@@ -71,14 +72,22 @@ class TradingEngine
                     'error' => $e->getMessage(),
                 ]);
 
+                $closeErrMsg = null;
                 try {
                     $this->exchange->closeShort($signal->symbol, $order['quantity']);
                 } catch (\Throwable $closeErr) {
+                    $closeErrMsg = $closeErr->getMessage();
                     Log::error('CRITICAL: Failed to close unprotected position', [
                         'symbol' => $signal->symbol,
-                        'error' => $closeErr->getMessage(),
+                        'error' => $closeErrMsg,
                     ]);
                 }
+
+                $msg = 'Bracket placement failed: ' . $e->getMessage();
+                if ($closeErrMsg) {
+                    $msg .= ' | UNPROTECTED — close also failed: ' . $closeErrMsg;
+                }
+                $this->recordFailedEntry($signal, $leverage, $positionSizeUsdt, $entryPrice, $isDryRun, $msg, $order);
                 return null;
             }
 
@@ -125,7 +134,59 @@ class TradingEngine
                 'symbol' => $signal->symbol,
                 'error' => $e->getMessage(),
             ]);
+            $this->recordFailedEntry(
+                $signal,
+                $leverage,
+                $positionSizeUsdt,
+                $price ?? 0.0,
+                $isDryRun,
+                'Entry rejected: ' . $e->getMessage(),
+            );
             return null;
+        }
+    }
+
+    /**
+     * Persist a Failed position row so entry rejections show up in the trade history
+     * instead of being silent log-only events. `$order` is optionally passed for the
+     * post-entry / pre-bracket failure path where we did get a fill.
+     */
+    private function recordFailedEntry(
+        ShortSignal $signal,
+        int $leverage,
+        float $positionSizeUsdt,
+        float $price,
+        bool $isDryRun,
+        string $errorMessage,
+        ?array $order = null,
+    ): void {
+        $entryPrice = $price;
+        if ($order && ($order['price'] ?? 0) > 0) {
+            $entryPrice = (float) $order['price'];
+        }
+
+        try {
+            Position::create([
+                'symbol' => $signal->symbol,
+                'side' => 'SHORT',
+                'entry_price' => $entryPrice,
+                'quantity' => $order['quantity'] ?? 0,
+                'position_size_usdt' => $positionSizeUsdt,
+                'stop_loss_price' => 0,
+                'take_profit_price' => 0,
+                'current_price' => $price,
+                'leverage' => $leverage,
+                'status' => PositionStatus::Failed,
+                'error_message' => $errorMessage,
+                'exchange_order_id' => $order['orderId'] ?? null,
+                'is_dry_run' => $isDryRun,
+                'opened_at' => now(),
+            ]);
+        } catch (\Throwable $persistErr) {
+            Log::error('Failed to persist Failed-entry row', [
+                'symbol' => $signal->symbol,
+                'error' => $persistErr->getMessage(),
+            ]);
         }
     }
 

@@ -20,6 +20,7 @@ class Position extends Model
         'unrealized_pnl',
         'leverage',
         'status',
+        'error_message',
         'exchange_order_id',
         'sl_order_id',
         'tp_order_id',

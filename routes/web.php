@@ -15,4 +15,5 @@ Route::post('/api/settings', [DashboardController::class, 'saveSettings']);
 Route::post('/api/reset', [DashboardController::class, 'resetAll']);
 Route::post('/api/scan', [DashboardController::class, 'scanNow']);
 Route::get('/api/scanner', [DashboardController::class, 'scannerData']);
+Route::get('/api/balance-history', [DashboardController::class, 'balanceHistory']);
 Route::post('/api/open-position', [DashboardController::class, 'openPosition']);

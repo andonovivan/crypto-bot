@@ -170,6 +170,9 @@ class BotRun extends Command
         ));
     }
 
+    /** @var array<string, int> symbol => last-warn-unix-timestamp */
+    private array $untrackedWarnedAt = [];
+
     private function safetyReconcile(TradingEngine $engine, ExchangeInterface $exchange): void
     {
         try {
@@ -182,14 +185,16 @@ class BotRun extends Command
         $onExchange = [];
         foreach ($exchangeOpen as $p) {
             if (isset($p['symbol'])) {
-                $onExchange[$p['symbol']] = true;
+                $onExchange[$p['symbol']] = $p;
             }
         }
 
+        $dbSymbols = [];
         foreach (Position::open()->get() as $position) {
             if ($this->shouldStop) {
                 return;
             }
+            $dbSymbols[$position->symbol] = true;
             if (isset($onExchange[$position->symbol])) {
                 continue;
             }
@@ -199,6 +204,30 @@ class BotRun extends Command
             } catch (\Throwable $e) {
                 $this->error("  [{$position->symbol}] reconcile error: {$e->getMessage()}");
             }
+        }
+
+        // Reverse check: positions on Binance that we have no DB row for.
+        // The bot does not adopt them (we don't know the intended SL/TP),
+        // just warns so the operator can investigate. Throttle to once
+        // per 15 minutes per symbol to avoid log spam.
+        $now = time();
+        foreach ($onExchange as $symbol => $ex) {
+            if (isset($dbSymbols[$symbol])) {
+                continue;
+            }
+            $last = $this->untrackedWarnedAt[$symbol] ?? 0;
+            if ($now - $last < 900) {
+                continue;
+            }
+            $this->untrackedWarnedAt[$symbol] = $now;
+            \Illuminate\Support\Facades\Log::warning('Untracked Binance position detected', [
+                'symbol' => $symbol,
+                'quantity' => $ex['quantity'] ?? null,
+                'entryPrice' => $ex['entryPrice'] ?? null,
+                'unrealizedPnl' => $ex['unrealizedPnl'] ?? null,
+                'note' => 'Position exists on Binance but has no matching DB row — not managed by the bot.',
+            ]);
+            $this->warn("  [{$symbol}] untracked Binance position (qty={$ex['quantity']}, entry={$ex['entryPrice']}) — not managed by bot");
         }
     }
 }

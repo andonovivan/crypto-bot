@@ -10,7 +10,7 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 - **db** — MariaDB 11 (persistent volume `dbdata`, healthcheck)
 - **app** — Dashboard web server (port 8090, runs migrations on startup)
 - **bot** — Continuous scan loop (`bot:run`, configurable scan interval, default 30s)
-- **scheduler** — Laravel scheduler (`schedule:run` loop)
+- **scheduler** — Laravel scheduler (`schedule:run` loop). Currently drives `bot:snapshot-balance` every 5 minutes for the equity-curve widget.
 - **ws-worker** — Long-running WebSocket worker (`bot:ws-prices`) that subscribes to Binance `!markPrice@arr` and writes to the `binance:prices` cache key (30s TTL). `BinanceExchange::getPrice()` reads that cache, so this replaces 10s REST polling with sub-second push updates. Also drives **event-driven position management**: on each ws frame it loads open positions and calls `TradingEngine::checkPosition` with the fresh price, giving ~1s TP/SL reaction time in dry-run mode (vs 30s via BotRun's cycle). Has `extra_hosts: fstream.binance.com:18.178.11.87` to bypass ISP DNS hijacking (host `/etc/hosts` propagation only covers `fapi.binance.com`). If the worker dies, cache entries expire in 30s, `getPrice()` falls back to REST, and BotRun's 30s cycle takes over position checks — degraded but still functional.
 - **ws-user-data** — Long-running WebSocket worker (`bot:ws-user-data`) for the Binance user-data stream. Creates a listenKey (`POST /fapi/v1/listenKey`), connects to `wss://fstream.binance.com/ws/{listenKey}`, and keeps it alive every 30 min (`PUT /fapi/v1/listenKey`). On `ORDER_TRADE_UPDATE` events with `X=FILLED` whose `o.i` matches a `Position.sl_order_id` or `Position.tp_order_id`, it calls `TradingEngine::reconcileFillFromStream()` to cancel the sibling bracket and record the `Trade` row. This is the **primary close-reconciliation path in live mode** since SL/TP are handled by Binance directly. Same DNS bypass via `extra_hosts`. On disconnect, reconnects with exponential backoff (1→60s) and always requests a fresh listenKey. Dry-run mode returns a fake listenKey so the ws connect fails quietly in a loop — that's benign since dry-run positions close via `checkPosition`'s price-trigger path and never emit real fills.
 - App runs migrations; bot/scheduler/ws-worker/ws-user-data wait for app to start first
@@ -33,7 +33,7 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 2. **Per cycle**:
    - Settle funding fees at 8h UTC boundaries via `FundingSettlementService`
    - **Manage open positions**: for each open position, fetch latest price, call `checkPosition()` to update unrealized P&L and check TP/SL/expiry. `checkPosition()` behavior differs by mode — see "SL/TP close reconciliation" below.
-   - **Safety reconcile** (live only): call `getOpenPositions()` once and for any DB `Position::open()` missing from the exchange list, invoke `TradingEngine::reconcileMissingPosition()` which probes bracket order status via `getOrderStatus` and records the close.
+   - **Safety reconcile** (live only): call `getOpenPositions()` once and for any DB `Position::open()` missing from the exchange list, invoke `TradingEngine::reconcileMissingPosition()` which probes bracket order status via `getOrderStatus` and records the close. The reverse check also fires: any Binance-side position with no matching DB row is logged as a warning (throttled to once per 15 min per symbol). These untracked positions are **not adopted** — the bot has no way to know the intended SL/TP — so the operator is expected to investigate.
    - **Find new entries**: `ShortScanner::getCandidates()` returns pump/dump candidates (one API call for all tickers)
    - For each candidate: apply cheap gates (paused, max_positions, already-open-on-symbol, cooldown), then `analyze15m()` for the Strict downtrend check, then open SHORT via `TradingEngine::openShort()` if eligible
 3. **Cycle summary** logged: `Cycle: candidates=N analyzed=M opened=V openPositions=X`
@@ -123,7 +123,9 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 | `app/Console/Commands/BotRun.php` | Continuous scan+monitor loop with graceful shutdown |
 | `app/Console/Commands/BotWsPrices.php` | Long-running WebSocket worker for `!markPrice@arr` → `binance:prices` cache |
 | `app/Console/Commands/BotWsUserData.php` | Long-running WebSocket worker for Binance user-data stream — reconciles SL/TP fills via `ORDER_TRADE_UPDATE` events |
+| `app/Console/Commands/BotSnapshotBalance.php` | One-shot command that writes a `BalanceSnapshot` row from `getAccountData()`. Scheduled every 5 min for the equity-curve widget. |
 | `app/Console/Commands/BotStatus.php` | CLI status overview |
+| `app/Models/BalanceSnapshot.php` | Equity-curve sample rows: `wallet_balance`, `available_balance`, `margin_balance`, `position_margin`, `open_positions`, `is_dry_run`, `created_at`. `$timestamps=false` (explicit `created_at` only). |
 | `bootstrap/app.php` | CSRF exemption for `api/*` routes |
 | `config/crypto.php` | Default config values |
 
@@ -168,6 +170,7 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 | GET | `/api/data` | Positions (with estimated fees & net P&L), trades, summary JSON |
 | GET | `/api/settings` | Current settings |
 | GET | `/api/scanner` | Scan candidates: pump/dump filter + 15m analysis + blocked reasons |
+| GET | `/api/balance-history` | Equity-curve points `{range: 1h\|6h\|24h\|7d\|30d\|all}` — filters by current `dry_run` |
 | POST | `/api/settings` | Save settings `{settings: {key: value}}` |
 | POST | `/api/scan` | Scan + auto-trade `{auto_trade: bool}` |
 | POST | `/api/open-position` | Manually open SHORT `{symbol: string}` (direction forced to SHORT) |
@@ -178,11 +181,13 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 
 ## Database (MariaDB 11)
 
-**Tables**: `positions`, `trades`, `bot_settings`, `cache`, `jobs`, `users`
+**Tables**: `positions`, `trades`, `balance_snapshots`, `bot_settings`, `cache`, `jobs`, `users`
 
 **Enums**:
-- `PositionStatus`: Open, Closed, Expired, StoppedOut
+- `PositionStatus`: Open, Closed, Expired, StoppedOut, Failed
 - `CloseReason`: TakeProfit, StopLoss, Expired, Manual, Reversed
+
+**Failed positions**: `Position` rows with `status=Failed` + `error_message` surface entry rejections (Binance refused the order, bracket placement failed, etc.) so they're visible in the dashboard rather than log-only. `Position::open()` scope excludes them, so they don't count toward `max_positions` or the one-per-symbol invariant. Written by `TradingEngine::recordFailedEntry()` from both the `placeEntryOrder` exception path and the post-entry/bracket-failure path (including the "UNPROTECTED — close also failed" case).
 
 ## Development Commands
 
@@ -225,6 +230,7 @@ Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
 
 - **Dashboard tab**:
   - **Cards**: Wallet balance, available balance, margin in use, P&L (net), fees, funding, win rate
+  - **Equity Curve**: hand-rolled SVG line chart plotting `wallet_balance` (blue) and `available_balance` (green) from `balance_snapshots`. Range pills: 1h/6h/24h/7d/30d/All (24h default). Hover circles show timestamp, both balances, and open-position count. Auto-refreshes every 60s. Filtered by current `dry_run` toggle — flipping the mode swaps series to the other history.
   - **Open Positions table**: Symbol (with side/leverage/DRY badges), entry/current price, unrealized P&L, P&L%, size (notional USDT), net P&L (with fees + funding rate + accumulated funding), SL/TP, opened time, hold time, Add/Reverse/Close buttons
 - **Scanner tab**:
   - **Scanner table**: 10 columns — Symbol (with PUMP/DUMP pill) | 24h % | Volume | Price | 15m Trend (DOWN/UP/FLAT pill) | Last Candle (RED/GREEN + body %) | Funding | Pos | Status (✓/✗ with blocked reason) | Actions (Short button)
@@ -233,7 +239,7 @@ Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
   - **Pause/Resume button**: Toggles `trading_paused` setting
   - **Manual SHORT open**: Symbol dropdown (populated from candidates) + Open SHORT button (direction is always SHORT)
   - **Auto-refresh**: Every 15s when the Scanner tab is visible; pauses when tab is backgrounded
-- **Trade History tab**: Symbol (with side/leverage/DRY badge), entry/exit price, realized P&L, P&L%, size, fees (with funding breakdown), close reason, opened/closed time
+- **Trade History tab**: Symbol (with side/leverage/DRY badge), entry/exit price, realized P&L, P&L%, size, fees (with funding breakdown), close reason, opened/closed time. Above the trade table, a red-bordered **Failed Entries** block renders `Position` rows with `status=Failed` (last 50) — shows symbol, size, `error_message`, time. Only rendered when failed entries exist.
 - **Settings tab**: All 19 runtime-configurable settings, auto-populated from `Settings::all()`
 - **Formatting**: Thousand separators on dollar amounts, subscript notation for micro-prices, inline color styling for P&L values
 

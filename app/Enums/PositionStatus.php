@@ -8,4 +8,5 @@ enum PositionStatus: string
     case Closed = 'closed';
     case Expired = 'expired';
     case StoppedOut = 'stopped_out';
+    case Failed = 'failed';
 }

@@ -99,6 +99,11 @@
   .footer { color: #484f58; font-size: 0.75em; margin-top: 24px; }
   .empty { color: #484f58; text-align: center; padding: 20px; }
   td sub, .card-value sub { font-size: 0.7em; vertical-align: baseline; color: #8b949e; }
+  .range-pills { display: flex; gap: 4px; }
+  .range-pills button { background: #21262d; color: #8b949e; border: 1px solid #30363d;
+    border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 0.75em; }
+  .range-pills button:hover { color: #c9d1d9; }
+  .range-pills button.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
   @media (max-width: 600px) {
     .cards { grid-template-columns: 1fr 1fr; }
     td, th { padding: 6px 8px; font-size: 0.8em; }
@@ -149,6 +154,29 @@
     <div class="card">
       <div class="card-label">Win Rate</div>
       <div class="card-value" id="winrate">-</div>
+    </div>
+  </div>
+
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-top:24px; margin-bottom:8px;">
+    <h2 class="section-title" style="margin:0;">Equity Curve</h2>
+    <div class="range-pills" id="equity-range-pills">
+      <button data-range="1h">1h</button>
+      <button data-range="6h">6h</button>
+      <button data-range="24h" class="active">24h</button>
+      <button data-range="7d">7d</button>
+      <button data-range="30d">30d</button>
+      <button data-range="all">All</button>
+    </div>
+  </div>
+  <div class="card" style="padding:12px 12px 6px; margin-bottom:24px;">
+    <div id="equity-chart-wrap" style="position:relative; height:220px;">
+      <svg id="equity-chart" width="100%" height="100%" viewBox="0 0 800 220" preserveAspectRatio="none" style="overflow:visible; display:block;"></svg>
+      <div id="equity-tooltip" style="position:absolute; display:none; background:#0d1117; border:1px solid #30363d; border-radius:4px; padding:6px 8px; font-size:0.75em; pointer-events:none; white-space:nowrap; z-index:5;"></div>
+      <div id="equity-empty" style="display:none; text-align:center; color:#484f58; padding:80px 0;">No snapshots yet — first sample runs every 5 min via scheduler.</div>
+    </div>
+    <div id="equity-legend" style="display:flex; gap:16px; margin-top:6px; font-size:0.75em; color:#8b949e;">
+      <span><span style="display:inline-block; width:10px; height:10px; background:#58a6ff; margin-right:4px; vertical-align:middle;"></span>Wallet balance</span>
+      <span><span style="display:inline-block; width:10px; height:10px; background:#3fb950; margin-right:4px; vertical-align:middle;"></span>Available balance</span>
     </div>
   </div>
 
@@ -218,6 +246,7 @@
 <!-- History Tab -->
 <div id="tab-history" class="tab-pane">
   <h2 class="section-title">Trade History</h2>
+  <div id="failed-entries-wrap"></div>
   <table>
     <thead>
       <tr>
@@ -277,6 +306,7 @@ const historyState = {
   total: 0,
   totalPages: 1,
   rows: [],
+  failed: [],
   loaded: false,
 };
 let scannerData = null;
@@ -654,6 +684,7 @@ async function fetchHistory() {
     const res = await fetch('/api/trades?' + qs.toString(), { signal });
     const data = await res.json();
     historyState.rows = (data.data || []).map(t => ({ ...t, net_pnl: t.pnl + (t.funding_fee || 0) }));
+    historyState.failed = data.failed_entries || [];
     historyState.page = data.page || 1;
     historyState.perPage = data.per_page || historyState.perPage;
     historyState.total = data.total || 0;
@@ -667,7 +698,43 @@ async function fetchHistory() {
   }
 }
 
+function renderFailedEntries() {
+  const wrap = document.getElementById('failed-entries-wrap');
+  if (!wrap) return;
+  const failed = historyState.failed || [];
+  if (failed.length === 0) {
+    wrap.innerHTML = '';
+    return;
+  }
+  const rows = failed.map(f => `<tr>
+    <td><strong>${f.symbol}</strong> ${sideBadge(f.side)}<span style="color:#8b949e;font-size:0.7em;margin-left:2px">${f.leverage || '-'}x</span>${f.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.55em">DRY</span>' : ''}</td>
+    <td>${f.position_size_usdt ? fmtNum(f.position_size_usdt, 2) + ' USDT' : '-'}</td>
+    <td style="color:#f85149;font-size:0.85em;word-break:break-word">${escapeHtml(f.error_message || 'Unknown error')}</td>
+    <td style="font-size:0.85em">${formatTimestamp(f.opened_at)}</td>
+  </tr>`).join('');
+  wrap.innerHTML = `
+    <div style="margin-bottom:16px;border:1px solid #f85149;border-radius:6px;background:#2d1113;padding:10px 12px">
+      <div style="color:#f85149;font-weight:bold;margin-bottom:8px;font-size:0.9em">⚠ Failed Entries (${failed.length})</div>
+      <table style="width:100%">
+        <thead>
+          <tr>
+            <th style="width:20%">Symbol</th>
+            <th style="width:15%">Size</th>
+            <th>Error</th>
+            <th style="width:15%">Time</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 function renderHistory() {
+  renderFailedEntries();
   const body = document.getElementById('history-body');
   if (historyState.rows.length === 0) {
     body.innerHTML = '<tr><td colspan="10" class="empty">No closed trades yet</td></tr>';
@@ -1077,9 +1144,129 @@ async function fetchData() {
   }
 }
 
+let equityRange = '24h';
+let equityPoints = [];
+
+function setupEquityPills() {
+  document.querySelectorAll('#equity-range-pills button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#equity-range-pills button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      equityRange = btn.dataset.range;
+      fetchEquityHistory();
+    });
+  });
+}
+
+async function fetchEquityHistory() {
+  try {
+    const res = await fetch('/api/balance-history?range=' + encodeURIComponent(equityRange));
+    const data = await res.json();
+    equityPoints = data.points || [];
+    renderEquityChart();
+  } catch (e) {
+    console.error('Failed to fetch balance history:', e);
+  }
+}
+
+function renderEquityChart() {
+  const svg = document.getElementById('equity-chart');
+  const empty = document.getElementById('equity-empty');
+  if (!equityPoints.length) {
+    svg.innerHTML = '';
+    svg.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  svg.style.display = 'block';
+
+  const W = 800, H = 220, padL = 56, padR = 12, padT = 12, padB = 24;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+
+  const times = equityPoints.map(p => p.ts);
+  const wallets = equityPoints.map(p => p.wallet_balance);
+  const avails = equityPoints.map(p => p.available_balance);
+
+  const tMin = Math.min(...times), tMax = Math.max(...times);
+  const vals = wallets.concat(avails);
+  let yMin = Math.min(...vals), yMax = Math.max(...vals);
+  if (yMin === yMax) { yMin -= 1; yMax += 1; }
+  const yPad = (yMax - yMin) * 0.08;
+  yMin -= yPad; yMax += yPad;
+
+  const xOf = t => padL + (tMax === tMin ? plotW / 2 : ((t - tMin) / (tMax - tMin)) * plotW);
+  const yOf = v => padT + (1 - (v - yMin) / (yMax - yMin)) * plotH;
+
+  const linePath = (arr) => arr.map((p, i) => (i === 0 ? 'M' : 'L') + xOf(p.ts).toFixed(1) + ',' + yOf(p._y).toFixed(1)).join(' ');
+  const walletLine = linePath(equityPoints.map(p => ({ ts: p.ts, _y: p.wallet_balance })));
+  const availLine = linePath(equityPoints.map(p => ({ ts: p.ts, _y: p.available_balance })));
+
+  // Y-axis ticks (5)
+  const yTicks = [];
+  for (let i = 0; i <= 4; i++) {
+    const v = yMin + ((yMax - yMin) * i) / 4;
+    yTicks.push({ v, y: yOf(v) });
+  }
+
+  const fmt = (v) => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+
+  let html = '';
+  yTicks.forEach(t => {
+    html += '<line x1="' + padL + '" y1="' + t.y.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + t.y.toFixed(1) + '" stroke="#21262d" stroke-width="1"/>';
+    html += '<text x="' + (padL - 6) + '" y="' + (t.y + 3).toFixed(1) + '" font-size="10" fill="#8b949e" text-anchor="end">' + fmt(t.v) + '</text>';
+  });
+
+  // X-axis ticks (3 — start, mid, end)
+  const xTicks = [tMin, (tMin + tMax) / 2, tMax];
+  xTicks.forEach(t => {
+    const x = xOf(t);
+    const d = new Date(t * 1000);
+    const label = equityRange === '1h' || equityRange === '6h' || equityRange === '24h'
+      ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+      : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    html += '<text x="' + x.toFixed(1) + '" y="' + (H - 6) + '" font-size="10" fill="#8b949e" text-anchor="middle">' + label + '</text>';
+  });
+
+  html += '<path d="' + availLine + '" stroke="#3fb950" stroke-width="1.5" fill="none" opacity="0.85"/>';
+  html += '<path d="' + walletLine + '" stroke="#58a6ff" stroke-width="2" fill="none"/>';
+
+  // Transparent hover targets
+  equityPoints.forEach((p, i) => {
+    html += '<circle cx="' + xOf(p.ts).toFixed(1) + '" cy="' + yOf(p.wallet_balance).toFixed(1) + '" r="8" fill="transparent" data-i="' + i + '"/>';
+  });
+
+  svg.innerHTML = html;
+
+  // Hover tooltip
+  const tip = document.getElementById('equity-tooltip');
+  const wrap = document.getElementById('equity-chart-wrap');
+  svg.querySelectorAll('circle').forEach(c => {
+    c.addEventListener('mouseenter', () => {
+      const p = equityPoints[parseInt(c.dataset.i, 10)];
+      const d = new Date(p.ts * 1000);
+      tip.innerHTML = '<div style="color:#c9d1d9; margin-bottom:3px;">' + d.toLocaleString() + '</div>' +
+        '<div><span style="color:#58a6ff;">Wallet:</span> $' + p.wallet_balance.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) + '</div>' +
+        '<div><span style="color:#3fb950;">Avail:</span> $' + p.available_balance.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) + '</div>' +
+        '<div style="color:#8b949e; margin-top:2px;">' + p.open_positions + ' open positions</div>';
+      tip.style.display = 'block';
+      const rect = wrap.getBoundingClientRect();
+      const svgRect = svg.getBoundingClientRect();
+      const cxClient = svgRect.left + (xOf(p.ts) / W) * svgRect.width;
+      const cyClient = svgRect.top + (yOf(p.wallet_balance) / H) * svgRect.height;
+      tip.style.left = (cxClient - rect.left + 10) + 'px';
+      tip.style.top = (cyClient - rect.top - 10) + 'px';
+    });
+    c.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+  });
+}
+
 fetchData();
 loadSettings();
+setupEquityPills();
+fetchEquityHistory();
 setInterval(fetchData, 10000);
+setInterval(fetchEquityHistory, 60000);
 </script>
 </body>
 </html>

@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Enums\PositionStatus;
+use App\Models\BalanceSnapshot;
 use App\Models\Position;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
@@ -188,6 +190,22 @@ class DashboardController extends Controller
             ->offset(($page - 1) * $perPage)
             ->get();
 
+        $failedRows = Position::where('status', PositionStatus::Failed)
+            ->orderByDesc('opened_at')
+            ->orderByDesc('id')
+            ->limit(50)
+            ->get()
+            ->map(fn (Position $p) => [
+                'id' => $p->id,
+                'symbol' => $p->symbol,
+                'side' => $p->side,
+                'error_message' => $p->error_message,
+                'position_size_usdt' => $p->position_size_usdt,
+                'leverage' => $p->leverage,
+                'is_dry_run' => $p->is_dry_run,
+                'opened_at' => $p->opened_at?->timestamp,
+            ]);
+
         return response()->json([
             'data' => $trades->map(fn (Trade $t) => [
                 'id' => $t->id,
@@ -207,6 +225,7 @@ class DashboardController extends Controller
                 'opened_at' => $t->position?->opened_at?->timestamp,
                 'created_at' => $t->created_at->timestamp,
             ]),
+            'failed_entries' => $failedRows,
             'page' => $page,
             'per_page' => $perPage,
             'total' => $total,
@@ -393,6 +412,40 @@ class DashboardController extends Controller
                 'message' => $e->getMessage(),
             ], 422);
         }
+    }
+
+    public function balanceHistory(Request $request): JsonResponse
+    {
+        $allowed = ['1h' => 1, '6h' => 6, '24h' => 24, '7d' => 24 * 7, '30d' => 24 * 30, 'all' => null];
+        $rangeKey = (string) $request->input('range', '24h');
+        if (! array_key_exists($rangeKey, $allowed)) {
+            $rangeKey = '24h';
+        }
+
+        $isDryRun = (bool) Settings::get('dry_run');
+
+        $query = BalanceSnapshot::where('is_dry_run', $isDryRun)
+            ->orderBy('created_at', 'asc');
+
+        if ($allowed[$rangeKey] !== null) {
+            $query->where('created_at', '>=', now()->subHours($allowed[$rangeKey]));
+        }
+
+        $snapshots = $query->get(['wallet_balance', 'available_balance', 'unrealized_profit', 'margin_balance', 'position_margin', 'open_positions', 'created_at']);
+
+        return response()->json([
+            'range' => $rangeKey,
+            'is_dry_run' => $isDryRun,
+            'points' => $snapshots->map(fn (BalanceSnapshot $s) => [
+                'ts' => $s->created_at->timestamp,
+                'wallet_balance' => $s->wallet_balance,
+                'available_balance' => $s->available_balance,
+                'unrealized_profit' => $s->unrealized_profit,
+                'margin_balance' => $s->margin_balance,
+                'position_margin' => $s->position_margin,
+                'open_positions' => $s->open_positions,
+            ]),
+        ]);
     }
 
     public function settings(): JsonResponse
