@@ -190,22 +190,6 @@ class DashboardController extends Controller
             ->offset(($page - 1) * $perPage)
             ->get();
 
-        $failedRows = Position::where('status', PositionStatus::Failed)
-            ->orderByDesc('opened_at')
-            ->orderByDesc('id')
-            ->limit(50)
-            ->get()
-            ->map(fn (Position $p) => [
-                'id' => $p->id,
-                'symbol' => $p->symbol,
-                'side' => $p->side,
-                'error_message' => $p->error_message,
-                'position_size_usdt' => $p->position_size_usdt,
-                'leverage' => $p->leverage,
-                'is_dry_run' => $p->is_dry_run,
-                'opened_at' => $p->opened_at?->timestamp,
-            ]);
-
         return response()->json([
             'data' => $trades->map(fn (Trade $t) => [
                 'id' => $t->id,
@@ -225,7 +209,59 @@ class DashboardController extends Controller
                 'opened_at' => $t->position?->opened_at?->timestamp,
                 'created_at' => $t->created_at->timestamp,
             ]),
-            'failed_entries' => $failedRows,
+            'page' => $page,
+            'per_page' => $perPage,
+            'total' => $total,
+            'total_pages' => $totalPages,
+            'sort_by' => $sortByRaw,
+            'sort_dir' => $sortDir,
+        ]);
+    }
+
+    public function failedEntries(Request $request): JsonResponse
+    {
+        $allowedPerPage = [25, 50, 100, 500];
+        $perPage = (int) $request->input('per_page', 50);
+        if (! in_array($perPage, $allowedPerPage, true)) {
+            $perPage = 50;
+        }
+        $page = max(1, (int) $request->input('page', 1));
+
+        $sortByRaw = (string) $request->input('sort_by', 'opened_at');
+        $sortDir = strtolower((string) $request->input('sort_dir', 'desc')) === 'asc' ? 'asc' : 'desc';
+
+        $sortMap = [
+            'symbol' => 'symbol',
+            'position_size_usdt' => 'position_size_usdt',
+            'leverage' => 'leverage',
+            'opened_at' => 'opened_at',
+        ];
+        $column = $sortMap[$sortByRaw] ?? 'opened_at';
+
+        $query = Position::where('status', PositionStatus::Failed)
+            ->orderBy($column, $sortDir)
+            ->orderBy('id', $sortDir);
+
+        $total = Position::where('status', PositionStatus::Failed)->count();
+        $totalPages = max(1, (int) ceil($total / $perPage));
+        $page = min($page, $totalPages);
+
+        $rows = $query
+            ->limit($perPage)
+            ->offset(($page - 1) * $perPage)
+            ->get();
+
+        return response()->json([
+            'data' => $rows->map(fn (Position $p) => [
+                'id' => $p->id,
+                'symbol' => $p->symbol,
+                'side' => $p->side,
+                'error_message' => $p->error_message,
+                'position_size_usdt' => $p->position_size_usdt,
+                'leverage' => $p->leverage,
+                'is_dry_run' => $p->is_dry_run,
+                'opened_at' => $p->opened_at?->timestamp,
+            ]),
             'page' => $page,
             'per_page' => $perPage,
             'total' => $total,

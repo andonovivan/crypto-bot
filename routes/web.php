@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Route;
 Route::get('/', [DashboardController::class, 'index']);
 Route::get('/api/data', [DashboardController::class, 'data']);
 Route::get('/api/trades', [DashboardController::class, 'trades']);
+Route::get('/api/failed-entries', [DashboardController::class, 'failedEntries']);
 Route::get('/api/settings', [DashboardController::class, 'settings']);
 Route::post('/api/close', [DashboardController::class, 'closePosition']);
 Route::post('/api/close-all', [DashboardController::class, 'closeAll']);

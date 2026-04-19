@@ -126,6 +126,7 @@
   <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
   <button class="tab-btn" onclick="switchTab('scanner')">Scanner</button>
   <button class="tab-btn" onclick="switchTab('history')">Trade History</button>
+  <button class="tab-btn" onclick="switchTab('failed')">Failed Entries</button>
   <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
 </div>
 
@@ -250,7 +251,6 @@
 <!-- History Tab -->
 <div id="tab-history" class="tab-pane">
   <h2 class="section-title">Trade History</h2>
-  <div id="failed-entries-wrap"></div>
   <table>
     <thead>
       <tr>
@@ -269,6 +269,24 @@
     <tbody id="history-body"><tr><td colspan="10" class="empty">Loading...</td></tr></tbody>
   </table>
   <div class="pagination" id="history-pagination"></div>
+</div>
+
+<!-- Failed Entries Tab -->
+<div id="tab-failed" class="tab-pane">
+  <h2 class="section-title" style="color:#f85149">Failed Entries</h2>
+  <table>
+    <thead>
+      <tr>
+        <th onclick="sortTable('failed', 'symbol')">Symbol <span class="sort-arrow" id="fail-sort-symbol"></span></th>
+        <th onclick="sortTable('failed', 'position_size_usdt')">Size <span class="sort-arrow" id="fail-sort-position_size_usdt"></span></th>
+        <th onclick="sortTable('failed', 'leverage')">Leverage <span class="sort-arrow" id="fail-sort-leverage"></span></th>
+        <th>Error</th>
+        <th onclick="sortTable('failed', 'opened_at')">Time <span class="sort-arrow" id="fail-sort-opened_at"></span></th>
+      </tr>
+    </thead>
+    <tbody id="failed-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+  </table>
+  <div class="pagination" id="failed-pagination"></div>
 </div>
 
 <!-- Settings Tab -->
@@ -310,7 +328,16 @@ const historyState = {
   total: 0,
   totalPages: 1,
   rows: [],
-  failed: [],
+  loaded: false,
+};
+const failedState = {
+  page: 1,
+  perPage: 50,
+  sortBy: 'opened_at',
+  sortDir: 'desc',
+  total: 0,
+  totalPages: 1,
+  rows: [],
   loaded: false,
 };
 let scannerData = null;
@@ -334,6 +361,9 @@ function switchTab(name) {
   }
   if (name === 'history' && !historyState.loaded) {
     fetchHistory();
+  }
+  if (name === 'failed' && !failedState.loaded) {
+    fetchFailed();
   }
 }
 
@@ -375,6 +405,17 @@ function sortTable(table, key) {
     }
     historyState.page = 1;
     fetchHistory();
+    return;
+  }
+  if (table === 'failed') {
+    if (failedState.sortBy === key) {
+      failedState.sortDir = failedState.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      failedState.sortBy = key;
+      failedState.sortDir = 'asc';
+    }
+    failedState.page = 1;
+    fetchFailed();
     return;
   }
   const state = sortState[table];
@@ -688,7 +729,6 @@ async function fetchHistory() {
     const res = await fetch('/api/trades?' + qs.toString(), { signal });
     const data = await res.json();
     historyState.rows = (data.data || []).map(t => ({ ...t, net_pnl: t.pnl + (t.funding_fee || 0) }));
-    historyState.failed = data.failed_entries || [];
     historyState.page = data.page || 1;
     historyState.perPage = data.per_page || historyState.perPage;
     historyState.total = data.total || 0;
@@ -702,43 +742,112 @@ async function fetchHistory() {
   }
 }
 
-function renderFailedEntries() {
-  const wrap = document.getElementById('failed-entries-wrap');
-  if (!wrap) return;
-  const failed = historyState.failed || [];
-  if (failed.length === 0) {
-    wrap.innerHTML = '';
-    return;
-  }
-  const rows = failed.map(f => `<tr>
-    <td><strong>${f.symbol}</strong> ${sideBadge(f.side)}<span style="color:#8b949e;font-size:0.7em;margin-left:2px">${f.leverage || '-'}x</span>${f.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.55em">DRY</span>' : ''}</td>
-    <td>${f.position_size_usdt ? fmtNum(f.position_size_usdt, 2) + ' USDT' : '-'}</td>
-    <td style="color:#f85149;font-size:0.85em;word-break:break-word">${escapeHtml(f.error_message || 'Unknown error')}</td>
-    <td style="font-size:0.85em">${formatTimestamp(f.opened_at)}</td>
-  </tr>`).join('');
-  wrap.innerHTML = `
-    <div style="margin-bottom:16px;border:1px solid #f85149;border-radius:6px;background:#2d1113;padding:10px 12px">
-      <div style="color:#f85149;font-weight:bold;margin-bottom:8px;font-size:0.9em">⚠ Failed Entries (${failed.length})</div>
-      <table style="width:100%">
-        <thead>
-          <tr>
-            <th style="width:20%">Symbol</th>
-            <th style="width:15%">Size</th>
-            <th>Error</th>
-            <th style="width:15%">Time</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
-}
-
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+let failedAbort = null;
+
+async function fetchFailed() {
+  if (failedAbort) failedAbort.abort();
+  failedAbort = new AbortController();
+  const signal = failedAbort.signal;
+  const body = document.getElementById('failed-body');
+  if (!failedState.loaded) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">Loading...</td></tr>';
+  }
+  try {
+    const qs = new URLSearchParams({
+      page: String(failedState.page),
+      per_page: String(failedState.perPage),
+      sort_by: failedState.sortBy,
+      sort_dir: failedState.sortDir,
+    });
+    const res = await fetch('/api/failed-entries?' + qs.toString(), { signal });
+    const data = await res.json();
+    failedState.rows = data.data || [];
+    failedState.page = data.page || 1;
+    failedState.perPage = data.per_page || failedState.perPage;
+    failedState.total = data.total || 0;
+    failedState.totalPages = data.total_pages || 1;
+    failedState.loaded = true;
+    renderFailed();
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    console.error('Failed to fetch failed entries:', e);
+    body.innerHTML = '<tr><td colspan="5" class="empty">Failed to load entries</td></tr>';
+  }
+}
+
+function renderFailed() {
+  const body = document.getElementById('failed-body');
+  if (failedState.rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">No failed entries</td></tr>';
+  } else {
+    body.innerHTML = failedState.rows.map(f => `<tr>
+      <td>
+        <strong>${f.symbol}</strong>
+        ${sideBadge(f.side)}
+        ${f.is_dry_run ? ' <span class="dry-run-badge" style="font-size:0.55em">DRY</span>' : ''}
+      </td>
+      <td>${f.position_size_usdt ? fmtNum(f.position_size_usdt, 2) + ' USDT' : '-'}</td>
+      <td><span style="color:#8b949e">${f.leverage || '-'}x</span></td>
+      <td style="color:#f85149;font-size:0.85em;word-break:break-word">${escapeHtml(f.error_message || 'Unknown error')}</td>
+      <td style="font-size:0.85em">${formatTimestamp(f.opened_at)}</td>
+    </tr>`).join('');
+  }
+  renderFailedPagination();
+  updateFailedSortArrows();
+}
+
+function renderFailedPagination() {
+  const el = document.getElementById('failed-pagination');
+  const { page, perPage, total, totalPages } = failedState;
+  const from = total === 0 ? 0 : (page - 1) * perPage + 1;
+  const to = Math.min(page * perPage, total);
+  const opts = [25, 50, 100, 500].map(n =>
+    `<option value="${n}" ${n === perPage ? 'selected' : ''}>${n}</option>`
+  ).join('');
+  el.innerHTML = `
+    <span style="color:#8b949e; font-size:0.85em">Showing ${fmtNum(from, 0)}–${fmtNum(to, 0)} of ${fmtNum(total, 0)} failed entries</span>
+    <span style="margin-left:auto; color:#8b949e; font-size:0.85em">Rows per page:</span>
+    <select id="failed-per-page" onchange="changeFailedPerPage(this.value)"
+      style="background:#0d1117; border:1px solid #30363d; border-radius:4px; color:#c9d1d9; padding:4px 8px; font-size:0.8em;">
+      ${opts}
+    </select>
+    <button onclick="goToFailedPage(1)" ${page <= 1 ? 'disabled' : ''}>&laquo; First</button>
+    <button onclick="goToFailedPage(${page - 1})" ${page <= 1 ? 'disabled' : ''}>&lsaquo; Prev</button>
+    <span style="color:#c9d1d9; font-size:0.85em">Page ${page} of ${totalPages}</span>
+    <button onclick="goToFailedPage(${page + 1})" ${page >= totalPages ? 'disabled' : ''}>Next &rsaquo;</button>
+    <button onclick="goToFailedPage(${totalPages})" ${page >= totalPages ? 'disabled' : ''}>Last &raquo;</button>
+  `;
+}
+
+function goToFailedPage(page) {
+  const p = Math.max(1, Math.min(page, failedState.totalPages));
+  if (p === failedState.page) return;
+  failedState.page = p;
+  fetchFailed();
+}
+
+function changeFailedPerPage(val) {
+  const n = parseInt(val, 10);
+  if (![25, 50, 100, 500].includes(n)) return;
+  failedState.perPage = n;
+  failedState.page = 1;
+  fetchFailed();
+}
+
+function updateFailedSortArrows() {
+  const keys = ['symbol', 'position_size_usdt', 'leverage', 'opened_at'];
+  keys.forEach(k => {
+    const el = document.getElementById('fail-sort-' + k);
+    if (!el) return;
+    el.textContent = failedState.sortBy === k ? (failedState.sortDir === 'asc' ? '\u25B2' : '\u25BC') : '';
+  });
+}
+
 function renderHistory() {
-  renderFailedEntries();
   const body = document.getElementById('history-body');
   if (historyState.rows.length === 0) {
     body.innerHTML = '<tr><td colspan="10" class="empty">No closed trades yet</td></tr>';
