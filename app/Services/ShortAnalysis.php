@@ -14,5 +14,7 @@ class ShortAnalysis
         public readonly ?float $fundingRate,
         public readonly bool $downtrendOk,
         public readonly ?string $blockedReason,
+        public readonly float $atr = 0.0,
+        public readonly bool $higherTfDowntrendOk = true,
     ) {}
 }

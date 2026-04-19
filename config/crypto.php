@@ -62,5 +62,25 @@ return [
         'min_red_candles' => (int) env('MIN_RED_CANDLES', 2),
         'use_post_only_entry' => filter_var(env('USE_POST_ONLY_ENTRY', true), FILTER_VALIDATE_BOOLEAN),
         'limit_order_timeout_seconds' => (int) env('LIMIT_ORDER_TIMEOUT_SECONDS', 3),
+
+        // Higher-timeframe trend filter: reject candidates whose 1h close is
+        // still above the 1h EMA. Catches 15m-down setups that are actually
+        // pullbacks inside a larger uptrend (bounce tops).
+        'htf_filter_enabled' => filter_var(env('HTF_FILTER_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+        'htf_ema_period' => (int) env('HTF_EMA_PERIOD', 21),
+
+        // ATR-based stop-loss: SL = entry ± (multiplier × ATR14 on 15m).
+        // Gives stops a noise-proportional buffer on volatile pump/dump coins
+        // instead of a fixed %. Disabled falls back to stop_loss_pct.
+        'atr_sl_enabled' => filter_var(env('ATR_SL_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+        'atr_sl_multiplier' => (float) env('ATR_SL_MULTIPLIER', 1.5),
+
+        // Partial take-profit: when the trade moves favorably by
+        // partial_tp_trigger_pct, close partial_tp_size_pct of the position at
+        // market. The remaining portion runs to SL/TP/expiry under the existing
+        // brackets (reduceOnly=true, so they naturally close only what's left).
+        // Set trigger to 0 to disable.
+        'partial_tp_trigger_pct' => (float) env('PARTIAL_TP_TRIGGER_PCT', 1.0),
+        'partial_tp_size_pct' => (float) env('PARTIAL_TP_SIZE_PCT', 50.0),
     ],
 ];

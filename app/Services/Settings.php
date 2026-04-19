@@ -34,6 +34,15 @@ class Settings
         'min_red_candles' => ['config' => 'crypto.scalp.min_red_candles', 'type' => 'int', 'label' => 'Min Consecutive Red Candles'],
         'use_post_only_entry' => ['config' => 'crypto.scalp.use_post_only_entry', 'type' => 'bool', 'label' => 'Post-Only Limit Entry (maker fee)'],
         'limit_order_timeout_seconds' => ['config' => 'crypto.scalp.limit_order_timeout_seconds', 'type' => 'int', 'label' => 'Post-Only Fill Timeout (sec)'],
+
+        'htf_filter_enabled' => ['config' => 'crypto.scalp.htf_filter_enabled', 'type' => 'bool', 'label' => 'Higher-TF Trend Filter (1h)'],
+        'htf_ema_period' => ['config' => 'crypto.scalp.htf_ema_period', 'type' => 'int', 'label' => 'HTF EMA Period (1h)'],
+
+        'atr_sl_enabled' => ['config' => 'crypto.scalp.atr_sl_enabled', 'type' => 'bool', 'label' => 'ATR-Based Stop Loss'],
+        'atr_sl_multiplier' => ['config' => 'crypto.scalp.atr_sl_multiplier', 'type' => 'float', 'label' => 'ATR SL Multiplier'],
+
+        'partial_tp_trigger_pct' => ['config' => 'crypto.scalp.partial_tp_trigger_pct', 'type' => 'float', 'label' => 'Partial TP Trigger (%, 0=off)'],
+        'partial_tp_size_pct' => ['config' => 'crypto.scalp.partial_tp_size_pct', 'type' => 'float', 'label' => 'Partial TP Size (% of position)'],
     ];
 
     public static function get(string $key): mixed

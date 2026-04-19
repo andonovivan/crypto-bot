@@ -30,6 +30,7 @@ class Position extends Model
         'is_dry_run',
         'opened_at',
         'expires_at',
+        'partial_tp_taken',
     ];
 
     protected function casts(): array
@@ -50,6 +51,7 @@ class Position extends Model
             'is_dry_run' => 'boolean',
             'opened_at' => 'datetime',
             'expires_at' => 'datetime',
+            'partial_tp_taken' => 'boolean',
         ];
     }
 

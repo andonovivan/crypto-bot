@@ -77,6 +77,8 @@ class ShortScanner
         $emaSlowPeriod = (int) Settings::get('ema_slow') ?: 21;
         $maxBodyPct = (float) Settings::get('max_candle_body_pct') ?: 3.0;
         $minRedCandles = max(1, (int) Settings::get('min_red_candles') ?: 2);
+        $htfEnabled = (bool) Settings::get('htf_filter_enabled');
+        $htfEmaPeriod = max(1, (int) Settings::get('htf_ema_period') ?: 21);
 
         $klines = $this->getCachedKlines($symbol);
         if ($klines === null || count($klines) < $emaSlowPeriod + 3) {
@@ -89,12 +91,14 @@ class ShortScanner
 
         $emaFastValues = $this->ta->calculateEMA($closes, $emaFastPeriod);
         $emaSlowValues = $this->ta->calculateEMA($closes, $emaSlowPeriod);
+        $atrValues = $this->ta->calculateATR($klines, 14);
 
         $emaFastNow = $emaFastValues[$last];
         $emaSlowNow = $emaSlowValues[$last];
         $emaFastPrev = $emaFastValues[$prev];
         $emaSlowPrev = $emaSlowValues[$prev];
         $currentPrice = $closes[$last];
+        $atrNow = (float) ($atrValues[$last] ?? 0);
 
         // Use the last CLOSED candle (index prev) for the red/body check.
         $closedCandle = $klines[$prev];
@@ -113,6 +117,16 @@ class ShortScanner
 
         $fundingRate = $this->getFundingRate($symbol);
 
+        // Higher-timeframe confirmation (1h close below 1h EMA). Catches cases
+        // where 15m looks weak but the larger trend is still up — those 15m
+        // setups are bounce tops that get bought back into, which historically
+        // wrecks the scalp strategy. Only fetched when enabled to avoid the
+        // extra REST call per candidate on the cold path.
+        $higherTfDowntrendOk = true;
+        if ($htfEnabled) {
+            $higherTfDowntrendOk = $this->checkHigherTfDowntrend($symbol, $htfEmaPeriod);
+        }
+
         $blocked = null;
         if (! ($emaFastNow < $emaSlowNow)) {
             $blocked = 'EMA not down (current)';
@@ -126,6 +140,8 @@ class ShortScanner
             $blocked = "Candle body {$this->fmt($bodyPct)}% > {$maxBodyPct}%";
         } elseif ($fundingRate !== null && $fundingRate < self::FUNDING_MIN_RATE) {
             $blocked = 'Funding rate too negative';
+        } elseif (! $higherTfDowntrendOk) {
+            $blocked = '1h close above 1h EMA';
         }
 
         return new ShortAnalysis(
@@ -138,7 +154,33 @@ class ShortScanner
             fundingRate: $fundingRate,
             downtrendOk: $blocked === null,
             blockedReason: $blocked,
+            atr: $atrNow,
+            higherTfDowntrendOk: $higherTfDowntrendOk,
         );
+    }
+
+    private function checkHigherTfDowntrend(string $symbol, int $emaPeriod): bool
+    {
+        try {
+            $limit = $emaPeriod + 5;
+            $klines = $this->exchange->getKlines($symbol, '1h', $limit);
+        } catch (\Throwable $e) {
+            Log::debug('1h klines fetch failed — HTF filter fails open', [
+                'symbol' => $symbol,
+                'error' => $e->getMessage(),
+            ]);
+            return true;
+        }
+
+        if (count($klines) < $emaPeriod + 1) {
+            return true;
+        }
+
+        $closes = array_column($klines, 'close');
+        $ema = $this->ta->calculateEMA($closes, $emaPeriod);
+        $last = count($closes) - 1;
+
+        return $closes[$last] < $ema[$last];
     }
 
     private function getFundingRate(string $symbol): ?float

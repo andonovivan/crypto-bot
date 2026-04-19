@@ -84,7 +84,7 @@ class TradingEngine
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
             try {
-                $slTp = $this->placeBrackets($exchange, $signal->symbol, $entryPrice, $order['quantity']);
+                $slTp = $this->placeBrackets($exchange, $signal->symbol, $entryPrice, $order['quantity'], 'SHORT', $signal->atr);
             } catch (\Throwable $e) {
                 Log::error('Failed to set SL/TP — closing position for safety', [
                     'symbol' => $signal->symbol,
@@ -353,6 +353,11 @@ class TradingEngine
             'unrealized_pnl' => $unrealizedPnl,
         ]);
 
+        // Partial take-profit: if the position is favorable by partial_tp_trigger_pct
+        // and the flag isn't already set, close a slice at market. The remaining qty
+        // keeps running under the existing brackets (reduceOnly=true auto-clamps).
+        $this->maybeTakePartialTp($position, $currentPrice);
+
         // Dry-run: bot triggers SL/TP via price comparison (legacy behavior).
         // Live: Binance's STOP_MARKET / TAKE_PROFIT_MARKET orders handle SL/TP;
         // the user-data WS worker reconciles fills back into our DB.
@@ -372,6 +377,152 @@ class TradingEngine
         if ($position->expires_at && now()->gte($position->expires_at)) {
             $this->closePosition($position, $currentPrice, CloseReason::Expired);
         }
+    }
+
+    /**
+     * If the position is favorable by at least partial_tp_trigger_pct and
+     * hasn't already taken a partial, close partial_tp_size_pct of the qty
+     * at market. Gated by partial_tp_taken so it only fires once per position.
+     */
+    private function maybeTakePartialTp(Position $position, float $currentPrice): void
+    {
+        if ($position->partial_tp_taken) {
+            return;
+        }
+
+        $triggerPct = (float) Settings::get('partial_tp_trigger_pct');
+        if ($triggerPct <= 0) {
+            return;
+        }
+
+        $sizePct = (float) Settings::get('partial_tp_size_pct') ?: 50.0;
+        if ($sizePct <= 0 || $sizePct >= 100) {
+            return;
+        }
+
+        $entry = (float) $position->entry_price;
+        if ($entry <= 0) {
+            return;
+        }
+
+        $favorablePct = $position->side === 'LONG'
+            ? (($currentPrice - $entry) / $entry) * 100
+            : (($entry - $currentPrice) / $entry) * 100;
+
+        if ($favorablePct < $triggerPct) {
+            return;
+        }
+
+        try {
+            $this->takePartialTp($position, $currentPrice, $sizePct);
+        } catch (\Throwable $e) {
+            Log::warning('Partial TP attempt failed', [
+                'symbol' => $position->symbol,
+                'position_id' => $position->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Close $sizePct of the position at market, record a PartialTakeProfit
+     * Trade row, and shrink Position.quantity / position_size_usdt /
+     * total_entry_fee / funding_fee proportionally. Leaves the brackets alone —
+     * reduceOnly=true handles qty mismatch against the remaining position.
+     */
+    private function takePartialTp(Position $position, float $currentPrice, float $sizePct): ?Trade
+    {
+        $closeQty = $position->quantity * ($sizePct / 100);
+        if ($closeQty <= 0) {
+            return null;
+        }
+
+        $exchange = $this->exchange->resolve();
+
+        $order = $position->side === 'LONG'
+            ? $exchange->closeLong($position->symbol, $closeQty)
+            : $exchange->closeShort($position->symbol, $closeQty);
+
+        $exitPrice = ($order['price'] ?? 0) > 0 ? (float) $order['price'] : $currentPrice;
+        $actualCloseQty = (float) ($order['quantity'] ?? $closeQty);
+        $exchangeOrderId = (string) ($order['orderId'] ?? '');
+
+        $rates = $exchange->getCommissionRate($position->symbol);
+        $takerRate = $rates['taker'];
+
+        return DB::transaction(function () use ($position, $exitPrice, $actualCloseQty, $exchangeOrderId, $takerRate) {
+            $locked = Position::where('id', $position->id)->lockForUpdate()->first();
+            if (! $locked || $locked->status !== PositionStatus::Open || $locked->partial_tp_taken) {
+                return null;
+            }
+            if ($actualCloseQty >= (float) $locked->quantity) {
+                return null;
+            }
+
+            $partRatio = $actualCloseQty / (float) $locked->quantity;
+
+            $oldEntryFee = $locked->total_entry_fee
+                ?? ($locked->entry_price * $locked->quantity * $takerRate);
+            $entryFeePortion = round($oldEntryFee * $partRatio, 8);
+            $remainingEntryFee = round($oldEntryFee - $entryFeePortion, 8);
+
+            $oldFunding = (float) ($locked->funding_fee ?? 0);
+            $fundingPortion = round($oldFunding * $partRatio, 8);
+            $remainingFunding = round($oldFunding - $fundingPortion, 8);
+
+            $exitFee = $exitPrice * $actualCloseQty * $takerRate;
+            $totalFees = round($entryFeePortion + $exitFee, 4);
+
+            $rawPnl = $locked->side === 'LONG'
+                ? ($exitPrice - $locked->entry_price) * $actualCloseQty
+                : ($locked->entry_price - $exitPrice) * $actualCloseQty;
+            $pnl = round($rawPnl - $totalFees, 4);
+
+            $pnlPct = $locked->side === 'LONG'
+                ? (($exitPrice - $locked->entry_price) / $locked->entry_price) * 100
+                : (($locked->entry_price - $exitPrice) / $locked->entry_price) * 100;
+
+            $trade = Trade::create([
+                'position_id' => $locked->id,
+                'symbol' => $locked->symbol,
+                'side' => $locked->side,
+                'type' => 'close',
+                'entry_price' => $locked->entry_price,
+                'exit_price' => $exitPrice,
+                'quantity' => $actualCloseQty,
+                'pnl' => $pnl,
+                'pnl_pct' => round($pnlPct, 4),
+                'fees' => $totalFees,
+                'funding_fee' => $fundingPortion,
+                'close_reason' => CloseReason::PartialTakeProfit,
+                'exchange_order_id' => $exchangeOrderId,
+                'is_dry_run' => $locked->is_dry_run,
+            ]);
+
+            $remainingQty = round((float) $locked->quantity - $actualCloseQty, 8);
+            $remainingUsdt = round((float) $locked->position_size_usdt * (1 - $partRatio), 4);
+
+            $locked->update([
+                'quantity' => $remainingQty,
+                'position_size_usdt' => $remainingUsdt,
+                'total_entry_fee' => $remainingEntryFee,
+                'funding_fee' => $remainingFunding,
+                'partial_tp_taken' => true,
+            ]);
+
+            Log::info('Partial TP taken', [
+                'symbol' => $locked->symbol,
+                'position_id' => $locked->id,
+                'closed_qty' => $actualCloseQty,
+                'remaining_qty' => $remainingQty,
+                'exit' => $exitPrice,
+                'pnl' => $pnl,
+            ]);
+
+            $position->setRawAttributes($locked->getAttributes(), true);
+
+            return $trade;
+        });
     }
 
     private function slHit(Position $position, float $currentPrice): bool
@@ -1064,9 +1215,9 @@ class TradingEngine
     /**
      * @return array{sl_order_id: ?string, tp_order_id: ?string, sl: float, tp: float}
      */
-    private function placeBrackets(ExchangeInterface $exchange, string $symbol, float $entryPrice, float $quantity, string $side = 'SHORT'): array
+    private function placeBrackets(ExchangeInterface $exchange, string $symbol, float $entryPrice, float $quantity, string $side = 'SHORT', float $atr = 0.0): array
     {
-        $slTp = $this->calculateSlTp($entryPrice, $side);
+        $slTp = $this->calculateSlTp($entryPrice, $side, $atr);
 
         $slOrderId = null;
         $tpOrderId = null;
@@ -1146,20 +1297,29 @@ class TradingEngine
     /**
      * @return array{sl: float, tp: float}
      */
-    private function calculateSlTp(float $entryPrice, string $side = 'SHORT'): array
+    private function calculateSlTp(float $entryPrice, string $side = 'SHORT', float $atr = 0.0): array
     {
         $tpPct = (float) Settings::get('take_profit_pct') ?: 2.0;
         $slPct = (float) Settings::get('stop_loss_pct') ?: 1.0;
 
+        $atrEnabled = (bool) Settings::get('atr_sl_enabled');
+        $atrMult = (float) Settings::get('atr_sl_multiplier') ?: 1.5;
+
+        // Use ATR-based SL when enabled and a valid ATR is available. For
+        // volatile pump/dump coins this gives stops a noise-proportional buffer
+        // instead of 1% on what might be a 5%-wick chart. TP stays pct-based.
+        $useAtr = $atrEnabled && $atr > 0;
+        $slOffset = $useAtr ? $atrMult * $atr : $entryPrice * $slPct / 100;
+
         if ($side === 'LONG') {
             return [
-                'sl' => round($entryPrice * (1 - $slPct / 100), 8),
+                'sl' => round($entryPrice - $slOffset, 8),
                 'tp' => round($entryPrice * (1 + $tpPct / 100), 8),
             ];
         }
 
         return [
-            'sl' => round($entryPrice * (1 + $slPct / 100), 8),
+            'sl' => round($entryPrice + $slOffset, 8),
             'tp' => round($entryPrice * (1 - $tpPct / 100), 8),
         ];
     }

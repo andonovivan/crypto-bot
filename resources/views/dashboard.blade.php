@@ -509,13 +509,14 @@ function holdTime(openedTs, expiresTs) {
 function reasonBadge(reason) {
   const colors = {
     take_profit: '#3fb950',
+    partial_take_profit: '#58a6ff',
     stop_loss: '#f85149',
     expired: '#d29922',
     manual: '#8b949e',
     reversed: '#8957e5',
   };
   const color = colors[reason] || '#8b949e';
-  return `<span style="color:${color};font-weight:bold;font-size:0.85em">${reason.replace('_', ' ').toUpperCase()}</span>`;
+  return `<span style="color:${color};font-weight:bold;font-size:0.85em">${reason.replaceAll('_', ' ').toUpperCase()}</span>`;
 }
 
 async function closePosition(id, btn) {

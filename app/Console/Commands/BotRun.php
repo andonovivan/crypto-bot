@@ -155,6 +155,7 @@ class BotRun extends Command
                 symbol: $candidate->symbol,
                 priceChangePct: $candidate->priceChangePct,
                 reason: $candidate->reason,
+                atr: $analysis->atr,
             );
 
             $position = $engine->openShort($signal);
