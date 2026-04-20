@@ -30,11 +30,12 @@ class BotBacktest extends Command
         {--symbols= : Comma-separated symbol filter (default: all with data)}
         {--starting-balance=10000 : Simulated USDT starting wallet}
         {--fixed-sizing : Pin wallet balance to starting balance so compounding does not distort per-trade stats}
-        {--truncate : Wipe dry-run Position/Trade rows before starting}';
+        {--truncate : Wipe dry-run Position/Trade rows before starting}
+        {--override=* : Repeatable key=value Settings::override() pair (e.g. --override=stop_loss_pct=1.5 --override=atr_sl_multiplier=2.0)}';
 
     protected $description = 'Replay historical klines through the strategy and report P&L';
 
-    public function handle(TradingEngine $engineUnused, FundingSettlementService $fundingService): int
+    public function handle(): int
     {
         $fromStr = (string) $this->option('from');
         if (! $fromStr) {
@@ -68,6 +69,28 @@ class BotBacktest extends Command
         Settings::override('dry_run', true);
         Settings::override('starting_balance', $startingBalance);
         Settings::override('trading_paused', false);
+
+        $overrideOpts = (array) $this->option('override');
+        foreach ($overrideOpts as $pair) {
+            if (! str_contains($pair, '=')) {
+                $this->error("--override must be key=value (got: {$pair})");
+                return self::FAILURE;
+            }
+            [$k, $v] = array_map('trim', explode('=', $pair, 2));
+            $meta = Settings::KEYS[$k] ?? null;
+            if (! $meta) {
+                $this->error("Unknown setting key: {$k}");
+                return self::FAILURE;
+            }
+            $typed = match ($meta['type']) {
+                'int' => (int) $v,
+                'float' => (float) $v,
+                'bool' => in_array(strtolower($v), ['1', 'true', 'yes', 'on'], true),
+                default => $v,
+            };
+            Settings::override($k, $typed);
+            $this->info(sprintf('override: %s = %s', $k, json_encode($typed)));
+        }
 
         try {
             $this->info(sprintf('Loading klines from DB for %s → %s%s…',
