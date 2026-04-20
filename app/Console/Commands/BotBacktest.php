@@ -97,6 +97,7 @@ class BotBacktest extends Command
                 $fromStr, $toStr, $symbolFilter ? ' (symbols: ' . implode(',', $symbolFilter) . ')' : ''));
 
             $replay = new HistoricalReplayExchange($fromMs, $toMs, $symbolFilter);
+            $replay->setRealExchange(app(\App\Services\Exchange\BinanceExchange::class));
             if ((bool) $this->option('fixed-sizing')) {
                 $replay->setFixedSizing(true);
                 $this->info('Fixed-sizing mode: wallet balance pinned to starting balance (no compounding).');
@@ -255,14 +256,38 @@ class BotBacktest extends Command
             ? [$bar['h'], $bar['l'], $bar['c']]
             : [$bar['l'], $bar['h'], $bar['c']];
 
+        $sl = (float) $position->stop_loss_price;
+        $tp = (float) $position->take_profit_price;
+
         try {
             foreach ($probes as $price) {
-                $replay->setProbePrice($position->symbol, $price);
                 $fresh = Position::find($position->id);
                 if (! $fresh || $fresh->status !== PositionStatus::Open) {
                     return;
                 }
-                $engine->checkPosition($fresh, $price);
+
+                // Clamp the probe price to the SL/TP trigger when it crosses
+                // one. In live, Binance's STOP_MARKET / TAKE_PROFIT_MARKET fills
+                // at the trigger (plus minor slippage); the raw intra-bar
+                // high/low overshoots materially on volatile coins and
+                // exaggerates SL losses well beyond what live would realise.
+                $fillPrice = $price;
+                if ($fresh->side === 'SHORT') {
+                    if ($sl > 0 && $price >= $sl) {
+                        $fillPrice = $sl;
+                    } elseif ($tp > 0 && $price <= $tp) {
+                        $fillPrice = $tp;
+                    }
+                } else { // LONG
+                    if ($sl > 0 && $price <= $sl) {
+                        $fillPrice = $sl;
+                    } elseif ($tp > 0 && $price >= $tp) {
+                        $fillPrice = $tp;
+                    }
+                }
+
+                $replay->setProbePrice($position->symbol, $fillPrice);
+                $engine->checkPosition($fresh, $fillPrice);
             }
         } finally {
             $replay->clearProbePrice($position->symbol);

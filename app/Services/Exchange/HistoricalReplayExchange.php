@@ -50,6 +50,8 @@ class HistoricalReplayExchange implements ExchangeInterface
     private int $fromMs;
     private int $toMs;
 
+    private ?BinanceExchange $realExchange = null;
+
     public function __construct(int $fromMs, int $toMs, ?array $symbolFilter = null)
     {
         $this->fromMs = $fromMs;
@@ -507,6 +509,22 @@ class HistoricalReplayExchange implements ExchangeInterface
 
     public function getMaxLeverage(string $symbol): int
     {
-        return 25;
+        // During backtest we want the same per-symbol caps the live bot
+        // would be subject to; otherwise the replay can size positions at
+        // 25x on symbols Binance only allows 10x/20x on, and the live
+        // trajectory would look nothing like the backtest's.
+        if ($this->realExchange !== null) {
+            try {
+                return $this->realExchange->getMaxLeverage($symbol);
+            } catch (\Throwable) {
+                return 20;
+            }
+        }
+        return 20;
+    }
+
+    public function setRealExchange(BinanceExchange $real): void
+    {
+        $this->realExchange = $real;
     }
 }

@@ -84,7 +84,7 @@ class TradingEngine
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
             try {
-                $slTp = $this->placeBrackets($exchange, $signal->symbol, $entryPrice, $order['quantity'], 'SHORT', $signal->atr);
+                $slTp = $this->placeBrackets($exchange, $signal->symbol, $entryPrice, $order['quantity'], 'SHORT', $signal->atr, $leverage);
             } catch (\Throwable $e) {
                 Log::error('Failed to set SL/TP — closing position for safety', [
                     'symbol' => $signal->symbol,
@@ -363,12 +363,17 @@ class TradingEngine
         // the user-data WS worker reconciles fills back into our DB.
         $isDryRun = (bool) Settings::get('dry_run');
         if ($isDryRun) {
+            // Use the trigger price (not the probe/current price) as the close
+            // fill. In live, Binance's STOP_MARKET / TAKE_PROFIT_MARKET orders
+            // fire at the trigger and market-fill within a few ticks — using
+            // the probe price (e.g. bar high) overshoots the fill and inflates
+            // simulated SL losses, especially with tight leverage-capped SLs.
             if ($this->slHit($position, $currentPrice)) {
-                $this->closePosition($position, $currentPrice, CloseReason::StopLoss);
+                $this->closePosition($position, (float) $position->stop_loss_price, CloseReason::StopLoss);
                 return;
             }
             if ($this->tpHit($position, $currentPrice)) {
-                $this->closePosition($position, $currentPrice, CloseReason::TakeProfit);
+                $this->closePosition($position, (float) $position->take_profit_price, CloseReason::TakeProfit);
                 return;
             }
         }
@@ -1015,7 +1020,7 @@ class TradingEngine
 
         $this->cancelBrackets($exchange, $position);
         try {
-            $slTp = $this->placeBrackets($exchange, $position->symbol, $newAvgEntry, $totalQty, $position->side);
+            $slTp = $this->placeBrackets($exchange, $position->symbol, $newAvgEntry, $totalQty, $position->side, 0.0, $leverage);
         } catch (\Throwable $e) {
             Log::error('Failed to replace SL/TP after add — closing position for safety', [
                 'symbol' => $position->symbol,
@@ -1149,7 +1154,7 @@ class TradingEngine
             $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
 
             try {
-                $slTp = $this->placeBrackets($exchange, $symbol, $entryPrice, $order['quantity'], $newDirection);
+                $slTp = $this->placeBrackets($exchange, $symbol, $entryPrice, $order['quantity'], $newDirection, 0.0, $leverage);
             } catch (\Throwable $e) {
                 Log::error('Reverse: failed to set SL/TP — closing for safety', [
                     'symbol' => $symbol, 'error' => $e->getMessage(),
@@ -1215,9 +1220,9 @@ class TradingEngine
     /**
      * @return array{sl_order_id: ?string, tp_order_id: ?string, sl: float, tp: float}
      */
-    private function placeBrackets(ExchangeInterface $exchange, string $symbol, float $entryPrice, float $quantity, string $side = 'SHORT', float $atr = 0.0): array
+    private function placeBrackets(ExchangeInterface $exchange, string $symbol, float $entryPrice, float $quantity, string $side = 'SHORT', float $atr = 0.0, int $leverage = 1): array
     {
-        $slTp = $this->calculateSlTp($entryPrice, $side, $atr);
+        $slTp = $this->calculateSlTp($entryPrice, $side, $atr, $leverage);
 
         $slOrderId = null;
         $tpOrderId = null;
@@ -1297,7 +1302,7 @@ class TradingEngine
     /**
      * @return array{sl: float, tp: float}
      */
-    private function calculateSlTp(float $entryPrice, string $side = 'SHORT', float $atr = 0.0): array
+    private function calculateSlTp(float $entryPrice, string $side = 'SHORT', float $atr = 0.0, int $leverage = 1): array
     {
         $tpPct = (float) Settings::get('take_profit_pct') ?: 2.0;
         $slPct = (float) Settings::get('stop_loss_pct') ?: 1.0;
@@ -1310,6 +1315,20 @@ class TradingEngine
         // instead of 1% on what might be a 5%-wick chart. TP stays pct-based.
         $useAtr = $atrEnabled && $atr > 0;
         $slOffset = $useAtr ? $atrMult * $atr : $entryPrice * $slPct / 100;
+
+        // Clamp SL inside the liquidation threshold. On ISOLATED margin at
+        // leverage L, liquidation sits at ~entry/L adverse move (ignoring
+        // maintenance margin ~0.4%, which we absorb into the 70% safety
+        // factor). Without this, volatile memecoins (ATR 3%+) can get an SL
+        // placed past their liquidation price — the position liquidates
+        // before the bracket ever fires.
+        if ($leverage > 1) {
+            $liqDistance = $entryPrice / $leverage;
+            $maxSlOffset = $liqDistance * 0.70;
+            if ($slOffset > $maxSlOffset) {
+                $slOffset = $maxSlOffset;
+            }
+        }
 
         if ($side === 'LONG') {
             return [
