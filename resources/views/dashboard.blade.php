@@ -176,7 +176,7 @@
   </div>
   <div class="card" style="padding:12px 12px 6px; margin-bottom:24px;">
     <div id="equity-chart-wrap" style="position:relative; height:220px;">
-      <svg id="equity-chart" width="100%" height="100%" viewBox="0 0 800 220" preserveAspectRatio="none" style="overflow:visible; display:block;"></svg>
+      <svg id="equity-chart" width="100%" height="100%" style="overflow:visible; display:block;"></svg>
       <div id="equity-tooltip" style="position:absolute; display:none; background:#0d1117; border:1px solid #30363d; border-radius:4px; padding:6px 8px; font-size:0.75em; pointer-events:none; white-space:nowrap; z-index:5;"></div>
       <div id="equity-empty" style="display:none; text-align:center; color:#484f58; padding:80px 0;">No snapshots yet — first sample runs every 5 min via scheduler.</div>
     </div>
@@ -1270,6 +1270,20 @@ function setupEquityPills() {
       fetchEquityHistory();
     });
   });
+
+  // Re-render on container resize (window resize, tab switch, devtools toggle).
+  // Without this, viewBox stays frozen at the size measured on first render
+  // and the chart ends up squeezed into a corner of a wider container.
+  const wrap = document.getElementById('equity-chart-wrap');
+  if (wrap && typeof ResizeObserver !== 'undefined') {
+    let rafId = null;
+    const ro = new ResizeObserver(() => {
+      if (!equityPoints.length) return;
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => { rafId = null; renderEquityChart(); });
+    });
+    ro.observe(wrap);
+  }
 }
 
 async function fetchEquityHistory() {
@@ -1295,7 +1309,14 @@ function renderEquityChart() {
   empty.style.display = 'none';
   svg.style.display = 'block';
 
-  const W = 800, H = 220, padL = 56, padR = 12, padT = 12, padB = 24;
+  // Measure the actual rendered size and set viewBox to match pixels so
+  // font sizes and stroke widths stay at their natural (non-stretched) size.
+  const rect = svg.getBoundingClientRect();
+  const W = Math.max(320, Math.round(rect.width));
+  const H = Math.max(140, Math.round(rect.height));
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+
+  const padL = 52, padR = 12, padT = 10, padB = 22;
   const plotW = W - padL - padR, plotH = H - padT - padB;
 
   const times = equityPoints.map(p => p.ts);
@@ -1316,41 +1337,57 @@ function renderEquityChart() {
   const walletLine = linePath(equityPoints.map(p => ({ ts: p.ts, _y: p.wallet_balance })));
   const availLine = linePath(equityPoints.map(p => ({ ts: p.ts, _y: p.available_balance })));
 
-  // Y-axis ticks (5)
+  const walletArea = walletLine + ' L' + xOf(tMax).toFixed(1) + ',' + (padT + plotH).toFixed(1)
+    + ' L' + xOf(tMin).toFixed(1) + ',' + (padT + plotH).toFixed(1) + ' Z';
+
   const yTicks = [];
   for (let i = 0; i <= 4; i++) {
     const v = yMin + ((yMax - yMin) * i) / 4;
     yTicks.push({ v, y: yOf(v) });
   }
 
-  const fmt = (v) => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  const valSpan = yMax - yMin;
+  const decimals = valSpan < 1 ? 3 : valSpan < 10 ? 2 : valSpan < 100 ? 1 : 0;
+  const fmt = (v) => '$' + v.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
   let html = '';
+  html += '<defs>'
+       + '<linearGradient id="wallet-area-grad" x1="0" y1="0" x2="0" y2="1">'
+       + '<stop offset="0%" stop-color="#58a6ff" stop-opacity="0.22"/>'
+       + '<stop offset="100%" stop-color="#58a6ff" stop-opacity="0"/>'
+       + '</linearGradient>'
+       + '</defs>';
+
   yTicks.forEach(t => {
-    html += '<line x1="' + padL + '" y1="' + t.y.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + t.y.toFixed(1) + '" stroke="#21262d" stroke-width="1"/>';
-    html += '<text x="' + (padL - 6) + '" y="' + (t.y + 3).toFixed(1) + '" font-size="10" fill="#8b949e" text-anchor="end">' + fmt(t.v) + '</text>';
+    html += '<line x1="' + padL + '" y1="' + t.y.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + t.y.toFixed(1) + '" stroke="#21262d" stroke-width="1" stroke-dasharray="2,3"/>';
+    html += '<text x="' + (padL - 8) + '" y="' + (t.y + 3).toFixed(1) + '" font-size="10" font-family="-apple-system, BlinkMacSystemFont, sans-serif" fill="#6e7681" text-anchor="end">' + fmt(t.v) + '</text>';
   });
 
-  // X-axis ticks (3 — start, mid, end)
   const xTicks = [tMin, (tMin + tMax) / 2, tMax];
-  xTicks.forEach(t => {
+  xTicks.forEach((t, i) => {
     const x = xOf(t);
     const d = new Date(t * 1000);
     const label = equityRange === '1h' || equityRange === '6h' || equityRange === '24h'
       ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
       : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    html += '<text x="' + x.toFixed(1) + '" y="' + (H - 6) + '" font-size="10" fill="#8b949e" text-anchor="middle">' + label + '</text>';
+    const anchor = i === 0 ? 'start' : i === 2 ? 'end' : 'middle';
+    html += `<text x="${x.toFixed(1)}" y="${H - 6}" font-size="10" font-family="-apple-system, BlinkMacSystemFont, sans-serif" fill="#6e7681" text-anchor="${anchor}">${label}</text>`;
   });
 
-  html += '<path d="' + availLine + '" stroke="#3fb950" stroke-width="1.5" fill="none" opacity="0.85"/>';
-  html += '<path d="' + walletLine + '" stroke="#58a6ff" stroke-width="2" fill="none"/>';
+  html += '<path d="' + walletArea + '" fill="url(#wallet-area-grad)" stroke="none"/>';
+  html += '<path d="' + availLine + '" stroke="#3fb950" stroke-width="1.25" fill="none" opacity="0.9" stroke-linecap="round" stroke-linejoin="round"/>';
+  html += '<path d="' + walletLine + '" stroke="#58a6ff" stroke-width="1.75" fill="none" stroke-linecap="round" stroke-linejoin="round"/>';
 
-  // Transparent hover targets
   equityPoints.forEach((p, i) => {
     html += '<circle cx="' + xOf(p.ts).toFixed(1) + '" cy="' + yOf(p.wallet_balance).toFixed(1) + '" r="8" fill="transparent" data-i="' + i + '"/>';
   });
 
   svg.innerHTML = html;
+
+  // Stash the current projection so the tooltip handler (which runs on later
+  // mouse events) uses these coordinates rather than a stale closure from
+  // an earlier render.
+  svg._proj = { xOf, yOf, W, H };
 
   // Hover tooltip
   const tip = document.getElementById('equity-tooltip');
