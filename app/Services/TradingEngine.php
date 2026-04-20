@@ -580,7 +580,8 @@ class TradingEngine
 
         $exchange = $this->exchange->resolve();
 
-        if ($exitPrice === null) {
+        $callerProvidedExit = $exitPrice !== null;
+        if (! $callerProvidedExit) {
             $exitPrice = $exchange->getPrice($position->symbol);
         }
 
@@ -623,7 +624,18 @@ class TradingEngine
             throw $e;
         }
 
-        $actualExitPrice = $order['price'] > 0 ? $order['price'] : $exitPrice;
+        // In dry-run, honor the caller's trigger-price hint over DryRunExchange's
+        // current-mark return. On a bar that gaps through SL/TP, the mark refetch
+        // lands mid-gap and overstates slippage. Live Binance fires STOP_MARKET /
+        // TAKE_PROFIT_MARKET at the trigger and market-fills within a few ticks —
+        // using the trigger here gets dry-run numbers closer to that reality.
+        // Callers that pass $exitPrice=null (manual close, reverse, expiry) still
+        // fall through to $order['price'] (the fresh mark), unchanged.
+        if ($position->is_dry_run && $callerProvidedExit) {
+            $actualExitPrice = $exitPrice;
+        } else {
+            $actualExitPrice = $order['price'] > 0 ? $order['price'] : $exitPrice;
+        }
 
         return $this->finalizeClose($position, $actualExitPrice, (string) $order['orderId'], $reason);
     }
