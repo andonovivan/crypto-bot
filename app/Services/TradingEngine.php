@@ -449,6 +449,21 @@ class TradingEngine
             : $exchange->closeShort($position->symbol, $closeQty);
 
         $exitPrice = ($order['price'] ?? 0) > 0 ? (float) $order['price'] : $currentPrice;
+
+        // Dry-run only: snap the partial fill to the exact trigger price instead of
+        // the tick-crossing mark. Keeps partial exits consistent with SL/TP (which
+        // also snap to trigger in dry-run) and removes the 0–0.1% bonus that comes
+        // from sampling price right after it crossed the threshold. Live mode uses
+        // the real exchange fill — MARKET slippage there is realistic and wanted.
+        if ($position->is_dry_run) {
+            $triggerPct = (float) Settings::get('partial_tp_trigger_pct');
+            if ($triggerPct > 0) {
+                $exitPrice = $position->side === 'LONG'
+                    ? $position->entry_price * (1 + $triggerPct / 100)
+                    : $position->entry_price * (1 - $triggerPct / 100);
+            }
+        }
+
         $actualCloseQty = (float) ($order['quantity'] ?? $closeQty);
         $exchangeOrderId = (string) ($order['orderId'] ?? '');
 
