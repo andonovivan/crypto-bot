@@ -204,7 +204,7 @@ class DashboardController extends Controller
                 'funding_fee' => $t->funding_fee,
                 'close_reason' => $t->close_reason->value,
                 'is_dry_run' => $t->is_dry_run,
-                'position_size_usdt' => $t->position?->position_size_usdt,
+                'position_size_usdt' => round((float) $t->quantity * (float) $t->entry_price, 4),
                 'leverage' => $t->position?->leverage,
                 'opened_at' => $t->position?->opened_at?->timestamp,
                 'created_at' => $t->created_at->timestamp,
