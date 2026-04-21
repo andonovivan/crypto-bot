@@ -1405,8 +1405,16 @@ function renderEquityChart() {
       const svgRect = svg.getBoundingClientRect();
       const cxClient = svgRect.left + (xOf(p.ts) / W) * svgRect.width;
       const cyClient = svgRect.top + (yOf(p.wallet_balance) / H) * svgRect.height;
-      tip.style.left = (cxClient - rect.left + 10) + 'px';
-      tip.style.top = (cyClient - rect.top - 10) + 'px';
+      const cxRel = cxClient - rect.left;
+      const cyRel = cyClient - rect.top;
+      // Flip tooltip to the left of the cursor if it would overflow the wrap's
+      // right edge. 10px gap either side.
+      const tipW = tip.offsetWidth, tipH = tip.offsetHeight;
+      const flipX = cxRel + tipW + 10 > rect.width;
+      tip.style.left = (flipX ? cxRel - tipW - 10 : cxRel + 10) + 'px';
+      // Clamp vertically so the tooltip never clips above the chart.
+      const topRaw = cyRel - 10;
+      tip.style.top = Math.max(4, Math.min(rect.height - tipH - 4, topRaw)) + 'px';
     });
     c.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
   });
