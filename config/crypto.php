@@ -83,4 +83,21 @@ return [
         'partial_tp_trigger_pct' => (float) env('PARTIAL_TP_TRIGGER_PCT', 1.0),
         'partial_tp_size_pct' => (float) env('PARTIAL_TP_SIZE_PCT', 50.0),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Risk Controls
+    |--------------------------------------------------------------------------
+    | Drawdown circuit breaker: halt new entries when realized P&L over a
+    | rolling window represents >= threshold % of the wallet at window start.
+    | Existing positions continue to be managed (SL/TP/expiry); only new
+    | entries are blocked, for cooldown_hours. Defaults are a conservative
+    | "25% in 24h, pause 24h" — matches a typical trader's risk-off reflex.
+    */
+    'risk' => [
+        'circuit_breaker_enabled' => filter_var(env('CIRCUIT_BREAKER_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
+        'circuit_breaker_drawdown_pct' => (float) env('CIRCUIT_BREAKER_DRAWDOWN_PCT', 25.0),
+        'circuit_breaker_window_hours' => (float) env('CIRCUIT_BREAKER_WINDOW_HOURS', 24),
+        'circuit_breaker_cooldown_hours' => (float) env('CIRCUIT_BREAKER_COOLDOWN_HOURS', 24),
+    ],
 ];

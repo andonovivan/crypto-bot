@@ -60,6 +60,10 @@ class BotBacktest extends Command
             $this->warn('Truncating dry-run positions/trades…');
             Trade::where('is_dry_run', true)->delete();
             Position::where('is_dry_run', true)->delete();
+            // Circuit-breaker state can stick around from a prior run; wipe
+            // it so this backtest starts with a clean risk-control slate.
+            \Illuminate\Support\Facades\Cache::forget('circuit_breaker:cooldown_until');
+            \Illuminate\Support\Facades\Cache::forget('circuit_breaker:measurement_start');
         }
 
         // Process-local overrides — shadow the DB for this PHP process only so the

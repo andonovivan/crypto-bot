@@ -43,6 +43,12 @@ class Settings
 
         'partial_tp_trigger_pct' => ['config' => 'crypto.scalp.partial_tp_trigger_pct', 'type' => 'float', 'label' => 'Partial TP Trigger (%, 0=off)'],
         'partial_tp_size_pct' => ['config' => 'crypto.scalp.partial_tp_size_pct', 'type' => 'float', 'label' => 'Partial TP Size (% of position)'],
+
+        // Risk controls — drawdown circuit breaker
+        'circuit_breaker_enabled' => ['config' => 'crypto.risk.circuit_breaker_enabled', 'type' => 'bool', 'label' => 'Drawdown Circuit Breaker'],
+        'circuit_breaker_drawdown_pct' => ['config' => 'crypto.risk.circuit_breaker_drawdown_pct', 'type' => 'float', 'label' => 'Circuit Breaker Drawdown Threshold (%)'],
+        'circuit_breaker_window_hours' => ['config' => 'crypto.risk.circuit_breaker_window_hours', 'type' => 'float', 'label' => 'Circuit Breaker Window (hours)'],
+        'circuit_breaker_cooldown_hours' => ['config' => 'crypto.risk.circuit_breaker_cooldown_hours', 'type' => 'float', 'label' => 'Circuit Breaker Cooldown (hours)'],
     ];
 
     /** Process-local overrides that shadow the DB for the duration of a single process. */

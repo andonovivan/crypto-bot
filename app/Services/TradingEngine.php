@@ -7,6 +7,8 @@ use App\Enums\PositionStatus;
 use App\Models\Position;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -30,6 +32,21 @@ class TradingEngine
 
         if (Position::open()->where('symbol', $signal->symbol)->exists()) {
             return null;
+        }
+
+        // Drawdown circuit breaker — halt new opens when realized P&L over a
+        // rolling window represents >= threshold % of the wallet at window
+        // start. Existing positions continue to be managed normally; only new
+        // entries are blocked until the cooldown elapses.
+        if ((bool) Settings::get('circuit_breaker_enabled')) {
+            $breaker = $this->checkCircuitBreaker();
+            if ($breaker !== null) {
+                Log::info('Circuit breaker active — skipping entry', array_merge(
+                    ['symbol' => $signal->symbol],
+                    $breaker,
+                ));
+                return null;
+            }
         }
 
         $exchange = $this->exchange->resolve();
@@ -1539,5 +1556,92 @@ class TradingEngine
                 'entry_type' => 'MARKET_FALLBACK',
             ];
         }
+    }
+
+    /**
+     * Drawdown circuit breaker. Returns a descriptor array if new entries
+     * should be blocked, or null otherwise.
+     *
+     * Behaviour:
+     *  - If a cooldown is active (stored as an absolute ISO timestamp in the
+     *    cache), return `{reason: cooldown_active, until: ...}`.
+     *  - Otherwise, sum realized P&L from Trade rows over the last
+     *    `circuit_breaker_window_hours` (bounded below by the last
+     *    cooldown-end timestamp so a post-cooldown re-trip requires *new*
+     *    drawdown, not stale losses in the rolling window).
+     *  - Reconstruct wallet_at_window_start = current_wallet - window_pnl.
+     *    Trip when |window_pnl| / wallet_at_window_start ≥ threshold.
+     *  - On trip, write cooldown_until = now + cooldown_hours (cache forever;
+     *    expiration is checked by timestamp comparison, which keeps this
+     *    backtest-safe under Carbon::setTestNow).
+     *
+     * Cache keys written:
+     *   circuit_breaker:cooldown_until
+     *   circuit_breaker:measurement_start  (set when a cooldown expires)
+     */
+    private function checkCircuitBreaker(): ?array
+    {
+        $cooldownUntilStr = Cache::get('circuit_breaker:cooldown_until');
+        if ($cooldownUntilStr) {
+            $cooldownUntil = Carbon::parse($cooldownUntilStr);
+            if ($cooldownUntil->gt(now())) {
+                return [
+                    'reason' => 'cooldown_active',
+                    'until' => $cooldownUntilStr,
+                ];
+            }
+            // Cooldown just expired. Anchor the new measurement window at the
+            // cooldown-end so trades from before don't keep re-tripping us.
+            Cache::forever('circuit_breaker:measurement_start', $cooldownUntil->toIso8601String());
+            Cache::forget('circuit_breaker:cooldown_until');
+        }
+
+        $windowHours = (float) (Settings::get('circuit_breaker_window_hours') ?: 24);
+        $windowStart = now()->subHours($windowHours);
+
+        $measurementStartStr = Cache::get('circuit_breaker:measurement_start');
+        if ($measurementStartStr) {
+            $measurementStart = Carbon::parse($measurementStartStr);
+            if ($measurementStart->gt($windowStart)) {
+                $windowStart = $measurementStart;
+            }
+        }
+
+        $sumPnl = (float) Trade::where('created_at', '>=', $windowStart)->sum('pnl');
+        if ($sumPnl >= 0) {
+            return null;
+        }
+
+        $currentWallet = (float) $this->exchange->getAccountData()['walletBalance'];
+        $startWallet = $currentWallet + abs($sumPnl);
+        if ($startWallet <= 0) {
+            return null;
+        }
+
+        $thresholdPct = (float) (Settings::get('circuit_breaker_drawdown_pct') ?: 25.0);
+        $drawdownPct = abs($sumPnl) / $startWallet * 100;
+        if ($drawdownPct < $thresholdPct) {
+            return null;
+        }
+
+        $cooldownHours = (float) (Settings::get('circuit_breaker_cooldown_hours') ?: 24);
+        $until = now()->addHours($cooldownHours);
+        Cache::forever('circuit_breaker:cooldown_until', $until->toIso8601String());
+
+        Log::warning('Circuit breaker TRIPPED', [
+            'window_start' => $windowStart->toIso8601String(),
+            'drawdown_pct' => round($drawdownPct, 2),
+            'threshold_pct' => $thresholdPct,
+            'pnl_in_window' => round($sumPnl, 2),
+            'start_wallet' => round($startWallet, 2),
+            'current_wallet' => round($currentWallet, 2),
+            'cooldown_until' => $until->toIso8601String(),
+        ]);
+
+        return [
+            'reason' => 'tripped',
+            'drawdown_pct' => round($drawdownPct, 2),
+            'until' => $until->toIso8601String(),
+        ];
     }
 }

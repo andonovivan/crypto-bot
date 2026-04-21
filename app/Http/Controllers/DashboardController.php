@@ -510,6 +510,11 @@ class DashboardController extends Controller
         Position::truncate();
         \Illuminate\Support\Facades\DB::statement('SET FOREIGN_KEY_CHECKS=1');
 
+        // Any circuit-breaker cooldown was tied to the now-wiped trade
+        // history; clearing it keeps the risk-control state consistent.
+        \Illuminate\Support\Facades\Cache::forget('circuit_breaker:cooldown_until');
+        \Illuminate\Support\Facades\Cache::forget('circuit_breaker:measurement_start');
+
         return response()->json(['ok' => true]);
     }
 
