@@ -514,6 +514,7 @@ class DashboardController extends Controller
         // history; clearing it keeps the risk-control state consistent.
         \Illuminate\Support\Facades\Cache::forget('circuit_breaker:cooldown_until');
         \Illuminate\Support\Facades\Cache::forget('circuit_breaker:measurement_start');
+        \Illuminate\Support\Facades\Cache::forget('circuit_breaker:equity_peak');
 
         return response()->json(['ok' => true]);
     }

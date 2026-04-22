@@ -64,6 +64,7 @@ class BotBacktest extends Command
             // it so this backtest starts with a clean risk-control slate.
             \Illuminate\Support\Facades\Cache::forget('circuit_breaker:cooldown_until');
             \Illuminate\Support\Facades\Cache::forget('circuit_breaker:measurement_start');
+            \Illuminate\Support\Facades\Cache::forget('circuit_breaker:equity_peak');
         }
 
         // Process-local overrides — shadow the DB for this PHP process only so the

@@ -1559,28 +1559,50 @@ class TradingEngine
     }
 
     /**
-     * Drawdown circuit breaker. Returns a descriptor array if new entries
-     * should be blocked, or null otherwise.
+     * Drawdown circuit breaker (v2: equity-peak drawdown).
      *
-     * Behaviour:
-     *  - If a cooldown is active (stored as an absolute ISO timestamp in the
-     *    cache), return `{reason: cooldown_active, until: ...}`.
-     *  - Otherwise, sum realized P&L from Trade rows over the last
-     *    `circuit_breaker_window_hours` (bounded below by the last
-     *    cooldown-end timestamp so a post-cooldown re-trip requires *new*
-     *    drawdown, not stale losses in the rolling window).
-     *  - Reconstruct wallet_at_window_start = current_wallet - window_pnl.
-     *    Trip when |window_pnl| / wallet_at_window_start ≥ threshold.
-     *  - On trip, write cooldown_until = now + cooldown_hours (cache forever;
-     *    expiration is checked by timestamp comparison, which keeps this
-     *    backtest-safe under Carbon::setTestNow).
+     * Signal: current equity (wallet + unrealized on opens) vs trailing peak
+     * equity since the last trip. Trip when drawdown ≥ threshold; on trip,
+     * anchor the peak at current equity so we don't perpetually re-trip on
+     * the same drawdown event. Cooldown blocks new entries for
+     * `circuit_breaker_cooldown_hours`.
      *
-     * Cache keys written:
-     *   circuit_breaker:cooldown_until
-     *   circuit_breaker:measurement_start  (set when a cooldown expires)
+     * Why "v2": the original version measured realized P&L over a rolling
+     * window. Backtests across the Feb 2026 correlated-pump regime showed
+     * that by the time enough losses realized, the damage was already done
+     * and cooldown blocked the mean-reversion entries that would have
+     * recovered some of it. Equity-peak drawdown fires earlier (open-position
+     * losses count), doesn't re-trip on the same event, and removes the
+     * rolling-window bookkeeping.
+     *
+     * `circuit_breaker_window_hours` is now ignored but kept in Settings::KEYS
+     * for backwards compatibility.
+     *
+     * Cache keys:
+     *   circuit_breaker:cooldown_until  — ISO timestamp; trip gate
+     *   circuit_breaker:equity_peak     — float; trailing peak equity
      */
     private function checkCircuitBreaker(): ?array
     {
+        // Current equity = wallet + unrealized P&L on open positions.
+        $account = $this->exchange->getAccountData();
+        $equity = (float) ($account['walletBalance'] ?? 0)
+                + (float) ($account['unrealizedProfit'] ?? 0);
+
+        // Update the trailing peak. Peak tracks the highest equity observed
+        // since the last trip; it rises with gains and is reset to the trough
+        // on trip (see TRIP block below).
+        $peakStr = Cache::get('circuit_breaker:equity_peak');
+        if ($peakStr === null || $equity > (float) $peakStr) {
+            Cache::forever('circuit_breaker:equity_peak', (string) $equity);
+            $peak = $equity;
+        } else {
+            $peak = (float) $peakStr;
+        }
+
+        // Cooldown short-circuit. We still wanted to update the peak above so
+        // that a recovery during cooldown anchors the post-cooldown window at
+        // a sensible high-water mark.
         $cooldownUntilStr = Cache::get('circuit_breaker:cooldown_until');
         if ($cooldownUntilStr) {
             $cooldownUntil = Carbon::parse($cooldownUntilStr);
@@ -1590,51 +1612,33 @@ class TradingEngine
                     'until' => $cooldownUntilStr,
                 ];
             }
-            // Cooldown just expired. Anchor the new measurement window at the
-            // cooldown-end so trades from before don't keep re-tripping us.
-            Cache::forever('circuit_breaker:measurement_start', $cooldownUntil->toIso8601String());
             Cache::forget('circuit_breaker:cooldown_until');
         }
 
-        $windowHours = (float) (Settings::get('circuit_breaker_window_hours') ?: 24);
-        $windowStart = now()->subHours($windowHours);
-
-        $measurementStartStr = Cache::get('circuit_breaker:measurement_start');
-        if ($measurementStartStr) {
-            $measurementStart = Carbon::parse($measurementStartStr);
-            if ($measurementStart->gt($windowStart)) {
-                $windowStart = $measurementStart;
-            }
-        }
-
-        $sumPnl = (float) Trade::where('created_at', '>=', $windowStart)->sum('pnl');
-        if ($sumPnl >= 0) {
-            return null;
-        }
-
-        $currentWallet = (float) $this->exchange->getAccountData()['walletBalance'];
-        $startWallet = $currentWallet + abs($sumPnl);
-        if ($startWallet <= 0) {
+        if ($peak <= 0) {
             return null;
         }
 
         $thresholdPct = (float) (Settings::get('circuit_breaker_drawdown_pct') ?: 25.0);
-        $drawdownPct = abs($sumPnl) / $startWallet * 100;
+        $drawdownPct = ($peak - $equity) / $peak * 100;
         if ($drawdownPct < $thresholdPct) {
             return null;
         }
 
+        // TRIP: set cooldown and anchor the peak at current equity (trough) so
+        // post-cooldown re-trip requires *new* drawdown, not the same one.
         $cooldownHours = (float) (Settings::get('circuit_breaker_cooldown_hours') ?: 24);
         $until = now()->addHours($cooldownHours);
         Cache::forever('circuit_breaker:cooldown_until', $until->toIso8601String());
+        Cache::forever('circuit_breaker:equity_peak', (string) $equity);
 
-        Log::warning('Circuit breaker TRIPPED', [
-            'window_start' => $windowStart->toIso8601String(),
+        Log::warning('Circuit breaker TRIPPED (v2: equity drawdown)', [
+            'peak' => round($peak, 4),
+            'current_equity' => round($equity, 4),
             'drawdown_pct' => round($drawdownPct, 2),
             'threshold_pct' => $thresholdPct,
-            'pnl_in_window' => round($sumPnl, 2),
-            'start_wallet' => round($startWallet, 2),
-            'current_wallet' => round($currentWallet, 2),
+            'wallet' => round((float) ($account['walletBalance'] ?? 0), 4),
+            'unrealized' => round((float) ($account['unrealizedProfit'] ?? 0), 4),
             'cooldown_until' => $until->toIso8601String(),
         ]);
 
