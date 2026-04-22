@@ -198,7 +198,15 @@ class ShortScanner
 
     private function getCachedKlines(string $symbol): ?array
     {
-        $now = microtime(true);
+        // Sim-time clock, not wall-clock. In live runs Carbon::now() == real
+        // time; in backtests it's Carbon::setTestNow() driven by the replay
+        // loop, so the TTL expires at deterministic sim-tick boundaries
+        // instead of drifting with wall-clock. Using microtime() here caused
+        // non-reproducible backtests: two identical runs could serve
+        // different klines for the same sim-tick depending on how fast the
+        // wall clock happened to advance (cf. the 6× variance seen across
+        // overnight baseline-a/b/c replicates).
+        $now = \Illuminate\Support\Carbon::now()->getTimestamp();
 
         if (isset($this->klineCache[$symbol])) {
             $cached = $this->klineCache[$symbol];
