@@ -16,9 +16,10 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 - App runs migrations; bot/scheduler/ws-worker/ws-user-data wait for app to start first
 
 ### Exchange Abstraction
-- `ExchangeInterface` — contract for all exchange operations
+- `ExchangeInterface` — contract for all exchange operations. Covers orders/price/kline reads (`getPrice`, `getKlines`, `getFuturesTickers`, `getOrderBookTop`), orders (`openShort`/`openShortLimit`/`openLong`/close variants, `setStopLoss`, `setTakeProfit`), order lifecycle (`getOrderStatus`, `cancelOrder`, `cancelOrders`, `cancelAlgoOrder`, `getAlgoOrderStatus`), account state (`getAccountData`, `getBalance`, `getOpenPositions`, `getCommissionRate`, `getFundingRates`, `getMaxLeverage`, `getUserTrades`), and the user-data listenKey lifecycle (`createListenKey`, `keepAliveListenKey`, `closeListenKey`).
 - `BinanceExchange` — real Binance Futures API (HMAC-SHA256 signed requests)
 - `DryRunExchange` — wraps real exchange for market data, simulates trades in DB
+- `HistoricalReplayExchange` — offline backtest exchange. Loads `kline_history` rows into memory, services `getPrice` / `getKlines` / `getFuturesTickers` against a movable clock (`setClock($unixMs)`), synthesizes order-book top from the current price (±1bp), and stubs out order placement / `getOrderStatus` / listenKey as no-ops. Uses the same DB `Position`/`Trade` rows (with `is_dry_run=true`) so account balance and open-position tracking match DryRunExchange. **Only used during `bot:backtest`** — bound into the container via `app()->instance(ExchangeInterface::class, $replay)`. See the Backtest Harness section.
 - `ExchangeDispatcher` — implements `ExchangeInterface` and is the binding for `ExchangeInterface::class` in the container. On every call it reads `Settings::get('dry_run')` and delegates to either the live or dry instance. This makes the dashboard `dry_run` toggle effective at the next bot cycle without a container restart.
 - **CAUTION**: flipping `dry_run` while positions are open will route their closes to the newly-active exchange (which won't know about them). **Close all open positions before toggling.**
 - **Account data**: `getAccountData()` returns wallet balance, available balance, unrealized profit, margin balance, position margin, maintenance margin
@@ -58,12 +59,15 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
    - Current price (close of last closed candle) < EMA fast
    - **Last N CLOSED 15m candles are red** (close < open) — where N = `min_red_candles` (default 2). Checks `candles[last-1]` and `candles[last-2]`, not the in-progress candle. Filters dead-cat-bounce setups.
    - Candle body of last closed candle <= `max_candle_body_pct` (default 3%) — skips frenzied volatility
-4. **Funding guard**: current funding rate >= -0.05% (avoid paying heavy funding against us)
-5. **Capacity gates**: trading not paused, global `max_positions` not hit, no open position on this symbol, cooldown cleared
+4. **Higher-timeframe confirmation** (conditional, `htf_filter_enabled=true` by default): 1h close < 1h EMA (period `htf_ema_period`, default 21). Fetches `htf_ema_period + 5` 1h klines via `checkHigherTfDowntrend()`. **Fails open** — if the 1h fetch errors or returns too few bars, the filter passes. Rationale: a 15m setup that looks weak on a coin still in a 1h uptrend tends to be a bounce-top that gets bought back into.
+5. **Funding guard**: current funding rate >= -0.05% (avoid paying heavy funding against us)
+6. **Capacity gates**: trading not paused, global `max_positions` not hit, no open position on this symbol, post-close cooldown cleared (`cooldown_minutes`), post-failure cooldown cleared (`failed_entry_cooldown_minutes`, default 360 = 6h — prevents re-probing a symbol whose last entry was rejected by Binance)
+7. **Circuit breaker** (conditional, `circuit_breaker_enabled=false` by default): if tripped, block new entries until cooldown expires. See the Risk Controls section below.
 
 **Exit criteria:**
 - TP hit: `entry × (1 - take_profit_pct / 100)` — for SHORT, TP is BELOW entry (default 2% below)
-- SL hit: `entry × (1 + stop_loss_pct / 100)` — for SHORT, SL is ABOVE entry (default 1% above)
+- SL hit: `entry × (1 + stop_loss_pct / 100)` — for SHORT, SL is ABOVE entry (default 1% above). When `atr_sl_enabled=true` (default), SL distance uses `atr_sl_multiplier × ATR14` instead of a fixed pct, clamped to `(entry / leverage) × 0.70` so the stop can't sit past liquidation. TP stays pct-based regardless.
+- **Partial take-profit** (conditional, `partial_tp_trigger_pct > 0`, default 1%): once the position is favorable by `partial_tp_trigger_pct`, `TradingEngine::maybeTakePartialTp()` closes `partial_tp_size_pct` (default 50%) at MARKET, sets `Position.partial_tp_taken=true` so it can't re-fire, and leaves the remainder under the existing SL/TP brackets (`reduceOnly=true` auto-scales to remaining qty). Runs on every `checkPosition()` tick.
 - Expiry: `max_hold_minutes` (default 120 = 2h)
 
 **Risk sizing at 25x leverage (default):**
@@ -74,12 +78,29 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 - Practical concurrent cap: ~9-10 positions at 10% margin each exhausts available balance; `max_positions=10` is effectively the ceiling
 - The engine's `availableBalance >= margin` guard prevents over-commit
 
-**Cooldown:** `cooldown_minutes` (default 120 = 2h) after any close on same symbol.
+**Cooldown:** `cooldown_minutes` (default 120 = 2h) after any close on same symbol. `failed_entry_cooldown_minutes` (default 360 = 6h) after any `status=Failed` row on same symbol.
+
+### Risk Controls
+
+**Drawdown circuit breaker** (`circuit_breaker_enabled`, default `false`):
+
+Evaluated at every `TradingEngine::openShort()` call — gates entries only, already-open positions continue to be managed normally.
+
+- **Equity** = `walletBalance + sum(unrealized_pnl on open positions)`.
+- **Peak** = rolling high-water mark, persisted in cache key `circuit_breaker:equity_peak`. Updated on every check; anchored to the trough when the breaker trips.
+- **Drawdown** = `(peak - equity) / peak × 100`.
+- **Trip condition**: `drawdown >= circuit_breaker_drawdown_pct` (default 25%) → write `circuit_breaker:cooldown_until = now + circuit_breaker_cooldown_hours` (default 24h) and block new entries.
+- **Short-circuit**: while `cooldown_until > now()`, `openShort()` returns early.
+- **Clock reset**: cache key `circuit_breaker:measurement_start` is a v1 remnant — set by older code paths but not consulted by the current detector; safe to ignore but not yet removed.
+- `circuit_breaker_window_hours` exists in `Settings::KEYS` for backwards compat but is **not read** by the v2 detector. Only the drawdown-and-cooldown pair matters.
+- `bot:backtest --truncate` clears all three cache keys so the backtest starts with a clean risk-control slate.
 
 ### Scanner (ShortScanner)
 - **One-shot ticker scan**: `getCandidates()` calls `getFuturesTickers()` once per cycle, filters by pump/dump threshold + min_volume, returns `ShortCandidate[]` sorted by absolute 24h change
-- **Per-candidate klines**: `analyze15m(symbol)` fetches 30 15m candles (with 15s in-memory cache), returns `ShortAnalysis` with EMA/candle/funding data + Strict-rule verdict
-- **Kline cache**: 15-second TTL in-memory cache prevents duplicate API calls within same loop iteration
+- **Per-candidate klines**: `analyze15m(symbol)` fetches 30 15m candles (with 15s in-memory cache), returns `ShortAnalysis` with EMA fast/slow, candle state, funding rate, ATR14 (for ATR-based SL sizing), 1h HTF confirmation, downtrendOk flag, and blocked reason
+- **HTF confirmation**: when `htf_filter_enabled=true`, `checkHigherTfDowntrend()` fetches `htf_ema_period + 5` 1h klines and returns `close[last] < EMA[last]`. Fails open on fetch error
+- **ATR calculation**: `TechnicalAnalysis::calculateATR(klines, 14)` is computed from the same 15m klines and attached to `ShortAnalysis.atr` — consumed by `TradingEngine::placeBrackets()` for ATR-based SL sizing
+- **Kline cache**: 15-second TTL in-memory cache prevents duplicate API calls within same loop iteration. Keyed on `Carbon::now()` (sim-time aware) so the cache expires at deterministic tick boundaries during backtests instead of drifting with wall-clock.
 
 ### Position Management (SHORT-only)
 - **SHORT entry**: `TradingEngine::openShort(ShortSignal)` — calculates qty from margin × leverage / entry price, places SHORT via `placeEntryOrder()`, then STOP_MARKET SL + TAKE_PROFIT_MARKET TP brackets
@@ -107,15 +128,16 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 |------|---------|
 | `app/Services/ShortScanner.php` | Scans all USDT perps, filters pump/dump candidates, Strict 15m downtrend check |
 | `app/Services/ShortCandidate.php` | Readonly DTO: `{symbol, price, priceChangePct, volume, reason}` (pump/dump) |
-| `app/Services/ShortAnalysis.php` | Readonly DTO: EMA fast/slow, candle state, funding rate, downtrendOk, blockedReason |
-| `app/Services/ShortSignal.php` | Lightweight DTO for `TradingEngine::openShort` |
-| `app/Services/TechnicalAnalysis.php` | EMA calculations |
-| `app/Services/TradingEngine.php` | SHORT open/close/checkPosition (dry-run SL/TP trigger + live expiry), `placeEntryOrder` (post-only → MARKET fallback), `reconcileFillFromStream` / `reconcileMissingPosition` / `reconcileFromBrackets` / `finalizeClose` (live reconciliation paths), manual add/reverse helpers |
-| `app/Services/Settings.php` | DB-first settings with config fallback |
+| `app/Services/ShortAnalysis.php` | Readonly DTO: EMA fast/slow, candle state, funding rate, ATR, HTF verdict, downtrendOk, blockedReason |
+| `app/Services/ShortSignal.php` | Lightweight DTO for `TradingEngine::openShort` (includes `atr` for ATR-based SL sizing) |
+| `app/Services/TechnicalAnalysis.php` | EMA + ATR14 calculations |
+| `app/Services/TradingEngine.php` | SHORT open/close/checkPosition (dry-run SL/TP trigger + live expiry), `placeEntryOrder` (post-only → MARKET fallback), `placeBrackets` (ATR-based or pct-based SL), `maybeTakePartialTp` (scale-out at `partial_tp_trigger_pct`), `reconcileFillFromStream` / `reconcileMissingPosition` / `reconcileFromBrackets` / `finalizeClose` (live reconciliation paths), drawdown circuit-breaker check, manual add/reverse helpers |
+| `app/Services/Settings.php` | DB-first settings with config fallback. `override($key, $value)` / `clearOverrides()` shadow the DB for this PHP process only — used by `bot:backtest` to flip `dry_run=true` and apply per-run tuning without stomping on live shared state. |
 | `app/Services/FundingSettlementService.php` | 8h funding rate settlement for open positions |
 | `app/Services/Exchange/ExchangeInterface.php` | Contract for all exchange operations |
 | `app/Services/Exchange/BinanceExchange.php` | Binance Futures API (LONG + SHORT) |
 | `app/Services/Exchange/DryRunExchange.php` | Paper trading simulation |
+| `app/Services/Exchange/HistoricalReplayExchange.php` | Offline replay exchange for `bot:backtest` — serves `kline_history` rows against a movable clock, stubs out order APIs, writes DB rows with `is_dry_run=true`. Supports fixed-sizing mode (`setFixedSizing`) and symbol-scoped probe prices (`setProbePrice`/`clearProbePrice`) for intra-bar SL/TP simulation. |
 | `app/Services/Exchange/ExchangeDispatcher.php` | Runtime router: reads `Settings::get('dry_run')` on each call, delegates to live or dry |
 | `app/Http/Controllers/DashboardController.php` | All API endpoints |
 | `resources/views/dashboard.blade.php` | Single-page dark theme dashboard |
@@ -125,6 +147,8 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 | `app/Console/Commands/BotWsUserData.php` | Long-running WebSocket worker for Binance user-data stream — reconciles SL/TP fills via `ORDER_TRADE_UPDATE` events |
 | `app/Console/Commands/BotSnapshotBalance.php` | One-shot command that writes a `BalanceSnapshot` row from `getAccountData()`. Scheduled every 5 min for the equity-curve widget. |
 | `app/Console/Commands/BotStatus.php` | CLI status overview |
+| `app/Console/Commands/BotBacktest.php` | Replays `kline_history` rows through the live `ShortScanner` + `TradingEngine` code using `Carbon::setTestNow` + `HistoricalReplayExchange`. Same code path as live, so backtest results track live behavior. |
+| `app/Console/Commands/BotDownloadHistory.php` | Downloads monthly 15m + 1h kline zips from `data.binance.vision`, upserts into `kline_history`. Prerequisite for `bot:backtest`. |
 | `app/Models/BalanceSnapshot.php` | Equity-curve sample rows: `wallet_balance`, `available_balance`, `margin_balance`, `position_margin`, `open_positions`, `is_dry_run`, `created_at`. `$timestamps=false` (explicit `created_at` only). |
 | `bootstrap/app.php` | CSRF exemption for `api/*` routes |
 | `config/crypto.php` | Default config values |
@@ -161,6 +185,33 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 | `min_red_candles` | 2 | Minimum consecutive closed 15m red candles required (1 = old behavior, 2 = default, 3 = conservative) |
 | `use_post_only_entry` | true | Attempt LIMIT maker entry at best ask; fall back to MARKET on timeout/rejection |
 | `limit_order_timeout_seconds` | 3 | Poll window for post-only fill before MARKET fallback |
+| `failed_entry_cooldown_minutes` | 360 | Post-failure cooldown per symbol (6h) — skip symbols whose last entry was rejected by the exchange |
+
+### Higher-Timeframe Filter
+| Key | Default | Description |
+|-----|---------|-------------|
+| `htf_filter_enabled` | true | Require 1h close below 1h EMA before opening a SHORT |
+| `htf_ema_period` | 21 | EMA period on the 1h timeframe |
+
+### ATR-Based Stop Loss
+| Key | Default | Description |
+|-----|---------|-------------|
+| `atr_sl_enabled` | true | Use `atr_sl_multiplier × ATR14` for SL distance instead of `stop_loss_pct`. Clamped to `(entry / leverage) × 0.70` to avoid liquidation-side stops. TP stays pct-based. |
+| `atr_sl_multiplier` | 1.5 | ATR multiplier for SL offset |
+
+### Partial Take-Profit
+| Key | Default | Description |
+|-----|---------|-------------|
+| `partial_tp_trigger_pct` | 1.0 | Scale-out trigger (% favorable). `0` disables. |
+| `partial_tp_size_pct` | 50.0 | % of position qty to close at the trigger (remainder stays under the original TP/SL brackets) |
+
+### Risk Controls
+| Key | Default | Description |
+|-----|---------|-------------|
+| `circuit_breaker_enabled` | false | Gate new entries when realized+unrealized drawdown breaches the threshold |
+| `circuit_breaker_drawdown_pct` | 25.0 | Peak-to-trough drawdown % that trips the breaker |
+| `circuit_breaker_cooldown_hours` | 24 | How long to block new entries after a trip |
+| `circuit_breaker_window_hours` | 24 | Legacy v1 setting — present in `Settings::KEYS` for backwards compat, not read by the current detector |
 
 ## API Endpoints
 
@@ -181,13 +232,15 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 
 ## Database (MariaDB 11)
 
-**Tables**: `positions`, `trades`, `balance_snapshots`, `bot_settings`, `cache`, `jobs`, `users`
+**Tables**: `positions`, `trades`, `balance_snapshots`, `bot_settings`, `kline_history`, `cache`, `jobs`, `users`
+
+**`kline_history`** (populated by `bot:download-history`, read by `HistoricalReplayExchange`): composite PK `(symbol, interval, open_time)`; columns `open`/`high`/`low`/`close` as `DECIMAL(25,12)`, `volume`/`quote_volume` as `DECIMAL(30,12)`, plus `close_time` (bigint ms) and `trade_count` (int). `interval` is stored as the Binance string literal (`15m`, `1h`) to match the API. Upserted in 1000-row batches during download. Storing both 15m (entry/exit timeframe) and 1h (HTF filter) rows in one table keeps the replay loader trivial.
 
 **Enums**:
 - `PositionStatus`: Open, Closed, Expired, StoppedOut, Failed
 - `CloseReason`: TakeProfit, StopLoss, Expired, Manual, Reversed
 
-**Failed positions**: `Position` rows with `status=Failed` + `error_message` surface entry rejections (Binance refused the order, bracket placement failed, etc.) so they're visible in the dashboard rather than log-only. `Position::open()` scope excludes them, so they don't count toward `max_positions` or the one-per-symbol invariant. Written by `TradingEngine::recordFailedEntry()` from both the `placeEntryOrder` exception path and the post-entry/bracket-failure path (including the "UNPROTECTED — close also failed" case).
+**Failed positions**: `Position` rows with `status=Failed` + `error_message` surface entry rejections (Binance refused the order, bracket placement failed, etc.) so they're visible in the dashboard rather than log-only. `Position::open()` scope excludes them, so they don't count toward `max_positions` or the one-per-symbol invariant. Written by `TradingEngine::recordFailedEntry()` from both the `placeEntryOrder` exception path and the post-entry/bracket-failure path (including the "UNPROTECTED — close also failed" case). A Failed row also blocks new entries on the same symbol for `failed_entry_cooldown_minutes` (default 6h).
 
 ## Development Commands
 
@@ -199,6 +252,21 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 ./develop art <cmd>      # Run artisan command
 ./develop bash           # Shell into app container
 ./develop status         # Show bot status
+```
+
+Backtest workflow (see the Backtest Harness section for details):
+
+```bash
+# 1. Populate kline_history (monthly zips from data.binance.vision)
+./develop art bot:download-history --months=6                    # all USDT perps, last 6 completed months
+./develop art bot:download-history --months=1 --symbols=BTCUSDT  # single symbol
+./develop art bot:download-history --months=6 --skip-existing    # resume without re-downloading
+
+# 2. Run a backtest
+./develop art bot:backtest --from=2026-01-01 --to=2026-04-01 --truncate
+./develop art bot:backtest --from=2026-01-01 --fixed-sizing       # flat sizing, no compounding
+./develop art bot:backtest --from=2026-01-01 \
+    --override=stop_loss_pct=1.5 --override=atr_sl_enabled=false  # per-run tuning
 ```
 
 ## Performance & Reliability
@@ -224,6 +292,59 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 - **DryRun balance**: `walletBalance = starting_balance + Trade::sum('pnl') + Trade::sum('funding_fee') + open Position::sum('funding_fee')`. Margin = `position_size_usdt / leverage`.
 - **Dynamic sizing**: `openShort()` calculates notional from `walletBalance × (position_size_pct / 100) × leverage` at trade time. Verifies `availableBalance >= margin` before placing orders.
 
+## Backtest Harness
+
+Replays historical 15m + 1h klines through the **actual** `ShortScanner` + `TradingEngine` code — no reimplementation. This keeps backtest results honest to live behavior: if a change passes backtest, the same code is what runs in production.
+
+### Pipeline
+
+1. **`bot:download-history`** populates `kline_history` from `data.binance.vision` monthly zips.
+   - Flags: `--months=N` (default 1, fetches most recent N completed calendar months), `--symbols=BTCUSDT,ETHUSDT` (default: all USDT perps from current exchangeInfo), `--skip-existing` (skip `(symbol, interval, month)` combos that already have rows).
+   - Downloads both `15m` and `1h` intervals per symbol. `15m` drives entry/exit decisions; `1h` drives the HTF filter.
+   - Uses `unzip` shell-out on the downloaded zip, then batched (1000-row) DB upsert on `(symbol, interval, open_time)`. 404s on a `(symbol, month)` combo (symbol didn't exist yet) are counted as `missing` and don't error out.
+
+2. **`bot:backtest`** runs the replay.
+   - Flags: `--from=YYYY-MM-DD` (required), `--to=YYYY-MM-DD` (default from+30d, exclusive), `--symbols=...` (default: all loaded), `--starting-balance=10000`, `--fixed-sizing`, `--truncate`, `--override=key=value` (repeatable; accepts any `Settings::KEYS` entry with automatic type coercion).
+   - `--truncate` wipes all `is_dry_run=true` `Position` + `Trade` rows and clears the three `circuit_breaker:*` cache keys so the run starts clean.
+   - Always forces `Settings::override('dry_run', true)` + `trading_paused=false` + the supplied starting balance. DB `bot_settings` rows aren't touched — the live container keeps its own state.
+
+### Replay loop
+
+- `HistoricalReplayExchange::__construct($fromMs, $toMs, $symbolFilter)` loads all 15m + 1h rows into memory. Lead-in: **200 × 15m bars** (~50h) before `$fromMs` so the scanner has room for EMA/ATR warm-up and 24h rolling aggregates on the very first tick; **50 × 1h bars** for the HTF EMA21. Per-symbol `open_times` arrays are pre-sorted for O(log n) binary search on clock lookup.
+- The driver ticks the clock in 15-minute increments: `$replay->setClock($ms)` + `Carbon::setTestNow($ts)`. The scanner's sim-time kline cache expires at tick boundaries, so repeated runs are deterministic.
+- Each tick:
+  1. `FundingSettlementService::settleFunding()` — but `HistoricalReplayExchange::getFundingRates()` returns `[]`, so funding is effectively zero during backtests (stubbed; noted as off-by-a-few-bps on long holds).
+  2. For every open `is_dry_run=true` position, call `tickPosition()` to probe intra-bar SL/TP via the 15m bar's high/low.
+  3. `scanForEntries()` — runs `ShortScanner::getCandidates()`, applies cheap gates (cooldown, failed-entry cooldown, max_positions, one-per-symbol), then `analyze15m()` + `TradingEngine::openShort()` on the winners.
+
+### Intra-bar SL/TP probe
+
+A close-only exit check misses wicks that fill SL/TP mid-bar. `tickPosition()` walks three probe prices per bar using a color heuristic:
+- **Red bar** (`c < o`): probe high → low → close (assumes the wick up happened before the sell-off).
+- **Green bar** (`c >= o`): probe low → high → close.
+
+Each probe price is clamped to the SL or TP trigger if it crosses — raw intra-bar extremes overshoot materially on volatile pumpers and would systematically exaggerate losses. `HistoricalReplayExchange::setProbePrice($symbol, $fillPrice)` installs a symbol-scoped override so any `closePosition()` triggered by `checkPosition()` executes at the trigger price; `clearProbePrice()` restores normal price lookup. Between probes the code re-reads the `Position` row and bails if it's no longer `Open` — the same idempotency guard used in live.
+
+### Fixed-sizing vs compounding
+
+- Default (compounding): wallet balance accumulates realized P&L + funding, so per-trade margin grows/shrinks with the equity curve — closer to live behavior but distorts per-trade-stats analysis (later trades in a winning run are sized larger).
+- `--fixed-sizing`: `HistoricalReplayExchange::getAccountData()` returns `walletBalance = starting_balance` regardless of running P&L. `Trade.pnl` still accumulates normally, so the summary prints a correct realized total via `startingBalance + sum(pnl) + sum(funding)`. Use this when comparing strategy variants or measuring per-trade edge.
+
+### End-of-run cleanup
+
+Positions still open at the final simulated bar are force-closed via `forceCloseStragglers()` with `CloseReason::Expired`. Without this, the live bot container (which shares the DB and sees `is_dry_run=true` rows) would later close them at TODAY's price vs the backtest's entry price, skewing stats by orders of magnitude on any symbol that has since drifted. If a straggler has no price data at the final bar, it's marked Expired without a `Trade` row to keep the DB consistent.
+
+### Leverage realism
+
+`HistoricalReplayExchange::getMaxLeverage($symbol)` delegates to the real `BinanceExchange` (injected via `setRealExchange()`), so a backtest can't size 25x on symbols that Binance caps at 10x/20x. If the real lookup fails, it falls back to 20x. This keeps the replay trajectory from diverging from what live would actually accept.
+
+### Known limitations
+
+- Funding is zeroed (no historical funding data in `kline_history`).
+- Post-only limit entries assume immediate fill at limit — no maker queue simulation.
+- Order-book top is synthesized from the current price (±1bp), so post-only spreads are artificial.
+- `calculateQuantity()` uses generic 6-decimal rounding instead of live LOT_SIZE.
+
 ## Dashboard
 
 Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
@@ -240,7 +361,7 @@ Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
   - **Manual SHORT open**: Symbol dropdown (populated from candidates) + Open SHORT button (direction is always SHORT)
   - **Auto-refresh**: Every 15s when the Scanner tab is visible; pauses when tab is backgrounded
 - **Trade History tab**: Symbol (with side/leverage/DRY badge), entry/exit price, realized P&L, P&L%, size, fees (with funding breakdown), close reason, opened/closed time. Above the trade table, a red-bordered **Failed Entries** block renders `Position` rows with `status=Failed` (last 50) — shows symbol, size, `error_message`, time. Only rendered when failed entries exist.
-- **Settings tab**: All 19 runtime-configurable settings, auto-populated from `Settings::all()`
+- **Settings tab**: All runtime-configurable settings (34 keys across generic trading, short-scalp strategy, HTF filter, ATR SL, partial TP, and risk controls), auto-populated from `Settings::all()`
 - **Formatting**: Thousand separators on dollar amounts, subscript notation for micro-prices, inline color styling for P&L values
 
 ## Known Issues & Gotchas
@@ -255,3 +376,6 @@ Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
 - **Live trading readiness**: Per-order cancellation ensures closing one position doesn't destroy other symbols' orders. Fail-safe on open ensures no unprotected positions. Reconciliation converges through multiple paths (ws stream, safety poll, manual close) — all guarded by `status !== Open` refresh checks so idempotency holds.
 - **LONG positions**: The bot never auto-opens LONG positions. A LONG can only exist if created manually via the `Reverse` button (SHORT → LONG). `checkPosition`/`closePosition`/`calculatePnl` still handle both sides for these manually-created positions.
 - **`dry_run` toggle caveat**: `ExchangeDispatcher` reads the setting on every call, so flipping the dashboard toggle takes effect on the next bot cycle. **But open positions are tied to whichever exchange created them** (real orders on Binance vs DB-only rows with `is_dry_run=true`). Flipping mid-flight routes close orders to the wrong side. **Always close all open positions before toggling `dry_run`.**
+- **Backtest shares the dry-run DB**: `bot:backtest` writes `is_dry_run=true` `Position` + `Trade` rows. If the `bot` container is also running in dry-run mode, it will see those rows and try to manage them — including closing backtest stragglers at today's price. Safest workflow: `./develop stop bot ws-worker ws-user-data` before a backtest, or always pass `--truncate` and let `forceCloseStragglers()` flatten everything at the final simulated bar. The bigger equity-curve widget on the dashboard will also mix live and backtest history (both are `is_dry_run=true` samples); the range pills or a manual `balance_snapshots` purge are the only separators.
+- **HTF filter fails open**: if the 1h kline fetch errors or returns fewer than `htf_ema_period + 1` bars, `checkHigherTfDowntrend()` returns `true` — the filter is permissive on data gaps rather than restrictive. Backtests inherit this: a symbol with spotty 1h history will pass HTF even when the 15m state alone wouldn't justify an entry.
+- **ATR SL default is ON**: `atr_sl_enabled=true` out of the box, so `stop_loss_pct` is only consulted as a fallback when ATR data is unavailable or the setting is flipped off. When tuning the fixed-pct SL, also flip `atr_sl_enabled=false` (or pass `--override=atr_sl_enabled=false` to `bot:backtest`) or the change will be silently ignored.
