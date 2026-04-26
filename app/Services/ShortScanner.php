@@ -25,8 +25,10 @@ class ShortScanner
     public function getCandidates(): array
     {
         $pumpThreshold = (float) Settings::get('pump_threshold_pct') ?: 25.0;
+        $pumpMax = (float) Settings::get('pump_max_pct'); // 0 = no upper cap
         $dumpThreshold = (float) Settings::get('dump_threshold_pct') ?: 10.0;
         $minVolume = (float) Settings::get('min_volume_usdt') ?: 10_000_000;
+        $maxVolume = (float) Settings::get('max_volume_usdt'); // 0 = no upper cap
 
         try {
             $tickers = $this->exchange->getFuturesTickers();
@@ -45,9 +47,12 @@ class ShortScanner
             if (! $symbol || $price <= 0 || $volume < $minVolume) {
                 continue;
             }
+            if ($maxVolume > 0 && $volume > $maxVolume) {
+                continue;
+            }
 
             $reason = null;
-            if ($changePct >= $pumpThreshold) {
+            if ($changePct >= $pumpThreshold && ($pumpMax <= 0 || $changePct <= $pumpMax)) {
                 $reason = 'pump';
             } elseif ($changePct <= -$dumpThreshold) {
                 $reason = 'dump';
@@ -127,21 +132,32 @@ class ShortScanner
             $higherTfDowntrendOk = $this->checkHigherTfDowntrend($symbol, $htfEmaPeriod);
         }
 
+        // Strict downtrend confirmation toggle. When false, only the
+        // funding-rate guard applies — the bot enters immediately at the
+        // pump/dump threshold cross. Used by the wide-SL trailing strategy.
+        $strict = (bool) Settings::get('strict_downtrend_enabled');
+
         $blocked = null;
-        if (! ($emaFastNow < $emaSlowNow)) {
-            $blocked = 'EMA not down (current)';
-        } elseif (! ($emaFastPrev < $emaSlowPrev)) {
-            $blocked = 'EMA just crossed (prior candle up)';
-        } elseif (! ($currentPrice < $emaFastNow)) {
-            $blocked = 'Price above fast EMA';
-        } elseif ($redCount < $minRedCandles) {
-            $blocked = "Red candles {$redCount}/{$minRedCandles}";
-        } elseif ($bodyPct > $maxBodyPct) {
-            $blocked = "Candle body {$this->fmt($bodyPct)}% > {$maxBodyPct}%";
-        } elseif ($fundingRate !== null && $fundingRate < self::FUNDING_MIN_RATE) {
-            $blocked = 'Funding rate too negative';
-        } elseif (! $higherTfDowntrendOk) {
-            $blocked = '1h close above 1h EMA';
+        if ($strict) {
+            if (! ($emaFastNow < $emaSlowNow)) {
+                $blocked = 'EMA not down (current)';
+            } elseif (! ($emaFastPrev < $emaSlowPrev)) {
+                $blocked = 'EMA just crossed (prior candle up)';
+            } elseif (! ($currentPrice < $emaFastNow)) {
+                $blocked = 'Price above fast EMA';
+            } elseif ($redCount < $minRedCandles) {
+                $blocked = "Red candles {$redCount}/{$minRedCandles}";
+            } elseif ($bodyPct > $maxBodyPct) {
+                $blocked = "Candle body {$this->fmt($bodyPct)}% > {$maxBodyPct}%";
+            } elseif ($fundingRate !== null && $fundingRate < self::FUNDING_MIN_RATE) {
+                $blocked = 'Funding rate too negative';
+            } elseif (! $higherTfDowntrendOk) {
+                $blocked = '1h close above 1h EMA';
+            }
+        } else {
+            if ($fundingRate !== null && $fundingRate < self::FUNDING_MIN_RATE) {
+                $blocked = 'Funding rate too negative';
+            }
         }
 
         return new ShortAnalysis(

@@ -375,6 +375,12 @@ class TradingEngine
         // keeps running under the existing brackets (reduceOnly=true auto-clamps).
         $this->maybeTakePartialTp($position, $currentPrice);
 
+        // Trailing TP: ratchets stop_loss_price toward the running extreme once
+        // the position is favorable by trailing_tp_arm_pct, replacing the fixed
+        // TP. Must run BEFORE slHit/tpHit so the fresh trailing stop is tested.
+        $this->maybeTrailStop($position, $currentPrice);
+        $position->refresh();
+
         // Dry-run: bot triggers SL/TP via price comparison (legacy behavior).
         // Live: Binance's STOP_MARKET / TAKE_PROFIT_MARKET orders handle SL/TP;
         // the user-data WS worker reconciles fills back into our DB.
@@ -386,7 +392,10 @@ class TradingEngine
             // the probe price (e.g. bar high) overshoots the fill and inflates
             // simulated SL losses, especially with tight leverage-capped SLs.
             if ($this->slHit($position, $currentPrice)) {
-                $this->closePosition($position, (float) $position->stop_loss_price, CloseReason::StopLoss);
+                // Trailing-armed exits report TakeProfit when the trailed stop
+                // sits inside the favorable side of entry; otherwise StopLoss.
+                $reason = $this->trailingExitReason($position);
+                $this->closePosition($position, (float) $position->stop_loss_price, $reason);
                 return;
             }
             if ($this->tpHit($position, $currentPrice)) {
@@ -444,6 +453,101 @@ class TradingEngine
                 'error' => $e->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Trailing take-profit. Once the position is favorable by trailing_tp_arm_pct,
+     * arms and sets stop_loss_price to (extreme ± trailing_tp_trail_pct), then
+     * keeps ratcheting the stop closer to the running extreme as the position
+     * deepens. Never widens the stop. The fixed take_profit_price is cleared
+     * on arm so the trailing stop is the sole exit on the favorable side.
+     *
+     * Dry-run only — slHit will fire on the tightened stop_loss_price. In live,
+     * the existing Binance STOP_MARKET would need a cancel-and-replace cycle on
+     * each tighten, which is out of scope for this backtest pass.
+     */
+    private function maybeTrailStop(Position $position, float $currentPrice): void
+    {
+        if (! (bool) Settings::get('trailing_tp_enabled')) {
+            return;
+        }
+        $entry = (float) $position->entry_price;
+        if ($entry <= 0 || $currentPrice <= 0) {
+            return;
+        }
+
+        $armPct = (float) Settings::get('trailing_tp_arm_pct');
+        $trailPct = (float) Settings::get('trailing_tp_trail_pct');
+        if ($armPct <= 0 || $trailPct <= 0) {
+            return;
+        }
+
+        $isShort = $position->side === 'SHORT';
+        $favorablePct = $isShort
+            ? (($entry - $currentPrice) / $entry) * 100
+            : (($currentPrice - $entry) / $entry) * 100;
+
+        if (! $position->trailing_tp_armed) {
+            if ($favorablePct < $armPct) {
+                return;
+            }
+            // Arm: anchor extreme to current price, set tightened stop, drop
+            // the fixed TP so only the trailing stop can exit on the favorable
+            // side from here on.
+            $extreme = $currentPrice;
+            $newStop = $isShort
+                ? $extreme * (1 + $trailPct / 100)
+                : $extreme * (1 - $trailPct / 100);
+
+            $stopAfterTighten = $isShort
+                ? min((float) $position->stop_loss_price ?: $newStop, $newStop)
+                : max((float) $position->stop_loss_price ?: $newStop, $newStop);
+
+            $position->update([
+                'trailing_tp_armed' => true,
+                'trailing_extreme_price' => $extreme,
+                'stop_loss_price' => $stopAfterTighten,
+                'take_profit_price' => 0,
+            ]);
+            return;
+        }
+
+        // Already armed: ratchet extreme toward favorable side, tighten stop.
+        $extreme = (float) $position->trailing_extreme_price;
+        $newExtreme = $isShort ? min($extreme, $currentPrice) : max($extreme, $currentPrice);
+        if ($newExtreme === $extreme) {
+            return;
+        }
+        $newStop = $isShort
+            ? $newExtreme * (1 + $trailPct / 100)
+            : $newExtreme * (1 - $trailPct / 100);
+        $stopAfterTighten = $isShort
+            ? min((float) $position->stop_loss_price, $newStop)
+            : max((float) $position->stop_loss_price, $newStop);
+
+        $position->update([
+            'trailing_extreme_price' => $newExtreme,
+            'stop_loss_price' => $stopAfterTighten,
+        ]);
+    }
+
+    /**
+     * For trailing-armed exits, the stop has been ratcheted into the favorable
+     * side of entry — closing on it is a take-profit, not a stop-loss. Used by
+     * checkPosition to label the close reason correctly.
+     */
+    private function trailingExitReason(Position $position): CloseReason
+    {
+        if (! $position->trailing_tp_armed) {
+            return CloseReason::StopLoss;
+        }
+        $entry = (float) $position->entry_price;
+        $stop = (float) $position->stop_loss_price;
+        if ($entry <= 0 || $stop <= 0) {
+            return CloseReason::StopLoss;
+        }
+        $favorable = $position->side === 'SHORT' ? ($stop < $entry) : ($stop > $entry);
+        return $favorable ? CloseReason::TakeProfit : CloseReason::StopLoss;
     }
 
     /**

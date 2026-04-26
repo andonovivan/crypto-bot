@@ -21,8 +21,10 @@ class Settings
         // Short-scalp strategy
         'scan_interval' => ['config' => 'crypto.scalp.scan_interval', 'type' => 'int', 'label' => 'Scan Interval (seconds)'],
         'pump_threshold_pct' => ['config' => 'crypto.scalp.pump_threshold_pct', 'type' => 'float', 'label' => 'Pump Threshold (24h %)'],
+        'pump_max_pct' => ['config' => 'crypto.scalp.pump_max_pct', 'type' => 'float', 'label' => 'Pump Upper Cap (24h %, 0=disabled)'],
         'dump_threshold_pct' => ['config' => 'crypto.scalp.dump_threshold_pct', 'type' => 'float', 'label' => 'Dump Threshold (24h %, positive)'],
         'min_volume_usdt' => ['config' => 'crypto.scalp.min_volume_usdt', 'type' => 'float', 'label' => 'Min 24h Volume (USDT)'],
+        'max_volume_usdt' => ['config' => 'crypto.scalp.max_volume_usdt', 'type' => 'float', 'label' => 'Max 24h Volume (USDT, 0=disabled)'],
         'ema_fast' => ['config' => 'crypto.scalp.ema_fast', 'type' => 'int', 'label' => 'EMA Fast (15m)'],
         'ema_slow' => ['config' => 'crypto.scalp.ema_slow', 'type' => 'int', 'label' => 'EMA Slow (15m)'],
         'take_profit_pct' => ['config' => 'crypto.scalp.take_profit_pct', 'type' => 'float', 'label' => 'Take Profit (%)'],
@@ -43,6 +45,19 @@ class Settings
 
         'partial_tp_trigger_pct' => ['config' => 'crypto.scalp.partial_tp_trigger_pct', 'type' => 'float', 'label' => 'Partial TP Trigger (%, 0=off)'],
         'partial_tp_size_pct' => ['config' => 'crypto.scalp.partial_tp_size_pct', 'type' => 'float', 'label' => 'Partial TP Size (% of position)'],
+
+        // Trailing TP: arm at trailing_tp_arm_pct favorable, then exit when price
+        // retraces trailing_tp_trail_pct from the running extreme. Replaces the
+        // fixed take-profit; SL stays in place. Disabled by default.
+        'trailing_tp_enabled' => ['config' => 'crypto.scalp.trailing_tp_enabled', 'type' => 'bool', 'label' => 'Trailing Take Profit'],
+        'trailing_tp_arm_pct' => ['config' => 'crypto.scalp.trailing_tp_arm_pct', 'type' => 'float', 'label' => 'Trailing TP Arm Threshold (% favorable)'],
+        'trailing_tp_trail_pct' => ['config' => 'crypto.scalp.trailing_tp_trail_pct', 'type' => 'float', 'label' => 'Trailing TP Trail Distance (%)'],
+
+        // Strict downtrend confirmation gates: 2 red 15m candles + EMA cross +
+        // body % filter (+ 1h HTF when htf_filter_enabled). When false, only the
+        // funding-rate guard applies. Used by the wide-SL trailing strategy to
+        // avoid entry delay past the easy reversion.
+        'strict_downtrend_enabled' => ['config' => 'crypto.scalp.strict_downtrend_enabled', 'type' => 'bool', 'label' => 'Strict 15m Downtrend Confirmation'],
 
         // Risk controls — drawdown circuit breaker
         'circuit_breaker_enabled' => ['config' => 'crypto.risk.circuit_breaker_enabled', 'type' => 'bool', 'label' => 'Drawdown Circuit Breaker'],

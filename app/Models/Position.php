@@ -31,6 +31,8 @@ class Position extends Model
         'opened_at',
         'expires_at',
         'partial_tp_taken',
+        'trailing_tp_armed',
+        'trailing_extreme_price',
     ];
 
     protected function casts(): array
@@ -52,6 +54,8 @@ class Position extends Model
             'opened_at' => 'datetime',
             'expires_at' => 'datetime',
             'partial_tp_taken' => 'boolean',
+            'trailing_tp_armed' => 'boolean',
+            'trailing_extreme_price' => 'float',
         ];
     }
 

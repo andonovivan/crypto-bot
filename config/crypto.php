@@ -49,8 +49,16 @@ return [
     'scalp' => [
         'scan_interval' => (int) env('SCAN_INTERVAL', 30),
         'pump_threshold_pct' => (float) env('PUMP_THRESHOLD_PCT', 25.0),
+        // Skip pumps above this. Research shows pumps >=50% have a continuation
+        // pattern, not mean-reversion (median 24h close +12.6%, not -10%).
+        // Set to 0 to disable the upper cap.
+        'pump_max_pct' => (float) env('PUMP_MAX_PCT', 50.0),
         'dump_threshold_pct' => (float) env('DUMP_THRESHOLD_PCT', 10.0),
         'min_volume_usdt' => (float) env('MIN_VOLUME_USDT', 10_000_000),
+        // Skip pumps with 15m bar quote volume above this. Low/mid volume
+        // (1-25M USDT) reverts more reliably than super-thin or super-thick.
+        // Set to 0 to disable the upper cap.
+        'max_volume_usdt' => (float) env('MAX_VOLUME_USDT', 25_000_000),
         'ema_fast' => (int) env('EMA_FAST', 9),
         'ema_slow' => (int) env('EMA_SLOW', 21),
         'take_profit_pct' => (float) env('TAKE_PROFIT_PCT', 2.0),
@@ -82,6 +90,24 @@ return [
         // Set trigger to 0 to disable.
         'partial_tp_trigger_pct' => (float) env('PARTIAL_TP_TRIGGER_PCT', 1.0),
         'partial_tp_size_pct' => (float) env('PARTIAL_TP_SIZE_PCT', 50.0),
+
+        // Trailing take-profit: arms once the position is favorable by
+        // trailing_tp_arm_pct, then exits when price retraces by
+        // trailing_tp_trail_pct from the running extreme. Replaces the fixed
+        // take_profit_pct exit; the fixed stop_loss_pct still applies until
+        // the trailing stop ratchets past it. Implemented by tightening
+        // stop_loss_price downward (for SHORT) — never widens.
+        'trailing_tp_enabled' => filter_var(env('TRAILING_TP_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
+        'trailing_tp_arm_pct' => (float) env('TRAILING_TP_ARM_PCT', 2.0),
+        'trailing_tp_trail_pct' => (float) env('TRAILING_TP_TRAIL_PCT', 1.5),
+
+        // Strict downtrend confirmation: when true, requires 2 red 15m candles
+        // + EMA fast<slow on current and prior + price below fast EMA + body
+        // size cap (+ 1h HTF EMA when htf_filter_enabled). Set false to enter
+        // immediately at the pump/dump threshold cross (only the funding-rate
+        // guard applies). Research showed the strict gate delays entry past
+        // the easy reversion.
+        'strict_downtrend_enabled' => filter_var(env('STRICT_DOWNTREND_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
     ],
 
     /*

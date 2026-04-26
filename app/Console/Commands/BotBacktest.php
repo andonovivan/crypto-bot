@@ -261,15 +261,18 @@ class BotBacktest extends Command
             ? [$bar['h'], $bar['l'], $bar['c']]
             : [$bar['l'], $bar['h'], $bar['c']];
 
-        $sl = (float) $position->stop_loss_price;
-        $tp = (float) $position->take_profit_price;
-
         try {
             foreach ($probes as $price) {
                 $fresh = Position::find($position->id);
                 if (! $fresh || $fresh->status !== PositionStatus::Open) {
                     return;
                 }
+
+                // Refresh SL/TP each iteration: trailing TP ratchets stop_loss_price
+                // mid-bar (e.g. on the L probe of a green bar), and the next probe
+                // must clamp against the tightened stop, not the bar-start value.
+                $sl = (float) $fresh->stop_loss_price;
+                $tp = (float) $fresh->take_profit_price;
 
                 // Clamp the probe price to the SL/TP trigger when it crosses
                 // one. In live, Binance's STOP_MARKET / TAKE_PROFIT_MARKET fills
