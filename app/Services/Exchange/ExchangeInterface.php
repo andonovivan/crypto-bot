@@ -87,6 +87,22 @@ interface ExchangeInterface
     public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity, string $side = 'SHORT'): array;
 
     /**
+     * Place a Binance native TRAILING_STOP_MARKET order on the algo endpoint.
+     *
+     * Trigger semantics (server-side):
+     * - SHORT close (BUY): triggers when lowest price after placement <= activationPrice
+     *   AND latest price >= lowest × (1 + callbackRate / 100).
+     * - LONG close (SELL): triggers when highest price after placement >= activationPrice
+     *   AND latest price <= highest × (1 - callbackRate / 100).
+     *
+     * @param string $side Position side: 'LONG' or 'SHORT'
+     * @param float $activationPrice Price that arms the trailing — for SHORT must be < latest price
+     * @param float $callbackRate Trail distance in %. Binance accepts 0.1–5.0 (0.7 = 0.7%).
+     * @return array{orderId: string}
+     */
+    public function openTrailingStop(string $symbol, string $side, float $quantity, float $activationPrice, float $callbackRate): array;
+
+    /**
      * Get account balance in USDT (available balance).
      */
     public function getBalance(): float;

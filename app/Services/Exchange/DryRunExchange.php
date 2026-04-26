@@ -159,6 +159,23 @@ class DryRunExchange implements ExchangeInterface
         return ['orderId' => 'dry_tp_' . uniqid('', true)];
     }
 
+    public function openTrailingStop(string $symbol, string $side, float $quantity, float $activationPrice, float $callbackRate): array
+    {
+        // No real Binance order in dry-run. The bot's TradingEngine::maybeTrailStop
+        // re-implements the trigger semantics against the cached price stream and
+        // closes the DB position when the trail fires. We just hand back a fake
+        // orderId so the caller can store something in tp_order_id.
+        Log::info("[DRY RUN] Open trailing stop", [
+            'symbol' => $symbol,
+            'side' => $side,
+            'quantity' => $quantity,
+            'activationPrice' => $activationPrice,
+            'callbackRate' => $callbackRate,
+        ]);
+
+        return ['orderId' => 'dry_trail_' . uniqid('', true)];
+    }
+
     public function getBalance(): float
     {
         return $this->getAccountData()['availableBalance'];

@@ -471,6 +471,13 @@ class TradingEngine
         if (! (bool) Settings::get('trailing_tp_enabled')) {
             return;
         }
+        // Live: the Binance TRAILING_STOP_MARKET handles trailing server-side
+        // and the fill is reconciled by ws-user-data like any other bracket.
+        // Skip the bot-side ratchet — it would double-up the trigger logic and
+        // cause stop_loss_price to no longer match the actual Binance order.
+        if (! (bool) Settings::get('dry_run') || ! $position->is_dry_run) {
+            return;
+        }
         $entry = (float) $position->entry_price;
         if ($entry <= 0 || $currentPrice <= 0) {
             return;
@@ -1376,6 +1383,23 @@ class TradingEngine
         $tpOrderId = null;
         $lastError = null;
 
+        // When trailing TP is enabled, the favorable-side bracket is a Binance
+        // native TRAILING_STOP_MARKET (server-side trailing) instead of a fixed
+        // TAKE_PROFIT_MARKET. Activation arms at trailing_tp_arm_pct favorable;
+        // callbackRate (0.1–5%) is the trail distance after arming. The order
+        // ID is stashed in tp_order_id so cancelBrackets / reconciliation paths
+        // treat it uniformly.
+        $trailingEnabled = (bool) Settings::get('trailing_tp_enabled');
+        $trailArm = (float) Settings::get('trailing_tp_arm_pct');
+        $trailRate = (float) Settings::get('trailing_tp_trail_pct');
+        $useTrailing = $trailingEnabled && $trailArm > 0 && $trailRate > 0;
+
+        $activationPrice = $useTrailing
+            ? ($side === 'SHORT'
+                ? $entryPrice * (1 - $trailArm / 100)
+                : $entryPrice * (1 + $trailArm / 100))
+            : 0.0;
+
         for ($attempt = 1; $attempt <= 2; $attempt++) {
             try {
                 if ($slOrderId === null) {
@@ -1383,7 +1407,11 @@ class TradingEngine
                     $slOrderId = $slResult['orderId'] ?? null;
                 }
                 if ($tpOrderId === null) {
-                    $tpResult = $exchange->setTakeProfit($symbol, $slTp['tp'], $quantity, $side);
+                    if ($useTrailing) {
+                        $tpResult = $exchange->openTrailingStop($symbol, $side, $quantity, $activationPrice, $trailRate);
+                    } else {
+                        $tpResult = $exchange->setTakeProfit($symbol, $slTp['tp'], $quantity, $side);
+                    }
                     $tpOrderId = $tpResult['orderId'] ?? null;
                 }
                 break;
@@ -1403,7 +1431,10 @@ class TradingEngine
             'sl_order_id' => $slOrderId,
             'tp_order_id' => $tpOrderId,
             'sl' => $slTp['sl'],
-            'tp' => $slTp['tp'],
+            // When trailing is on, the fixed TP price is irrelevant — the trail
+            // fires server-side. Persist 0 so dashboard / dry-run code paths that
+            // read take_profit_price don't show a stale fixed level.
+            'tp' => $useTrailing ? 0.0 : $slTp['tp'],
         ];
     }
 

@@ -344,6 +344,13 @@ class HistoricalReplayExchange implements ExchangeInterface
         return ['orderId' => 'bt_tp_' . uniqid('', true)];
     }
 
+    public function openTrailingStop(string $symbol, string $side, float $quantity, float $activationPrice, float $callbackRate): array
+    {
+        // Backtest: no order matching engine. The bot's maybeTrailStop()
+        // simulates trigger semantics against probe prices. Just stash a fake id.
+        return ['orderId' => 'bt_trail_' . uniqid('', true)];
+    }
+
     public function getBalance(): float
     {
         return $this->getAccountData()['availableBalance'];

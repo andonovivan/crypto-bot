@@ -342,6 +342,33 @@ class BinanceExchange implements ExchangeInterface
         return ['orderId' => (string) ($response['algoId'] ?? $response['orderId'] ?? '')];
     }
 
+    public function openTrailingStop(string $symbol, string $side, float $quantity, float $activationPrice, float $callbackRate): array
+    {
+        // For SHORT close: BUY when price retraces from a new low. For LONG close:
+        // SELL when price retraces from a new high. Trailing is server-side — once
+        // armed, Binance tracks the extreme internally and fires when the latest
+        // price retraces by callbackRate. No cancel/replace polling needed.
+        $closeSide = $side === 'LONG' ? 'SELL' : 'BUY';
+
+        // Clamp callbackRate to Binance's published range (0.1–5.0). Outside this
+        // band the order is rejected with -2021/-1102; clamp here so config typos
+        // don't kill an entry mid-flight.
+        $callbackRate = max(0.1, min(5.0, $callbackRate));
+
+        $response = $this->signedRequest('POST', '/fapi/v1/algoOrder', [
+            'symbol' => $symbol,
+            'side' => $closeSide,
+            'type' => 'TRAILING_STOP_MARKET',
+            'algoType' => 'CONDITIONAL',
+            'activationPrice' => $this->formatPrice($activationPrice, $symbol),
+            'callbackRate' => number_format($callbackRate, 1, '.', ''),
+            'quantity' => $this->formatQuantity($quantity, $symbol),
+            'reduceOnly' => 'true',
+        ]);
+
+        return ['orderId' => (string) ($response['algoId'] ?? $response['orderId'] ?? '')];
+    }
+
     public function getBalance(): float
     {
         return $this->getAccountData()['availableBalance'];

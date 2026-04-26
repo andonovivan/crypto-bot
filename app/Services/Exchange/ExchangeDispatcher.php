@@ -86,6 +86,11 @@ class ExchangeDispatcher implements ExchangeInterface
         return $this->active()->setTakeProfit($symbol, $takeProfitPrice, $quantity, $side);
     }
 
+    public function openTrailingStop(string $symbol, string $side, float $quantity, float $activationPrice, float $callbackRate): array
+    {
+        return $this->active()->openTrailingStop($symbol, $side, $quantity, $activationPrice, $callbackRate);
+    }
+
     public function getBalance(): float
     {
         return $this->active()->getBalance();
