@@ -313,6 +313,14 @@ class BotBacktest extends Command
         }
 
         $opened = 0;
+
+        // Skip the scan when at capacity — keeps backtest behaviour aligned
+        // with BotRun. Position management above already ran.
+        $currentOpen = Position::open()->where('is_dry_run', true)->count();
+        if ($currentOpen >= $maxPositions) {
+            return 0;
+        }
+
         $candidates = $scanner->getCandidates();
 
         foreach ($candidates as $candidate) {

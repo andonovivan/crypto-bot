@@ -16,7 +16,7 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 - App runs migrations; bot/scheduler/ws-worker/ws-user-data wait for app to start first
 
 ### Exchange Abstraction
-- `ExchangeInterface` — contract for all exchange operations. Covers orders/price/kline reads (`getPrice`, `getKlines`, `getFuturesTickers`, `getOrderBookTop`), orders (`openShort`/`openShortLimit`/`openLong`/close variants, `setStopLoss`, `setTakeProfit`), order lifecycle (`getOrderStatus`, `cancelOrder`, `cancelOrders`, `cancelAlgoOrder`, `getAlgoOrderStatus`), account state (`getAccountData`, `getBalance`, `getOpenPositions`, `getCommissionRate`, `getFundingRates`, `getMaxLeverage`, `getUserTrades`), and the user-data listenKey lifecycle (`createListenKey`, `keepAliveListenKey`, `closeListenKey`).
+- `ExchangeInterface` — contract for all exchange operations. Covers orders/price/kline reads (`getPrice`, `getKlines`, `getFuturesTickers`, `getOrderBookTop`), orders (`openShort`/`openShortLimit`/`openLong`/close variants, `setStopLoss`, `setTakeProfit`, `openTrailingStop` for native Binance TRAILING_STOP_MARKET), order lifecycle (`getOrderStatus`, `cancelOrder`, `cancelOrders`, `cancelAlgoOrder`, `getAlgoOrderStatus`), account state (`getAccountData`, `getBalance`, `getOpenPositions`, `getCommissionRate`, `getFundingRates`, `getMaxLeverage`, `getUserTrades`), and the user-data listenKey lifecycle (`createListenKey`, `keepAliveListenKey`, `closeListenKey`).
 - `BinanceExchange` — real Binance Futures API (HMAC-SHA256 signed requests)
 - `DryRunExchange` — wraps real exchange for market data, simulates trades in DB
 - `HistoricalReplayExchange` — offline backtest exchange. Loads `kline_history` rows into memory, services `getPrice` / `getKlines` / `getFuturesTickers` against a movable clock (`setClock($unixMs)`), synthesizes order-book top from the current price (±1bp), and stubs out order placement / `getOrderStatus` / listenKey as no-ops. Uses the same DB `Position`/`Trade` rows (with `is_dry_run=true`) so account balance and open-position tracking match DryRunExchange. **Only used during `bot:backtest`** — bound into the container via `app()->instance(ExchangeInterface::class, $replay)`. See the Backtest Harness section.
@@ -43,7 +43,7 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 ### SL/TP close reconciliation (mode-dependent)
 
 - **Dry-run mode**: `checkPosition()` compares live price to `stop_loss_price` / `take_profit_price` and triggers `closePosition()` directly. No bracket orders exist on a real exchange, so there is nothing to reconcile.
-- **Live mode**: `checkPosition()` does **not** price-check SL/TP. Binance owns the close via the `STOP_MARKET` / `TAKE_PROFIT_MARKET` brackets placed at open (`reduceOnly=true`). The bot reconciles via three paths, in priority order:
+- **Live mode**: `checkPosition()` does **not** price-check SL/TP. Binance owns the close via the `STOP_MARKET` SL bracket plus either a fixed `TAKE_PROFIT_MARKET` or a native `TRAILING_STOP_MARKET` (when `trailing_tp_enabled=true`) — all `reduceOnly=true`. The bot reconciles via three paths, in priority order:
   1. **ws-user-data** (primary, ~real-time): `ORDER_TRADE_UPDATE` with `X=FILLED` → `reconcileFillFromStream()` cancels the sibling bracket and writes the `Trade` row using the fill's `ap`/`L`/`z` fields.
   2. **BotRun safety reconcile** (30s fallback): if a DB position is flat on Binance but still `Open` locally (ws missed the event), `reconcileMissingPosition()` queries `getOrderStatus` on both brackets and reconciles.
   3. **Manual close idempotency**: if a user-initiated close races with a Binance SL/TP fill, `closePosition()` catches Binance error codes `-2022` / `-4046` ("already flat") and delegates to `reconcileFromBrackets()` so the Trade row still reflects the true SL/TP exit rather than a spurious Manual close.
@@ -52,22 +52,23 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 ### Short-Scalp Strategy
 
 **Entry criteria (all must pass):**
-1. **24h mover**: `priceChangePct >= pump_threshold_pct` (default +25%) OR `priceChangePct <= -dump_threshold_pct` (default -10%)
-2. **Liquidity**: 24h quote volume >= `min_volume_usdt` (default 10M USDT)
-3. **15m downtrend (Strict rule)**:
+1. **24h mover**: `pump_threshold_pct <= priceChangePct <= pump_max_pct` (default +25% to +50%, `pump_max_pct=0` disables the upper cap) OR `priceChangePct <= -dump_threshold_pct` (default -10%). The pump upper cap exists because research showed pumps ≥50% have a continuation pattern (median 24h close +12.6%), not the mean-reversion edge that mild pumps offer.
+2. **Liquidity window**: `min_volume_usdt <= 24h quote volume <= max_volume_usdt` (defaults 10M / 25M USDT, `max_volume_usdt=0` disables the upper cap). Mid-volume coins mean-revert more reliably than super-thin (small float keeps running) or super-thick (high-liquidity continuation moves) ones.
+3. **15m downtrend (Strict rule)** — only when `strict_downtrend_enabled=true` (default true). When false, this entire block is skipped and only the funding-rate guard below applies. Dropping the strict gate is the wide-SL trailing strategy's entry mode (research showed the strict confirmation delays entry past the easy reversion).
    - EMA fast (default 9) < EMA slow (default 21) on BOTH current and prior 15m candle
    - Current price (close of last closed candle) < EMA fast
    - **Last N CLOSED 15m candles are red** (close < open) — where N = `min_red_candles` (default 2). Checks `candles[last-1]` and `candles[last-2]`, not the in-progress candle. Filters dead-cat-bounce setups.
    - Candle body of last closed candle <= `max_candle_body_pct` (default 3%) — skips frenzied volatility
-4. **Higher-timeframe confirmation** (conditional, `htf_filter_enabled=true` by default): 1h close < 1h EMA (period `htf_ema_period`, default 21). Fetches `htf_ema_period + 5` 1h klines via `checkHigherTfDowntrend()`. **Fails open** — if the 1h fetch errors or returns too few bars, the filter passes. Rationale: a 15m setup that looks weak on a coin still in a 1h uptrend tends to be a bounce-top that gets bought back into.
-5. **Funding guard**: current funding rate >= -0.05% (avoid paying heavy funding against us)
+4. **Higher-timeframe confirmation** (conditional, `htf_filter_enabled=true` by default, only checked when strict gate is on): 1h close < 1h EMA (period `htf_ema_period`, default 21). Fetches `htf_ema_period + 5` 1h klines via `checkHigherTfDowntrend()`. **Fails open** — if the 1h fetch errors or returns too few bars, the filter passes. Rationale: a 15m setup that looks weak on a coin still in a 1h uptrend tends to be a bounce-top that gets bought back into.
+5. **Funding guard**: current funding rate >= -0.05% (avoid paying heavy funding against us). Always checked, regardless of `strict_downtrend_enabled`.
 6. **Capacity gates**: trading not paused, global `max_positions` not hit, no open position on this symbol, post-close cooldown cleared (`cooldown_minutes`), post-failure cooldown cleared (`failed_entry_cooldown_minutes`, default 360 = 6h — prevents re-probing a symbol whose last entry was rejected by Binance)
 7. **Circuit breaker** (conditional, `circuit_breaker_enabled=false` by default): if tripped, block new entries until cooldown expires. See the Risk Controls section below.
 
 **Exit criteria:**
-- TP hit: `entry × (1 - take_profit_pct / 100)` — for SHORT, TP is BELOW entry (default 2% below)
-- SL hit: `entry × (1 + stop_loss_pct / 100)` — for SHORT, SL is ABOVE entry (default 1% above). When `atr_sl_enabled=true` (default), SL distance uses `atr_sl_multiplier × ATR14` instead of a fixed pct, clamped to `(entry / leverage) × 0.70` so the stop can't sit past liquidation. TP stays pct-based regardless.
-- **Partial take-profit** (conditional, `partial_tp_trigger_pct > 0`, default 1%): once the position is favorable by `partial_tp_trigger_pct`, `TradingEngine::maybeTakePartialTp()` closes `partial_tp_size_pct` (default 50%) at MARKET, sets `Position.partial_tp_taken=true` so it can't re-fire, and leaves the remainder under the existing SL/TP brackets (`reduceOnly=true` auto-scales to remaining qty). Runs on every `checkPosition()` tick.
+- **Fixed TP** (when `trailing_tp_enabled=false`, default): `entry × (1 - take_profit_pct / 100)` — for SHORT, TP is BELOW entry (default 2% below). Placed at entry as a Binance `TAKE_PROFIT_MARKET` algo bracket.
+- **Trailing TP** (when `trailing_tp_enabled=true`): replaces the fixed TP with a Binance native `TRAILING_STOP_MARKET` algo order. `activationPrice = entry × (1 ± trailing_tp_arm_pct / 100)`; `callbackRate = trailing_tp_trail_pct` (clamped to Binance's 0.1–5.0% range). For SHORT closes, Binance arms the trail when the lowest price reaches activationPrice and fires when latest price ≥ lowest × (1 + callbackRate/100). The order ID is stored in `Position.tp_order_id` so cancellation and reconciliation paths treat it identically to a fixed TP. **Dry-run mirror**: `TradingEngine::maybeTrailStop()` re-implements the same trigger logic against the cached price stream — arms the trail when favorable >= `trailing_tp_arm_pct`, ratchets `Position.stop_loss_price` toward `extreme ± trailing_tp_trail_pct`, and clears `take_profit_price=0`. The slHit branch then fires on the trailing stop, with `trailingExitReason()` labelling it `TakeProfit` when the trailed stop sits on the favorable side of entry.
+- SL hit: `entry × (1 + stop_loss_pct / 100)` — for SHORT, SL is ABOVE entry (default 1% above). When `atr_sl_enabled=true` (default), SL distance uses `atr_sl_multiplier × ATR14` instead of a fixed pct, clamped to `(entry / leverage) × 0.70` so the stop can't sit past liquidation. TP stays pct-based regardless. SL stays in place when trailing TP is on — the trailing stop only ratchets in the favorable direction; the fixed SL anchors the worst-case loss.
+- **Partial take-profit** (conditional, `partial_tp_trigger_pct > 0`, default 1%): once the position is favorable by `partial_tp_trigger_pct`, `TradingEngine::maybeTakePartialTp()` closes `partial_tp_size_pct` (default 50%) at MARKET, sets `Position.partial_tp_taken=true` so it can't re-fire, and leaves the remainder under the existing SL/TP brackets (`reduceOnly=true` auto-scales to remaining qty). Runs on every `checkPosition()` tick. Disable when running the trailing-TP variant — the two compete for the favorable-side exit.
 - Expiry: `max_hold_minutes` (default 120 = 2h)
 
 **Risk sizing at 25x leverage (default):**
@@ -96,14 +97,14 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 - `bot:backtest --truncate` clears all three cache keys so the backtest starts with a clean risk-control slate.
 
 ### Scanner (ShortScanner)
-- **One-shot ticker scan**: `getCandidates()` calls `getFuturesTickers()` once per cycle, filters by pump/dump threshold + min_volume, returns `ShortCandidate[]` sorted by absolute 24h change
-- **Per-candidate klines**: `analyze15m(symbol)` fetches 30 15m candles (with 15s in-memory cache), returns `ShortAnalysis` with EMA fast/slow, candle state, funding rate, ATR14 (for ATR-based SL sizing), 1h HTF confirmation, downtrendOk flag, and blocked reason
-- **HTF confirmation**: when `htf_filter_enabled=true`, `checkHigherTfDowntrend()` fetches `htf_ema_period + 5` 1h klines and returns `close[last] < EMA[last]`. Fails open on fetch error
+- **One-shot ticker scan**: `getCandidates()` calls `getFuturesTickers()` once per cycle, filters by pump/dump thresholds (with optional `pump_max_pct` upper cap) + volume window (`min_volume_usdt` to `max_volume_usdt`, both `0` disables the bound), returns `ShortCandidate[]` sorted by absolute 24h change
+- **Per-candidate klines**: `analyze15m(symbol)` fetches 30 15m candles (with 15s in-memory cache), returns `ShortAnalysis` with EMA fast/slow, candle state, funding rate, ATR14 (for ATR-based SL sizing), 1h HTF confirmation, downtrendOk flag, and blocked reason. When `strict_downtrend_enabled=false`, the EMA / red-candle / body-cap / HTF gates are all skipped — only the funding-rate guard can block. The DTO fields are still computed for dashboard display.
+- **HTF confirmation**: when `htf_filter_enabled=true` AND `strict_downtrend_enabled=true`, `checkHigherTfDowntrend()` fetches `htf_ema_period + 5` 1h klines and returns `close[last] < EMA[last]`. Fails open on fetch error
 - **ATR calculation**: `TechnicalAnalysis::calculateATR(klines, 14)` is computed from the same 15m klines and attached to `ShortAnalysis.atr` — consumed by `TradingEngine::placeBrackets()` for ATR-based SL sizing
 - **Kline cache**: 15-second TTL in-memory cache prevents duplicate API calls within same loop iteration. Keyed on `Carbon::now()` (sim-time aware) so the cache expires at deterministic tick boundaries during backtests instead of drifting with wall-clock.
 
 ### Position Management (SHORT-only)
-- **SHORT entry**: `TradingEngine::openShort(ShortSignal)` — calculates qty from margin × leverage / entry price, places SHORT via `placeEntryOrder()`, then STOP_MARKET SL + TAKE_PROFIT_MARKET TP brackets
+- **SHORT entry**: `TradingEngine::openShort(ShortSignal)` — calculates qty from margin × leverage / entry price, places SHORT via `placeEntryOrder()`, then STOP_MARKET SL plus either TAKE_PROFIT_MARKET (default) or TRAILING_STOP_MARKET (when `trailing_tp_enabled=true`) on the favorable side. Both bracket variants store their algoId in `Position.tp_order_id`.
 - **Entry flow (`placeEntryOrder`)**: if `use_post_only_entry` is true, attempt a LIMIT SELL at best ask with `timeInForce=GTX` (post-only, maker-only). Poll order status every 500ms for `limit_order_timeout_seconds` (default 3s). On full fill → return `entry_type=LIMIT_MAKER`. On partial fill + timeout → cancel, MARKET the remainder → `entry_type=MIXED`. On timeout with no fill, or post-only rejection (Binance -2021/-2010) → MARKET the full qty → `entry_type=MARKET_FALLBACK`. If `use_post_only_entry=false`, skip straight to MARKET (`entry_type=MARKET`). LONG entries (via `reversePosition`) always use MARKET.
 - **Maker fee discount**: When `entry_type=LIMIT_MAKER`, entry-side fees use the maker rate instead of taker. MIXED/MARKET_FALLBACK/MARKET use taker.
 - **One position per symbol (invariant)**: enforced in `openShort` via open-position existence check. Not a user setting.
@@ -131,7 +132,7 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 | `app/Services/ShortAnalysis.php` | Readonly DTO: EMA fast/slow, candle state, funding rate, ATR, HTF verdict, downtrendOk, blockedReason |
 | `app/Services/ShortSignal.php` | Lightweight DTO for `TradingEngine::openShort` (includes `atr` for ATR-based SL sizing) |
 | `app/Services/TechnicalAnalysis.php` | EMA + ATR14 calculations |
-| `app/Services/TradingEngine.php` | SHORT open/close/checkPosition (dry-run SL/TP trigger + live expiry), `placeEntryOrder` (post-only → MARKET fallback), `placeBrackets` (ATR-based or pct-based SL), `maybeTakePartialTp` (scale-out at `partial_tp_trigger_pct`), `reconcileFillFromStream` / `reconcileMissingPosition` / `reconcileFromBrackets` / `finalizeClose` (live reconciliation paths), drawdown circuit-breaker check, manual add/reverse helpers |
+| `app/Services/TradingEngine.php` | SHORT open/close/checkPosition (dry-run SL/TP trigger + live expiry), `placeEntryOrder` (post-only → MARKET fallback), `placeBrackets` (ATR-based or pct-based SL; native TRAILING_STOP_MARKET on the favorable side when trailing is enabled), `maybeTakePartialTp` (scale-out at `partial_tp_trigger_pct`), `maybeTrailStop` (dry-run-only trailing simulation — Binance handles trailing server-side in live), `trailingExitReason` (labels trailed slHit fills as TakeProfit when the stop sits favorable), `reconcileFillFromStream` / `reconcileMissingPosition` / `reconcileFromBrackets` / `finalizeClose` (live reconciliation paths), drawdown circuit-breaker check, manual add/reverse helpers |
 | `app/Services/Settings.php` | DB-first settings with config fallback. `override($key, $value)` / `clearOverrides()` shadow the DB for this PHP process only — used by `bot:backtest` to flip `dry_run=true` and apply per-run tuning without stomping on live shared state. |
 | `app/Services/FundingSettlementService.php` | 8h funding rate settlement for open positions |
 | `app/Services/Exchange/ExchangeInterface.php` | Contract for all exchange operations |
@@ -173,8 +174,10 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 |-----|---------|-------------|
 | `scan_interval` | 30 | Seconds between scan cycles |
 | `pump_threshold_pct` | 25.0 | 24h gain threshold to qualify (+%) |
+| `pump_max_pct` | 50.0 | Skip pumps above this (continuation-pattern territory). `0` disables the upper cap. |
 | `dump_threshold_pct` | 10.0 | 24h loss threshold to qualify (stored positive, compared to -value) |
 | `min_volume_usdt` | 10_000_000 | Minimum 24h quote volume |
+| `max_volume_usdt` | 25_000_000 | Skip pumps above this (high-vol coins have larger SL excursions). `0` disables the upper cap. |
 | `ema_fast` | 9 | 15m EMA fast period |
 | `ema_slow` | 21 | 15m EMA slow period |
 | `take_profit_pct` | 2.0 | TP distance below entry |
@@ -183,6 +186,7 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 | `cooldown_minutes` | 120 | Post-close wait before re-entering same symbol (2h) |
 | `max_candle_body_pct` | 3.0 | Reject if last 15m candle body exceeds this (frenzied volatility filter) |
 | `min_red_candles` | 2 | Minimum consecutive closed 15m red candles required (1 = old behavior, 2 = default, 3 = conservative) |
+| `strict_downtrend_enabled` | true | When false, skip the entire 15m confirmation block (EMA cross + red candles + body cap + 1h HTF). Only the funding-rate guard remains. Used by the wide-SL trailing strategy. |
 | `use_post_only_entry` | true | Attempt LIMIT maker entry at best ask; fall back to MARKET on timeout/rejection |
 | `limit_order_timeout_seconds` | 3 | Poll window for post-only fill before MARKET fallback |
 | `failed_entry_cooldown_minutes` | 360 | Post-failure cooldown per symbol (6h) — skip symbols whose last entry was rejected by the exchange |
@@ -204,6 +208,13 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 |-----|---------|-------------|
 | `partial_tp_trigger_pct` | 1.0 | Scale-out trigger (% favorable). `0` disables. |
 | `partial_tp_size_pct` | 50.0 | % of position qty to close at the trigger (remainder stays under the original TP/SL brackets) |
+
+### Trailing Take-Profit
+| Key | Default | Description |
+|-----|---------|-------------|
+| `trailing_tp_enabled` | false | Replace the fixed TP with a Binance native TRAILING_STOP_MARKET. Disable `partial_tp_trigger_pct` when on — they compete for the favorable-side exit. |
+| `trailing_tp_arm_pct` | 2.0 | Favorable % at which the trail arms (sets `activationPrice = entry × (1 ∓ pct/100)`). |
+| `trailing_tp_trail_pct` | 1.5 | Trail distance (= Binance `callbackRate`). Clamped to Binance's published 0.1–5.0% range at order placement. Backtest-tuned best ≈ 0.7%. |
 
 ### Risk Controls
 | Key | Default | Description |
@@ -235,6 +246,8 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 **Tables**: `positions`, `trades`, `balance_snapshots`, `bot_settings`, `kline_history`, `cache`, `jobs`, `users`
 
 **`kline_history`** (populated by `bot:download-history`, read by `HistoricalReplayExchange`): composite PK `(symbol, interval, open_time)`; columns `open`/`high`/`low`/`close` as `DECIMAL(25,12)`, `volume`/`quote_volume` as `DECIMAL(30,12)`, plus `close_time` (bigint ms) and `trade_count` (int). `interval` is stored as the Binance string literal (`15m`, `1h`) to match the API. Upserted in 1000-row batches during download. Storing both 15m (entry/exit timeframe) and 1h (HTF filter) rows in one table keeps the replay loader trivial.
+
+**Trailing TP columns on `positions`**: `trailing_tp_armed` (bool, default false) and `trailing_extreme_price` (decimal nullable). Only used by `maybeTrailStop` in dry-run; live mode tracks the extreme server-side inside Binance and never writes these fields. The trailing order's algoId still goes in `tp_order_id` so cancellation / reconciliation paths are uniform.
 
 **Enums**:
 - `PositionStatus`: Open, Closed, Expired, StoppedOut, Failed
@@ -371,7 +384,7 @@ Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
 - **BINANCE_TESTNET env**: Must use `filter_var(env(...), FILTER_VALIDATE_BOOLEAN)` because `env()` returns string "false" which is truthy in PHP
 - **DB settings override**: Old settings in `bot_settings` table override new config defaults. After major changes, reset via `POST /api/settings` or `POST /api/reset`
 - **Rebuild required**: After code changes, must `./develop down && ./develop build && ./develop up -d`
-- **Mode-dependent SL/TP close path**: In **dry-run** mode, `checkPosition()` price-triggers SL/TP and calls `closePosition()`. In **live** mode, Binance owns the close via `STOP_MARKET` / `TAKE_PROFIT_MARKET` brackets; the bot's `checkPosition()` only updates P&L and handles expiry. Live close reconciliation happens via `ws-user-data` (primary), `BotRun` safety reconcile (fallback), or `closePosition()`'s idempotent error path (race with manual close). This avoids the previous race where a bot-issued MARKET close would error out against a Binance SL/TP fill that already flattened the position.
+- **Mode-dependent SL/TP close path**: In **dry-run** mode, `checkPosition()` price-triggers SL/TP and calls `closePosition()`; `maybeTrailStop` ratchets the SL toward the running extreme on a favorable move when trailing TP is on. In **live** mode, Binance owns the close via `STOP_MARKET` / `TAKE_PROFIT_MARKET` (or `TRAILING_STOP_MARKET` when trailing is on) brackets; the bot's `checkPosition()` only updates P&L and handles expiry, and `maybeTrailStop` short-circuits because Binance trails the order server-side. Live close reconciliation happens via `ws-user-data` (primary), `BotRun` safety reconcile (fallback), or `closePosition()`'s idempotent error path (race with manual close). This avoids the previous race where a bot-issued MARKET close would error out against a Binance SL/TP fill that already flattened the position.
 - **listenKey lifecycle**: Binance user-data listenKeys are valid 60 min and must be kept alive every 30 min or less via `PUT /fapi/v1/listenKey`. The `ws-user-data` worker schedules this; on any disconnect it requests a fresh listenKey (previous one may have silently expired). If the worker is down for longer than 60s, `BotRun`'s safety reconcile (every 30s cycle) picks up missed fills via `getOpenPositions` + `getOrderStatus`.
 - **Live trading readiness**: Per-order cancellation ensures closing one position doesn't destroy other symbols' orders. Fail-safe on open ensures no unprotected positions. Reconciliation converges through multiple paths (ws stream, safety poll, manual close) — all guarded by `status !== Open` refresh checks so idempotency holds.
 - **LONG positions**: The bot never auto-opens LONG positions. A LONG can only exist if created manually via the `Reverse` button (SHORT → LONG). `checkPosition`/`closePosition`/`calculatePnl` still handle both sides for these manually-created positions.
@@ -379,3 +392,6 @@ Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
 - **Backtest shares the dry-run DB**: `bot:backtest` writes `is_dry_run=true` `Position` + `Trade` rows. If the `bot` container is also running in dry-run mode, it will see those rows and try to manage them — including closing backtest stragglers at today's price. Safest workflow: `./develop stop bot ws-worker ws-user-data` before a backtest, or always pass `--truncate` and let `forceCloseStragglers()` flatten everything at the final simulated bar. The bigger equity-curve widget on the dashboard will also mix live and backtest history (both are `is_dry_run=true` samples); the range pills or a manual `balance_snapshots` purge are the only separators.
 - **HTF filter fails open**: if the 1h kline fetch errors or returns fewer than `htf_ema_period + 1` bars, `checkHigherTfDowntrend()` returns `true` — the filter is permissive on data gaps rather than restrictive. Backtests inherit this: a symbol with spotty 1h history will pass HTF even when the 15m state alone wouldn't justify an entry.
 - **ATR SL default is ON**: `atr_sl_enabled=true` out of the box, so `stop_loss_pct` is only consulted as a fallback when ATR data is unavailable or the setting is flipped off. When tuning the fixed-pct SL, also flip `atr_sl_enabled=false` (or pass `--override=atr_sl_enabled=false` to `bot:backtest`) or the change will be silently ignored.
+- **Trailing TP and partial TP are mutually exclusive in spirit**: both target the favorable side. Leaving `partial_tp_trigger_pct > 0` while `trailing_tp_enabled=true` will scale out half at the partial trigger and leave the remainder under the trailing stop, which mostly defeats the trailing TP's job of riding the move. The recommended trailing config sets `partial_tp_trigger_pct=0`.
+- **`callbackRate` clamping**: Binance accepts 0.1–5.0%; values outside that band are rejected with `-2021/-1102` and would orphan the position with no favorable-side bracket. `BinanceExchange::openTrailingStop()` clamps before submission so a config typo can't kill an entry mid-flight. Backtest harness has no clamp (uses arbitrary `trailing_tp_trail_pct`), but live placement always respects the band.
+- **Trailing-armed SL labelling**: in dry-run, when the trailing stop ratchets into the favorable side of entry and then fires, `trailingExitReason()` returns `CloseReason::TakeProfit` (not `StopLoss`), even though the close went through the slHit branch. The Trade row reflects "TakeProfit" so the close-reason mix and dashboard summaries treat trailed exits as wins, matching how live `TRAILING_STOP_MARKET` fills are reconciled (also as TakeProfit, via `tp_order_id` match in `ws-user-data`).

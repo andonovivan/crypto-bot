@@ -107,6 +107,20 @@ class BotRun extends Command
             $this->safetyReconcile($engine, $exchange);
         }
 
+        // Skip the scan entirely when there's no capacity to act on a candidate.
+        // Saves the getFuturesTickers API call + log noise. Position management
+        // above already ran; the ws-prices worker keeps SL/TP reactions sharp
+        // regardless. Re-checked per-candidate below in case a position closes
+        // mid-iteration and frees a slot.
+        $currentOpen = Position::open()->count();
+        if ($paused || $currentOpen >= $maxPositions) {
+            $this->info(sprintf(
+                'Cycle: skipped scan (open=%d/%d%s)',
+                $currentOpen, $maxPositions, $paused ? ' paused' : ' at capacity'
+            ));
+            return;
+        }
+
         $candidates = $scanner->getCandidates();
         $analyzed = 0;
         $opened = 0;
