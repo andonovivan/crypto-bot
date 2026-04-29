@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Short-Scalp Bot</title>
+<title>Dashboard</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
@@ -113,7 +113,7 @@
 <body>
 <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px;">
   <div>
-    <h1 style="margin:0;">Short-Scalp Bot <span id="badge"></span></h1>
+    <h1 style="margin:0;"><span id="badge"></span></h1>
     <p class="subtitle" style="margin-top:6px;">
       <span id="positions-count-sub">-</span> open positions &middot;
       Updated <span id="updated">-</span>
