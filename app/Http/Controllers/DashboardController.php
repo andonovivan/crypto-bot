@@ -27,7 +27,13 @@ class DashboardController extends Controller
 
     public function data(ExchangeInterface $exchange): JsonResponse
     {
+        // All trade-history aggregates filter on the current dry_run mode so
+        // the summary reflects "this mode's" performance, not a mix of past
+        // dry-run + live history accumulated over time.
+        $isDryRun = (bool) Settings::get('dry_run');
+
         $openPositions = Position::open()
+            ->where('is_dry_run', $isDryRun)
             ->orderByDesc('opened_at')
             ->get();
 
@@ -49,14 +55,23 @@ class DashboardController extends Controller
             }
         }
 
-        $totalPnl = Trade::sum('pnl');
-        $totalTrades = Trade::count();
-        $winningTrades = Trade::where('pnl', '>', 0)->count();
-        $losingTrades = Trade::where('pnl', '<', 0)->count();
+        // Win/loss is decided on net trade outcome (raw pnl already excludes
+        // trading fees; funding_fee is the remaining piece). A trade with a
+        // positive pnl but a larger funding payment is a real loss.
+        $tradesScope = Trade::where('is_dry_run', $isDryRun);
+        $totalPnl = (clone $tradesScope)->sum('pnl');
+        $closedFunding = (clone $tradesScope)->sum('funding_fee');
+        $totalTrades = (clone $tradesScope)->count();
+        $winningTrades = (clone $tradesScope)
+            ->whereRaw('(pnl + COALESCE(funding_fee, 0)) > 0')
+            ->count();
+        $losingTrades = (clone $tradesScope)
+            ->whereRaw('(pnl + COALESCE(funding_fee, 0)) < 0')
+            ->count();
         $winRate = $totalTrades > 0 ? round(($winningTrades / $totalTrades) * 100, 1) : 0;
 
         $totalInvested = $openPositions->sum('position_size_usdt');
-        $totalFees = Trade::sum('fees');
+        $totalFees = (clone $tradesScope)->sum('fees');
 
         $accountData = $exchange->getAccountData();
 
@@ -117,7 +132,6 @@ class DashboardController extends Controller
             ];
         });
 
-        $closedFunding = Trade::sum('funding_fee');
         $openNetPnl = $positionsData->sum('net_pnl');
         $totalNetPnl = round($totalPnl + $closedFunding + $openNetPnl, 4);
         $totalFunding = round($positionsData->sum('funding_fee') + $closedFunding, 4);
@@ -139,7 +153,7 @@ class DashboardController extends Controller
                 'winning_trades' => $winningTrades,
                 'losing_trades' => $losingTrades,
                 'win_rate' => $winRate,
-                'dry_run' => (bool) Settings::get('dry_run'),
+                'dry_run' => $isDryRun,
                 'trading_paused' => (bool) Settings::get('trading_paused'),
             ],
             'ts' => now()->timestamp,
@@ -652,15 +666,19 @@ class DashboardController extends Controller
         $unrealizedProfit = (float) ($accountData['unrealizedProfit'] ?? 0);
         $equity = $walletBalance + $unrealizedProfit;
 
+        // Drawdown is measured on equity (wallet + unrealized) — using
+        // wallet_balance alone underestimates the peak whenever a position is
+        // open with unrealized profit, and skips drawdowns that show up only
+        // as unrealized losses.
         $snapshots = BalanceSnapshot::where('is_dry_run', $isDryRun)
             ->orderBy('created_at', 'asc')
-            ->get(['wallet_balance', 'created_at']);
+            ->get(['wallet_balance', 'unrealized_profit', 'created_at']);
 
         $equity24hAgo = null;
         $cutoff24h = $now->copy()->subDay();
         foreach ($snapshots as $s) {
             if ($s->created_at->lessThanOrEqualTo($cutoff24h)) {
-                $equity24hAgo = (float) $s->wallet_balance;
+                $equity24hAgo = (float) $s->wallet_balance + (float) ($s->unrealized_profit ?? 0);
             } else {
                 break;
             }
@@ -674,8 +692,10 @@ class DashboardController extends Controller
         $maxDdFrom = null;
         $maxDdTo = null;
         $peakAt = null;
+        $latestSnapshotEquity = 0.0;
         foreach ($snapshots as $s) {
-            $v = (float) $s->wallet_balance;
+            $v = (float) $s->wallet_balance + (float) ($s->unrealized_profit ?? 0);
+            $latestSnapshotEquity = $v;
             if ($v > $peak) {
                 $peak = $v;
                 $peakAt = $s->created_at;
@@ -690,7 +710,10 @@ class DashboardController extends Controller
             }
         }
 
-        $runningPeak = $snapshots->isNotEmpty() ? max($snapshots->max('wallet_balance'), $equity) : $equity;
+        // Anchor the running peak against either the historical max equity or
+        // the live equity (whichever is higher) so the current drawdown can
+        // never go negative when we set a fresh ATH between snapshots.
+        $runningPeak = max($peak, $equity);
         $currentDdPct = $runningPeak > 0 ? max(0.0, ($runningPeak - $equity) / $runningPeak * 100) : 0.0;
 
         $todayPnl = (float) Trade::where('is_dry_run', $isDryRun)
@@ -698,37 +721,47 @@ class DashboardController extends Controller
             ->selectRaw('COALESCE(SUM(pnl), 0) + COALESCE(SUM(funding_fee), 0) AS total')
             ->value('total');
 
-        // Profit factor: gross wins / |gross losses| over last 30d. Returns
-        // null when losses==0 so the UI can show "n/a" instead of Infinity.
+        // Profit factor: gross net wins / |gross net losses| over last 30d.
+        // "Net" = pnl + funding_fee, matching the Realized column in the
+        // History tab. Returns null when losses==0 so the UI shows "n/a"
+        // instead of Infinity.
         $thirtyDaysAgo = $now->copy()->subDays(30);
+        $netExpr = '(pnl + COALESCE(funding_fee, 0))';
         $wins = (float) Trade::where('is_dry_run', $isDryRun)
             ->where('created_at', '>=', $thirtyDaysAgo)
-            ->where('pnl', '>', 0)
-            ->sum('pnl');
+            ->whereRaw("$netExpr > 0")
+            ->selectRaw("COALESCE(SUM($netExpr), 0) AS s")
+            ->value('s');
         $losses = (float) Trade::where('is_dry_run', $isDryRun)
             ->where('created_at', '>=', $thirtyDaysAgo)
-            ->where('pnl', '<', 0)
-            ->sum('pnl');
+            ->whereRaw("$netExpr < 0")
+            ->selectRaw("COALESCE(SUM($netExpr), 0) AS s")
+            ->value('s');
         $profitFactor = $losses < 0 ? round($wins / abs($losses), 2) : null;
 
         // Rolling win-rate: last 20 trades. The history series is the running
-        // win-rate over the last 100 trades, plotted as a sparkline.
+        // win-rate over the last 100 trades (most recent 100, walked oldest
+        // → newest within that window so the sparkline reads left-to-right
+        // chronologically).
         $recent20 = Trade::where('is_dry_run', $isDryRun)
             ->orderByDesc('created_at')
             ->limit(20)
-            ->get(['pnl']);
+            ->get(['pnl', 'funding_fee']);
         $rollingWinRate = $recent20->count() > 0
-            ? round($recent20->where('pnl', '>', 0)->count() / $recent20->count(), 3)
+            ? round($recent20->filter(fn ($t) => ((float) $t->pnl + (float) ($t->funding_fee ?? 0)) > 0)->count() / $recent20->count(), 3)
             : 0.0;
 
         $recent100 = Trade::where('is_dry_run', $isDryRun)
-            ->orderBy('created_at')
+            ->orderByDesc('created_at')
             ->limit(100)
-            ->get(['pnl']);
+            ->get(['pnl', 'funding_fee'])
+            ->reverse()
+            ->values();
         $winRateHistory = [];
         $window = [];
         foreach ($recent100 as $t) {
-            $window[] = ((float) $t->pnl) > 0 ? 1 : 0;
+            $net = (float) $t->pnl + (float) ($t->funding_fee ?? 0);
+            $window[] = $net > 0 ? 1 : 0;
             if (count($window) > 20) {
                 array_shift($window);
             }
@@ -737,36 +770,48 @@ class DashboardController extends Controller
             }
         }
 
-        $avgDuration = (float) Trade::where('trades.is_dry_run', $isDryRun)
+        // Wrap the value() call before casting so a null result (no closed
+        // trades yet) falls through to 0 instead of getting silently turned
+        // into 0.0 by the cast and making `?? 0` dead code.
+        $avgDuration = (float) (Trade::where('trades.is_dry_run', $isDryRun)
             ->whereNotNull('position_id')
             ->leftJoin('positions', 'positions.id', '=', 'trades.position_id')
             ->selectRaw('AVG(TIMESTAMPDIFF(SECOND, positions.opened_at, trades.created_at)) AS s')
-            ->value('s') ?? 0;
+            ->value('s') ?? 0);
 
+        // position_size_usdt is already notional (margin × leverage at open
+        // time). Open exposure = sum-notional / wallet × 100. Multiplying by
+        // leverage again here would scale by leverage² — a long-standing bug
+        // worth not repeating.
         $exposureUsdt = (float) Position::open()
             ->where('is_dry_run', $isDryRun)
             ->sum('position_size_usdt');
         $exposurePct = $walletBalance > 0
-            ? round(($exposureUsdt * (int) Settings::get('leverage')) / $walletBalance * 100, 1)
+            ? round($exposureUsdt / $walletBalance * 100, 1)
             : 0.0;
 
+        // Best / worst on net (pnl + funding_fee).
         $bestTrade = Trade::where('is_dry_run', $isDryRun)
-            ->orderByDesc('pnl')
-            ->first(['symbol', 'pnl', 'created_at']);
+            ->selectRaw("symbol, ($netExpr) AS net_pnl, created_at")
+            ->orderByDesc('net_pnl')
+            ->first();
         $worstTrade = Trade::where('is_dry_run', $isDryRun)
-            ->orderBy('pnl')
-            ->first(['symbol', 'pnl', 'created_at']);
+            ->selectRaw("symbol, ($netExpr) AS net_pnl, created_at")
+            ->orderBy('net_pnl')
+            ->first();
 
-        // Streak: walk most recent trades, increment while sign matches.
+        // Streak walks most-recent trades and increments while the sign of
+        // (pnl + funding_fee) matches.
         $streakRows = Trade::where('is_dry_run', $isDryRun)
             ->orderByDesc('created_at')
             ->limit(50)
-            ->get(['pnl']);
+            ->get(['pnl', 'funding_fee']);
         $streakType = null;
         $streakCount = 0;
         foreach ($streakRows as $t) {
-            $isWin = ((float) $t->pnl) > 0;
-            $isLoss = ((float) $t->pnl) < 0;
+            $net = (float) $t->pnl + (float) ($t->funding_fee ?? 0);
+            $isWin = $net > 0;
+            $isLoss = $net < 0;
             if ($streakType === null) {
                 if ($isWin) {
                     $streakType = 'win';
@@ -822,12 +867,12 @@ class DashboardController extends Controller
             'exposure_usdt' => round($exposureUsdt, 2),
             'best_trade' => $bestTrade ? [
                 'symbol' => $bestTrade->symbol,
-                'pnl' => round((float) $bestTrade->pnl, 2),
+                'pnl' => round((float) $bestTrade->net_pnl, 2),
                 'date' => $bestTrade->created_at?->toIso8601String(),
             ] : null,
             'worst_trade' => $worstTrade ? [
                 'symbol' => $worstTrade->symbol,
-                'pnl' => round((float) $worstTrade->pnl, 2),
+                'pnl' => round((float) $worstTrade->net_pnl, 2),
                 'date' => $worstTrade->created_at?->toIso8601String(),
             ] : null,
             'current_streak' => [
@@ -853,9 +898,10 @@ class DashboardController extends Controller
     {
         $isDryRun = (bool) Settings::get('dry_run');
         $thirtyDaysAgo = now()->subDays(30);
+        $netExpr = '(pnl + COALESCE(funding_fee, 0))';
 
         $bySymbol = Trade::where('is_dry_run', $isDryRun)
-            ->selectRaw('symbol, SUM(pnl) AS pnl, COUNT(*) AS trades')
+            ->selectRaw("symbol, SUM($netExpr) AS pnl, COUNT(*) AS trades")
             ->groupBy('symbol')
             ->orderByDesc('pnl')
             ->limit(10)
@@ -869,7 +915,7 @@ class DashboardController extends Controller
 
         $byReason = Trade::where('is_dry_run', $isDryRun)
             ->where('created_at', '>=', $thirtyDaysAgo)
-            ->selectRaw('close_reason, COUNT(*) AS count, SUM(pnl) AS pnl')
+            ->selectRaw("close_reason, COUNT(*) AS count, SUM($netExpr) AS pnl")
             ->groupBy('close_reason')
             ->get()
             ->map(fn ($r) => [
@@ -881,7 +927,7 @@ class DashboardController extends Controller
 
         $byDayRows = Trade::where('is_dry_run', $isDryRun)
             ->where('created_at', '>=', $thirtyDaysAgo)
-            ->selectRaw('DATE(created_at) AS d, COUNT(*) AS trades, SUM(pnl) AS pnl')
+            ->selectRaw("DATE(created_at) AS d, COUNT(*) AS trades, SUM($netExpr) AS pnl")
             ->groupBy('d')
             ->orderBy('d')
             ->get()

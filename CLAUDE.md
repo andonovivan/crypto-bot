@@ -140,9 +140,14 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 | `app/Services/Exchange/DryRunExchange.php` | Paper trading simulation |
 | `app/Services/Exchange/HistoricalReplayExchange.php` | Offline replay exchange for `bot:backtest` — serves `kline_history` rows against a movable clock, stubs out order APIs, writes DB rows with `is_dry_run=true`. Supports fixed-sizing mode (`setFixedSizing`) and symbol-scoped probe prices (`setProbePrice`/`clearProbePrice`) for intra-bar SL/TP simulation. |
 | `app/Services/Exchange/ExchangeDispatcher.php` | Runtime router: reads `Settings::get('dry_run')` on each call, delegates to live or dry |
-| `app/Http/Controllers/DashboardController.php` | All API endpoints |
-| `resources/views/dashboard.blade.php` | Single-page dark theme dashboard |
-| `routes/web.php` | Route definitions |
+| `app/Http/Controllers/DashboardController.php` | All API endpoints. `stats()` and `tradeAggregates()` build the new Overview/Risk metrics; `data()` powers positions + topbar; `settings()` returns grouped metadata via `Settings::groups()` |
+| `resources/views/dashboard.blade.php` | Thin shell — extends `layouts/dashboard` and `@include`s the page partial named by the route's `defaults('page', ...)` |
+| `resources/views/layouts/dashboard.blade.php` | Sidebar + topbar shell, loads `@vite(...)` |
+| `resources/views/pages/{overview,positions,scanner,history,failed,risk,settings}.blade.php` | Per-route page partials |
+| `resources/views/components/{card,chart-card,kpi-tile,pagination,range-pills,sidebar,table-shell,topbar}.blade.php` | Reusable Blade components |
+| `resources/js/dashboard/` | Per-page scheduler (`polling.js`), API client, formatters, toast bus, table renderers, dynamically-imported chart factories (`charts/equity.js`, `charts/aggregates.js`, `charts/theme.js` — ECharts is code-split into its own chunk) |
+| `config/settings_meta.php` | Settings UI metadata: 7 functional groups, per-key descriptions, numeric `min/max/step` constraints |
+| `routes/web.php` | Route definitions — 7 dashboard page routes (all served by `index()`, distinguished via `defaults('page', ...)`) plus the JSON API |
 | `app/Console/Commands/BotRun.php` | Continuous scan+monitor loop with graceful shutdown |
 | `app/Console/Commands/BotWsPrices.php` | Long-running WebSocket worker for `!markPrice@arr` → `binance:prices` cache |
 | `app/Console/Commands/BotWsUserData.php` | Long-running WebSocket worker for Binance user-data stream — reconciles SL/TP fills via `ORDER_TRADE_UPDATE` events |
@@ -230,13 +235,18 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 |--------|------|--------|
 | GET | `/` | Dashboard view |
 | GET | `/api/data` | Positions (with estimated fees & net P&L), trades, summary JSON |
-| GET | `/api/settings` | Current settings |
+| GET | `/api/stats` | Aggregated metrics for Overview KPIs + Risk page: equity (+24h Δ), current/max drawdown, profit factor (30d), rolling 20-trade win rate (+ 100-trade history sparkline), avg trade duration, today P&L, exposure %, best/worst trade, current streak, circuit-breaker state, 30d funding split |
+| GET | `/api/trades` | Paginated trade history `{page, per_page, sort_by, sort_dir}` |
+| GET | `/api/trades/aggregates` | Rollups for the Overview charts: P&L by symbol (top 10), close-reason mix (30d), trades per day (30d, densified) |
+| GET | `/api/failed-entries` | Paginated `Position` rows with `status=Failed` |
+| GET | `/api/settings` | Current settings + grouping metadata (`Settings::groups()`) for the Settings UI |
 | GET | `/api/scanner` | Scan candidates: pump/dump filter + 15m analysis + blocked reasons |
 | GET | `/api/balance-history` | Equity-curve points `{range: 1h\|6h\|24h\|7d\|30d\|all}` — filters by current `dry_run` |
 | POST | `/api/settings` | Save settings `{settings: {key: value}}` |
 | POST | `/api/scan` | Scan + auto-trade `{auto_trade: bool}` |
 | POST | `/api/open-position` | Manually open SHORT `{symbol: string}` (direction forced to SHORT) |
 | POST | `/api/close` | Close position `{position_id: int}` |
+| POST | `/api/close-all` | Close every open position at market |
 | POST | `/api/add-margin` | Add to position `{position_id: int, amount_usdt: float}` |
 | POST | `/api/reverse` | Reverse position direction `{position_id: int}` |
 | POST | `/api/reset` | Truncate all trades/positions |
@@ -360,22 +370,23 @@ Positions still open at the final simulated bar are force-closed via `forceClose
 
 ## Dashboard
 
-Four tabs: **Dashboard**, **Scanner**, **Trade History**, **Settings**.
+Component-driven Blade + Tailwind v4 + Alpine.js + ECharts (code-split). Sidebar navigation across 7 pages, each a separate Laravel route served by `DashboardController::index()` with the page name passed via `defaults('page', ...)`. Topbar (status pills, wallet, today P&L, last-update pulse, Pause toggle) is shared across pages and driven by Alpine subscribing to the central `polling` state.
 
-- **Dashboard tab**:
-  - **Cards**: Wallet balance, available balance, margin in use, P&L (net), fees, funding, win rate
-  - **Equity Curve**: hand-rolled SVG line chart plotting `wallet_balance` (blue) and `available_balance` (green) from `balance_snapshots`. Range pills: 1h/6h/24h/7d/30d/All (24h default). Hover circles show timestamp, both balances, and open-position count. Auto-refreshes every 60s. Filtered by current `dry_run` toggle — flipping the mode swaps series to the other history.
-  - **Open Positions table**: Symbol (with side/leverage/DRY badges), entry/current price, unrealized P&L, P&L%, size (notional USDT), net P&L (with fees + funding rate + accumulated funding), SL/TP, opened time, hold time, Add/Reverse/Close buttons
-- **Scanner tab**:
-  - **Scanner table**: 10 columns — Symbol (with PUMP/DUMP pill) | 24h % | Volume | Price | 15m Trend (DOWN/UP/FLAT pill) | Last Candle (RED/GREEN + body %) | Funding | Pos | Status (✓/✗ with blocked reason) | Actions (Short button)
-  - **Scan button**: View-only scan — fetches latest candidates without opening
-  - **Scan + Auto Trade button**: Scans and automatically opens SHORTs where all entry conditions pass
-  - **Pause/Resume button**: Toggles `trading_paused` setting
-  - **Manual SHORT open**: Symbol dropdown (populated from candidates) + Open SHORT button (direction is always SHORT)
-  - **Auto-refresh**: Every 15s when the Scanner tab is visible; pauses when tab is backgrounded
-- **Trade History tab**: Symbol (with side/leverage/DRY badge), entry/exit price, realized P&L, P&L%, size, fees (with funding breakdown), close reason, opened/closed time. Above the trade table, a red-bordered **Failed Entries** block renders `Position` rows with `status=Failed` (last 50) — shows symbol, size, `error_message`, time. Only rendered when failed entries exist.
-- **Settings tab**: All runtime-configurable settings (34 keys across generic trading, short-scalp strategy, HTF filter, ATR SL, partial TP, and risk controls), auto-populated from `Settings::all()`
-- **Formatting**: Thousand separators on dollar amounts, subscript notation for micro-prices, inline color styling for P&L values
+**Pages:**
+
+- **Overview** (`/`): top KPI strip (equity + 24h Δ, current drawdown, today P&L, open exposure) → equity curve with drawdown overlay (1h/6h/24h/7d/30d/all range pills) → performance band (profit factor 30d, rolling 20-trade win rate with sparkline, avg trade duration, max drawdown) → charts row (P&L by symbol top 10 bar, close-reason donut, trades-per-day histogram) → Open Positions table.
+- **Positions** (`/positions`): wallet/available/margin/exposure KPIs + the same Open Positions table. Pull from `/api/data` only (no stats fetch).
+- **Scanner** (`/scanner`): pump/dump candidates table (auto-refreshes every 15s when tab visible) + manual SHORT entry control.
+- **History** (`/history`): paginated closed-trade table.
+- **Failed** (`/failed`): paginated `Position::status=Failed` rows with error messages.
+- **Risk** (`/risk`): drawdown KPIs + circuit-breaker state card + recent-performance card (best/worst trade, current win/loss streak, 30d funding split) + Open Positions table.
+- **Settings** (`/settings`): 7 grouped sections from `config/settings_meta.php` (Generic Trading, Scalp Strategy, HTF Filter, ATR SL, Partial TP, Trailing TP, Risk Controls) + Danger Zone (reset). Sticky TOC, search filter (fuzzy on key + label + description), sticky save bar that surfaces only when fields are dirty. Toggles for booleans, number inputs with per-key `min/max/step`. 41 keys total.
+
+**Polling and lazy loading** ([resources/js/dashboard/polling.js](resources/js/dashboard/polling.js)): a tiny per-page scheduler registers only the pollers needed by the current page. Every page polls `/api/data` (10s) for the topbar; `/api/stats` (30s) is registered only when a `[id^="kpi-"]` element or risk panel exists; equity / aggregates pollers (60s each) are registered only when their chart elements are present. The scheduler pauses every poller while `document.hidden` is true and runs each due poller on visibility return.
+
+**Code splitting**: `import * as echarts` is dynamic (`await import('./charts/equity.js')`), so Vite emits `theme-*.js` (ECharts, ~485 KB raw / ~162 KB gzip) as a separate chunk that is fetched only on pages that render a chart. Initial JS payload on chartless pages (Settings, History, Failed, Scanner) is ~126 KB raw / ~41 KB gzip.
+
+**Visual conventions**: Dark Tailwind palette (`zinc-950` surface, `zinc-900` elevated, sky-400 accent, emerald/rose for P&L, amber for warnings); Inter UI font; tabular-numbers monospace for all P&L/price columns; subscript-zero notation for micro-prices (`$0.0₅1234`); side/leverage/DRY-RUN badges on every position row; toast notifications via Alpine bus; cursor-pointer restored on `button:not(:disabled)` (Tailwind v4 reset removes the default).
 
 ## Known Issues & Gotchas
 
