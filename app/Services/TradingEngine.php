@@ -828,6 +828,29 @@ class TradingEngine
                 : (float) $position->take_profit_price;
         }
 
+        // Trailing TP positions store take_profit_price=0 (the trail is server-
+        // side, no fixed trigger), so the bracket-trigger fallback above can't
+        // rescue a missing avg/last price for a TP fill. Last-resort: query
+        // /fapi/v1/userTrades for the actual fill. If that fails too, refuse
+        // to finalize — the next safety-reconcile cycle will retry rather than
+        // recording a bogus close at price 0.
+        if ($exitPrice <= 0) {
+            $userFill = $this->findCloseFromUserTrades($position, $exchange);
+            if ($userFill !== null && $userFill['price'] > 0) {
+                $exitPrice = $userFill['price'];
+            }
+        }
+
+        if ($exitPrice <= 0) {
+            Log::warning('Reconcile aborted: no usable exit price', [
+                'symbol' => $position->symbol,
+                'position_id' => $position->id,
+                'reason' => $reason->value,
+                'fill' => $fill,
+            ]);
+            return null;
+        }
+
         $orderId = (string) ($fill['i'] ?? '');
 
         Log::info('Reconciling position close from stream', [

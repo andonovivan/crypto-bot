@@ -793,8 +793,13 @@ class DashboardController extends Controller
         // Wrap the value() call before casting so a null result (no closed
         // trades yet) falls through to 0 instead of getting silently turned
         // into 0.0 by the cast and making `?? 0` dead code.
+        //
+        // Exclude PartialTakeProfit rows: those fire mid-position (partial
+        // scale-out) so they record an early `created_at`. Averaging them in
+        // pulls the mean below the actual hold time of a full position.
         $avgDuration = (float) (Trade::where('trades.is_dry_run', $isDryRun)
             ->whereNotNull('position_id')
+            ->where('trades.close_reason', '!=', CloseReason::PartialTakeProfit->value)
             ->leftJoin('positions', 'positions.id', '=', 'trades.position_id')
             ->selectRaw('AVG(TIMESTAMPDIFF(SECOND, positions.opened_at, trades.created_at)) AS s')
             ->value('s') ?? 0);

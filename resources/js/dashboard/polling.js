@@ -31,6 +31,7 @@ const polling = {
     },
     listeners: new Set(),
     pollers: [],   // { name, fn, interval, runOnVisible }
+    cleanups: [],  // teardown fns for document/window listeners — replayed on stop()
 };
 
 function emit() {
@@ -328,7 +329,7 @@ function startScheduler() {
         p.fn();
     });
 
-    document.addEventListener('visibilitychange', () => {
+    const onVisible = () => {
         if (!document.hidden) {
             // On unhide, run any poller whose interval has elapsed.
             const now = Date.now();
@@ -339,7 +340,9 @@ function startScheduler() {
                 }
             });
         }
-    });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    polling.cleanups.push(() => document.removeEventListener('visibilitychange', onVisible));
 }
 
 function stop() {
@@ -348,6 +351,12 @@ function stop() {
         schedulerHandle = null;
     }
     polling.pollers.length = 0;
+    // Tear down document/window listeners attached during start(). Without
+    // this, every SPA navigation accumulated another visibilitychange and
+    // resize listener, multiplying API calls and chart resizes per event.
+    while (polling.cleanups.length) {
+        try { polling.cleanups.pop()(); } catch (_) { /* ignore */ }
+    }
 }
 
 // Decide which pollers to run based on what's actually rendered. This is the
@@ -376,18 +385,22 @@ function start(_page) {
 
     if (hasEquityChart) {
         registerPoller('equity', fetchEquity, 60_000);
-        window.addEventListener('resize', async () => {
+        const onResize = async () => {
             const { resizeEquity } = await ensureCharts();
             resizeEquity();
-        });
+        };
+        window.addEventListener('resize', onResize);
+        polling.cleanups.push(() => window.removeEventListener('resize', onResize));
     }
 
     if (hasAggregateChart) {
         registerPoller('aggregates', fetchAggregates, 60_000);
-        window.addEventListener('resize', async () => {
+        const onResize = async () => {
             const { resizeAggregates } = await ensureCharts();
             resizeAggregates();
-        });
+        };
+        window.addEventListener('resize', onResize);
+        polling.cleanups.push(() => window.removeEventListener('resize', onResize));
     }
 
     startScheduler();

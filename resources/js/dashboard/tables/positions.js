@@ -156,13 +156,19 @@ async function handleAction(action, id, btn) {
     }
 }
 
+// Delegated click handler for row actions. Attached at module load, not per
+// bindPositionsTable() — SPA navigation re-runs bindPositionsTable() each
+// time the user lands on a page with a positions table, and re-attaching the
+// document listener on every mount accumulated zombie handlers that re-fired
+// every action N times after N navigations.
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest('#positions-body [data-action]');
+    if (!btn) return;
+    handleAction(btn.dataset.action, btn.dataset.id, btn);
+});
+
 export function bindPositionsTable() {
     bindSortHandlers();
-    document.addEventListener('click', (e) => {
-        const btn = e.target.closest('#positions-body [data-action]');
-        if (!btn) return;
-        handleAction(btn.dataset.action, btn.dataset.id, btn);
-    });
 
     const closeAllBtn = document.getElementById('close-all-btn');
     if (closeAllBtn) {

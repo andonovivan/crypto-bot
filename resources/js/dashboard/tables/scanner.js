@@ -146,6 +146,39 @@ function stopTimer() {
     }
 }
 
+// Delegated click handler for the per-row Short button. Attached once at
+// module load so that SPA navigation (which re-runs bindScanner()) doesn't
+// stack duplicate listeners — without this, a single Short click after N
+// visits to /scanner fired N POSTs to /api/open-position.
+document.addEventListener('click', async (e) => {
+    const shortBtn = e.target.closest('#scanner-body [data-action="short"]');
+    if (!shortBtn) return;
+    const symbol = shortBtn.dataset.symbol;
+    if (!confirm(`Open SHORT position on ${symbol}?`)) return;
+    shortBtn.disabled = true;
+    const orig = shortBtn.textContent;
+    shortBtn.textContent = 'Opening…';
+    try {
+        await postJson('/api/open-position', { symbol });
+        toast.success(`Opened SHORT on ${symbol}`);
+        fetchScanner(true);
+        window.dashboardPolling?.refreshNow();
+    } catch (err) {
+        toast.error(err.message);
+    } finally {
+        shortBtn.disabled = false;
+        shortBtn.textContent = orig;
+    }
+});
+
+// Same singleton treatment for visibility — startTimer() guards against
+// duplicate intervals via stopTimer(), but accumulating listeners still
+// queued multiple stop/start cycles per visibility change.
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopTimer();
+    else if (document.getElementById('scanner-body')) startTimer();
+});
+
 export function bindScanner() {
     document.querySelectorAll('[data-sort-table="scanner"]').forEach((th) => {
         th.addEventListener('click', () => {
@@ -157,28 +190,6 @@ export function bindScanner() {
             }
             if (cached) render(cached);
         });
-    });
-
-    document.addEventListener('click', async (e) => {
-        const shortBtn = e.target.closest('#scanner-body [data-action="short"]');
-        if (shortBtn) {
-            const symbol = shortBtn.dataset.symbol;
-            if (!confirm(`Open SHORT position on ${symbol}?`)) return;
-            shortBtn.disabled = true;
-            const orig = shortBtn.textContent;
-            shortBtn.textContent = 'Opening…';
-            try {
-                await postJson('/api/open-position', { symbol });
-                toast.success(`Opened SHORT on ${symbol}`);
-                fetchScanner(true);
-                window.dashboardPolling?.refreshNow();
-            } catch (err) {
-                toast.error(err.message);
-            } finally {
-                shortBtn.disabled = false;
-                shortBtn.textContent = orig;
-            }
-        }
     });
 
     document.getElementById('scan-btn')?.addEventListener('click', () => fetchScanner(false));
@@ -222,9 +233,4 @@ export function bindScanner() {
 
     fetchScanner(true);
     startTimer();
-
-    document.addEventListener('visibilitychange', () => {
-        if (document.hidden) stopTimer();
-        else startTimer();
-    });
 }
