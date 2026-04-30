@@ -70,6 +70,8 @@ async function fetchData() {
         polling.state.dryRun = s.dry_run;
         polling.state.paused = s.trading_paused;
         polling.state.wallet = s.wallet_balance;
+        polling.state.todayPnl = s.today_pnl ?? 0;
+        polling.state.circuitBreakerActive = s.circuit_breaker_active ?? false;
         polling.state.lastUpdate = data.ts;
         emit();
 
@@ -77,6 +79,12 @@ async function fetchData() {
         setText('kpi-wallet', fmtMoney(s.wallet_balance));
         setText('kpi-available', fmtMoney(s.available_balance));
         setText('kpi-margin-in-use', fmtMoney(s.margin_in_use));
+
+        const todayEl = document.getElementById('kpi-today-pnl');
+        if (todayEl) {
+            todayEl.textContent = fmtPnl(s.today_pnl);
+            setColor('kpi-today-pnl', pnlClass(s.today_pnl));
+        }
 
         const netPnlEl = document.getElementById('kpi-net-pnl');
         if (netPnlEl) {
@@ -112,9 +120,6 @@ async function fetchData() {
 async function fetchStats() {
     try {
         const data = await getJson('/api/stats');
-        polling.state.circuitBreakerActive = data.circuit_breaker?.is_active ?? false;
-        polling.state.todayPnl = data.today_pnl ?? 0;
-        emit();
 
         const equityEl = document.getElementById('kpi-equity');
         if (equityEl) {
@@ -141,12 +146,6 @@ async function fetchStats() {
             } else if (sub) {
                 sub.textContent = data.circuit_breaker?.peak_equity ? 'Peak: ' + fmtMoney(data.circuit_breaker.peak_equity) : '';
             }
-        }
-
-        const todayEl = document.getElementById('kpi-today-pnl');
-        if (todayEl) {
-            todayEl.textContent = fmtPnl(data.today_pnl);
-            setColor('kpi-today-pnl', pnlClass(data.today_pnl));
         }
 
         const expEl = document.getElementById('kpi-exposure');

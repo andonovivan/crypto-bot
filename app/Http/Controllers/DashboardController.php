@@ -136,6 +136,16 @@ class DashboardController extends Controller
         $totalNetPnl = round($totalPnl + $closedFunding + $openNetPnl, 4);
         $totalFunding = round($positionsData->sum('funding_fee') + $closedFunding, 4);
 
+        // Surface fields the topbar needs on the global /api/data feed so they
+        // stay accurate on pages that don't poll /api/stats.
+        $todayPnl = (float) (clone $tradesScope)
+            ->where('created_at', '>=', now()->startOfDay())
+            ->selectRaw('COALESCE(SUM(pnl), 0) + COALESCE(SUM(funding_fee), 0) AS total')
+            ->value('total');
+
+        $cbCooldownUntil = Cache::get('circuit_breaker:cooldown_until');
+        $circuitBreakerActive = $cbCooldownUntil !== null && $cbCooldownUntil > now()->timestamp;
+
         return response()->json([
             'positions' => $positionsData,
             'summary' => [
@@ -145,6 +155,7 @@ class DashboardController extends Controller
                 'margin_in_use' => round($accountData['positionMargin'], 2),
                 'margin_balance' => round($accountData['marginBalance'], 2),
                 'net_pnl' => $totalNetPnl,
+                'today_pnl' => round($todayPnl, 2),
                 'total_fees' => round($totalFees + $positionsData->sum('estimated_fees'), 4),
                 'total_funding' => $totalFunding,
                 'total_invested' => round($totalInvested, 2),
@@ -155,6 +166,7 @@ class DashboardController extends Controller
                 'win_rate' => $winRate,
                 'dry_run' => $isDryRun,
                 'trading_paused' => (bool) Settings::get('trading_paused'),
+                'circuit_breaker_active' => $circuitBreakerActive,
             ],
             'ts' => now()->timestamp,
         ]);
