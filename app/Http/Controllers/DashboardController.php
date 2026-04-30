@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Enums\CloseReason;
 use App\Enums\PositionStatus;
 use App\Models\BalanceSnapshot;
 use App\Models\Position;
@@ -13,12 +14,15 @@ use App\Services\ShortSignal;
 use App\Services\TradingEngine;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 
 class DashboardController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return view('dashboard');
+        $page = $request->route()?->defaults['page'] ?? 'overview';
+
+        return view('dashboard', ['page' => $page]);
     }
 
     public function data(ExchangeInterface $exchange): JsonResponse
@@ -496,6 +500,7 @@ class DashboardController extends Controller
     {
         return response()->json([
             'settings' => Settings::all(),
+            'groups' => Settings::groups(),
             'exchange' => [
                 'driver' => config('crypto.exchange'),
                 'testnet' => config('crypto.binance.testnet'),
@@ -633,6 +638,277 @@ class DashboardController extends Controller
                 'quantity' => $position->quantity,
                 'position_size_usdt' => $position->position_size_usdt,
             ],
+        ]);
+    }
+
+    public function stats(ExchangeInterface $exchange): JsonResponse
+    {
+        $isDryRun = (bool) Settings::get('dry_run');
+        $now = now();
+
+        $accountData = $exchange->getAccountData();
+        $walletBalance = (float) $accountData['walletBalance'];
+        $availableBalance = (float) $accountData['availableBalance'];
+        $unrealizedProfit = (float) ($accountData['unrealizedProfit'] ?? 0);
+        $equity = $walletBalance + $unrealizedProfit;
+
+        $snapshots = BalanceSnapshot::where('is_dry_run', $isDryRun)
+            ->orderBy('created_at', 'asc')
+            ->get(['wallet_balance', 'created_at']);
+
+        $equity24hAgo = null;
+        $cutoff24h = $now->copy()->subDay();
+        foreach ($snapshots as $s) {
+            if ($s->created_at->lessThanOrEqualTo($cutoff24h)) {
+                $equity24hAgo = (float) $s->wallet_balance;
+            } else {
+                break;
+            }
+        }
+
+        // Max-drawdown: walk the equity series tracking running peak and the
+        // worst peak-to-trough ratio. Anchor the trough's date so the UI can
+        // show the range, not just a number.
+        $peak = 0.0;
+        $maxDdPct = 0.0;
+        $maxDdFrom = null;
+        $maxDdTo = null;
+        $peakAt = null;
+        foreach ($snapshots as $s) {
+            $v = (float) $s->wallet_balance;
+            if ($v > $peak) {
+                $peak = $v;
+                $peakAt = $s->created_at;
+            }
+            if ($peak > 0) {
+                $dd = ($peak - $v) / $peak * 100;
+                if ($dd > $maxDdPct) {
+                    $maxDdPct = $dd;
+                    $maxDdFrom = $peakAt;
+                    $maxDdTo = $s->created_at;
+                }
+            }
+        }
+
+        $runningPeak = $snapshots->isNotEmpty() ? max($snapshots->max('wallet_balance'), $equity) : $equity;
+        $currentDdPct = $runningPeak > 0 ? max(0.0, ($runningPeak - $equity) / $runningPeak * 100) : 0.0;
+
+        $todayPnl = (float) Trade::where('is_dry_run', $isDryRun)
+            ->where('created_at', '>=', $now->copy()->startOfDay())
+            ->selectRaw('COALESCE(SUM(pnl), 0) + COALESCE(SUM(funding_fee), 0) AS total')
+            ->value('total');
+
+        // Profit factor: gross wins / |gross losses| over last 30d. Returns
+        // null when losses==0 so the UI can show "n/a" instead of Infinity.
+        $thirtyDaysAgo = $now->copy()->subDays(30);
+        $wins = (float) Trade::where('is_dry_run', $isDryRun)
+            ->where('created_at', '>=', $thirtyDaysAgo)
+            ->where('pnl', '>', 0)
+            ->sum('pnl');
+        $losses = (float) Trade::where('is_dry_run', $isDryRun)
+            ->where('created_at', '>=', $thirtyDaysAgo)
+            ->where('pnl', '<', 0)
+            ->sum('pnl');
+        $profitFactor = $losses < 0 ? round($wins / abs($losses), 2) : null;
+
+        // Rolling win-rate: last 20 trades. The history series is the running
+        // win-rate over the last 100 trades, plotted as a sparkline.
+        $recent20 = Trade::where('is_dry_run', $isDryRun)
+            ->orderByDesc('created_at')
+            ->limit(20)
+            ->get(['pnl']);
+        $rollingWinRate = $recent20->count() > 0
+            ? round($recent20->where('pnl', '>', 0)->count() / $recent20->count(), 3)
+            : 0.0;
+
+        $recent100 = Trade::where('is_dry_run', $isDryRun)
+            ->orderBy('created_at')
+            ->limit(100)
+            ->get(['pnl']);
+        $winRateHistory = [];
+        $window = [];
+        foreach ($recent100 as $t) {
+            $window[] = ((float) $t->pnl) > 0 ? 1 : 0;
+            if (count($window) > 20) {
+                array_shift($window);
+            }
+            if (count($window) >= 5) {
+                $winRateHistory[] = round(array_sum($window) / count($window), 3);
+            }
+        }
+
+        $avgDuration = (float) Trade::where('trades.is_dry_run', $isDryRun)
+            ->whereNotNull('position_id')
+            ->leftJoin('positions', 'positions.id', '=', 'trades.position_id')
+            ->selectRaw('AVG(TIMESTAMPDIFF(SECOND, positions.opened_at, trades.created_at)) AS s')
+            ->value('s') ?? 0;
+
+        $exposureUsdt = (float) Position::open()
+            ->where('is_dry_run', $isDryRun)
+            ->sum('position_size_usdt');
+        $exposurePct = $walletBalance > 0
+            ? round(($exposureUsdt * (int) Settings::get('leverage')) / $walletBalance * 100, 1)
+            : 0.0;
+
+        $bestTrade = Trade::where('is_dry_run', $isDryRun)
+            ->orderByDesc('pnl')
+            ->first(['symbol', 'pnl', 'created_at']);
+        $worstTrade = Trade::where('is_dry_run', $isDryRun)
+            ->orderBy('pnl')
+            ->first(['symbol', 'pnl', 'created_at']);
+
+        // Streak: walk most recent trades, increment while sign matches.
+        $streakRows = Trade::where('is_dry_run', $isDryRun)
+            ->orderByDesc('created_at')
+            ->limit(50)
+            ->get(['pnl']);
+        $streakType = null;
+        $streakCount = 0;
+        foreach ($streakRows as $t) {
+            $isWin = ((float) $t->pnl) > 0;
+            $isLoss = ((float) $t->pnl) < 0;
+            if ($streakType === null) {
+                if ($isWin) {
+                    $streakType = 'win';
+                    $streakCount = 1;
+                } elseif ($isLoss) {
+                    $streakType = 'loss';
+                    $streakCount = 1;
+                }
+                continue;
+            }
+            if (($streakType === 'win' && $isWin) || ($streakType === 'loss' && $isLoss)) {
+                $streakCount++;
+            } else {
+                break;
+            }
+        }
+
+        $cooldownUntil = Cache::get('circuit_breaker:cooldown_until');
+        $cbPeak = (float) (Cache::get('circuit_breaker:equity_peak') ?? 0.0);
+        $cbActive = $cooldownUntil !== null && $cooldownUntil > $now->timestamp;
+
+        // 30d funding split: paid (negative) vs received (positive).
+        $fundingPaid = (float) Trade::where('is_dry_run', $isDryRun)
+            ->where('created_at', '>=', $thirtyDaysAgo)
+            ->where('funding_fee', '<', 0)
+            ->sum('funding_fee');
+        $fundingReceived = (float) Trade::where('is_dry_run', $isDryRun)
+            ->where('created_at', '>=', $thirtyDaysAgo)
+            ->where('funding_fee', '>', 0)
+            ->sum('funding_fee');
+
+        return response()->json([
+            'is_dry_run' => $isDryRun,
+            'equity' => round($equity, 2),
+            'wallet_balance' => round($walletBalance, 2),
+            'available_balance' => round($availableBalance, 2),
+            'equity_24h_ago' => $equity24hAgo !== null ? round($equity24hAgo, 2) : null,
+            'current_drawdown_pct' => round($currentDdPct, 2),
+            'max_drawdown' => $maxDdPct > 0 ? [
+                'pct' => round($maxDdPct, 2),
+                'from' => $maxDdFrom?->toIso8601String(),
+                'to' => $maxDdTo?->toIso8601String(),
+            ] : null,
+            'profit_factor_30d' => $profitFactor,
+            'rolling_win_rate' => [
+                'current' => $rollingWinRate,
+                'history' => $winRateHistory,
+                'window' => $recent20->count(),
+            ],
+            'avg_duration_seconds' => (int) round($avgDuration),
+            'today_pnl' => round($todayPnl, 2),
+            'exposure_pct' => $exposurePct,
+            'exposure_usdt' => round($exposureUsdt, 2),
+            'best_trade' => $bestTrade ? [
+                'symbol' => $bestTrade->symbol,
+                'pnl' => round((float) $bestTrade->pnl, 2),
+                'date' => $bestTrade->created_at?->toIso8601String(),
+            ] : null,
+            'worst_trade' => $worstTrade ? [
+                'symbol' => $worstTrade->symbol,
+                'pnl' => round((float) $worstTrade->pnl, 2),
+                'date' => $worstTrade->created_at?->toIso8601String(),
+            ] : null,
+            'current_streak' => [
+                'type' => $streakType,
+                'count' => $streakCount,
+            ],
+            'circuit_breaker' => [
+                'enabled' => (bool) Settings::get('circuit_breaker_enabled'),
+                'peak_equity' => round($cbPeak, 2),
+                'is_active' => $cbActive,
+                'cooldown_until' => $cbActive ? (int) $cooldownUntil : null,
+            ],
+            'funding_30d' => [
+                'paid' => round($fundingPaid, 4),
+                'received' => round($fundingReceived, 4),
+                'net' => round($fundingPaid + $fundingReceived, 4),
+            ],
+            'ts' => $now->timestamp,
+        ]);
+    }
+
+    public function tradeAggregates(Request $request): JsonResponse
+    {
+        $isDryRun = (bool) Settings::get('dry_run');
+        $thirtyDaysAgo = now()->subDays(30);
+
+        $bySymbol = Trade::where('is_dry_run', $isDryRun)
+            ->selectRaw('symbol, SUM(pnl) AS pnl, COUNT(*) AS trades')
+            ->groupBy('symbol')
+            ->orderByDesc('pnl')
+            ->limit(10)
+            ->get()
+            ->map(fn ($r) => [
+                'symbol' => $r->symbol,
+                'pnl' => round((float) $r->pnl, 2),
+                'trades' => (int) $r->trades,
+            ])
+            ->values();
+
+        $byReason = Trade::where('is_dry_run', $isDryRun)
+            ->where('created_at', '>=', $thirtyDaysAgo)
+            ->selectRaw('close_reason, COUNT(*) AS count, SUM(pnl) AS pnl')
+            ->groupBy('close_reason')
+            ->get()
+            ->map(fn ($r) => [
+                'reason' => $r->close_reason instanceof CloseReason ? $r->close_reason->value : $r->close_reason,
+                'count' => (int) $r->count,
+                'pnl' => round((float) $r->pnl, 2),
+            ])
+            ->values();
+
+        $byDayRows = Trade::where('is_dry_run', $isDryRun)
+            ->where('created_at', '>=', $thirtyDaysAgo)
+            ->selectRaw('DATE(created_at) AS d, COUNT(*) AS trades, SUM(pnl) AS pnl')
+            ->groupBy('d')
+            ->orderBy('d')
+            ->get()
+            ->keyBy('d');
+
+        // Densify: emit an entry for every day in the window so the histogram
+        // shows zero-trade days as gaps rather than skipping them.
+        $byDay = [];
+        $cursor = now()->subDays(29)->startOfDay();
+        $end = now()->startOfDay();
+        while ($cursor->lessThanOrEqualTo($end)) {
+            $key = $cursor->format('Y-m-d');
+            $row = $byDayRows->get($key);
+            $byDay[] = [
+                'date' => $key,
+                'trades' => $row ? (int) $row->trades : 0,
+                'pnl' => $row ? round((float) $row->pnl, 2) : 0.0,
+            ];
+            $cursor->addDay();
+        }
+
+        return response()->json([
+            'is_dry_run' => $isDryRun,
+            'by_symbol' => $bySymbol,
+            'by_reason' => $byReason,
+            'by_day' => $byDay,
+            'ts' => now()->timestamp,
         ]);
     }
 }

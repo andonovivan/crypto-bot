@@ -3,10 +3,10 @@
   "configurations": [
     {
       "name": "dashboard",
-      "runtimeExecutable": "sleep",
-      "runtimeArgs": ["86400"],
+      "runtimeExecutable": "php",
+      "runtimeArgs": ["-S", "127.0.0.1:8091", ".claude/preview-proxy.php"],
       "port": 8091,
-      "urlOverride": "http://localhost:8090"
+      "autoPort": false
     }
   ]
 }

@@ -107,6 +107,8 @@ class Settings
 
     public static function all(): array
     {
+        $descriptions = config('settings_meta.descriptions', []);
+        $constraints = config('settings_meta.constraints', []);
         $settings = [];
 
         foreach (self::KEYS as $key => $meta) {
@@ -114,10 +116,50 @@ class Settings
                 'value' => self::get($key),
                 'type' => $meta['type'],
                 'label' => $meta['label'],
+                'description' => $descriptions[$key] ?? null,
+                'constraints' => $constraints[$key] ?? null,
             ];
         }
 
         return $settings;
+    }
+
+    /**
+     * Returns the settings grouping metadata for the UI. Groups are defined in
+     * config/settings_meta.php and reference keys from self::KEYS. Any key not
+     * referenced by a group falls into a synthetic "other" bucket.
+     */
+    public static function groups(): array
+    {
+        $groups = config('settings_meta.groups', []);
+        $assigned = [];
+        $out = [];
+
+        foreach ($groups as $group) {
+            $keys = array_values(array_filter(
+                $group['keys'] ?? [],
+                fn (string $k) => array_key_exists($k, self::KEYS)
+            ));
+            $assigned = array_merge($assigned, $keys);
+            $out[] = [
+                'id' => $group['id'],
+                'title' => $group['title'],
+                'description' => $group['description'] ?? null,
+                'keys' => $keys,
+            ];
+        }
+
+        $other = array_values(array_diff(array_keys(self::KEYS), $assigned));
+        if ($other) {
+            $out[] = [
+                'id' => 'other',
+                'title' => 'Other',
+                'description' => null,
+                'keys' => $other,
+            ];
+        }
+
+        return $out;
     }
 
     public static function set(string $key, mixed $value): void
