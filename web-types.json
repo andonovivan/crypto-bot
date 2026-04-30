@@ -1,0 +1,101 @@
+{
+    "$schema": "https://json.schemastore.org/web-types",
+    "name": "crypto-bot-alpine",
+    "version": "1.0.0",
+    "description-markup": "markdown",
+    "framework": "html",
+    "contributions": {
+        "html": {
+            "attributes": [
+                {
+                    "name": "x-data",
+                    "description": "Alpine.js: declares a component scope"
+                },
+                {
+                    "name": "x-show",
+                    "description": "Alpine.js: toggles visibility"
+                },
+                {
+                    "name": "x-text",
+                    "description": "Alpine.js: sets text content"
+                },
+                {
+                    "name": "x-html",
+                    "description": "Alpine.js: sets innerHTML"
+                },
+                {
+                    "name": "x-for",
+                    "description": "Alpine.js: renders a list"
+                },
+                {
+                    "name": "x-if",
+                    "description": "Alpine.js: conditional render"
+                },
+                {
+                    "name": "x-init",
+                    "description": "Alpine.js: runs code on init"
+                },
+                {
+                    "name": "x-bind",
+                    "description": "Alpine.js: binds an attribute (long form)"
+                },
+                {
+                    "name": "x-on",
+                    "description": "Alpine.js: binds an event listener (long form)"
+                },
+                {
+                    "name": "x-model",
+                    "description": "Alpine.js: two-way binding"
+                },
+                {
+                    "name": "x-cloak",
+                    "description": "Alpine.js: hidden until Alpine initializes"
+                },
+                {
+                    "name": "x-ref",
+                    "description": "Alpine.js: references an element"
+                },
+                {
+                    "name": "x-effect",
+                    "description": "Alpine.js: reactive effect"
+                },
+                {
+                    "name": "x-id",
+                    "description": "Alpine.js: scoped id generator"
+                },
+                {
+                    "name": "x-modelable",
+                    "description": "Alpine.js: exposes a value as x-model target"
+                },
+                {
+                    "name": "x-teleport",
+                    "description": "Alpine.js: renders into a different DOM location"
+                },
+                {
+                    "name": "x-ignore",
+                    "description": "Alpine.js: skips Alpine processing for the subtree"
+                },
+                {
+                    "name": "x-transition",
+                    "description": "Alpine.js: transition (with optional .opacity / .scale / .duration / .delay / .origin modifiers)",
+                    "pattern": {
+                        "regex": "x-transition(\\.[a-z0-9-]+)*",
+                        "case-sensitive": true
+                    }
+                },
+                {
+                    "name": "Alpine.js bind shorthand (`:attr`)",
+                    "pattern": {
+                        "regex": ":[a-zA-Z][a-zA-Z0-9-]*"
+                    }
+                },
+                {
+                    "name": "Alpine.js event shorthand (`@event`)",
+                    "pattern": {
+                        "regex": "@[a-zA-Z][a-zA-Z0-9-]*(\\.[a-zA-Z0-9-]+)*"
+                    }
+                }
+            ]
+        }
+    }
+}

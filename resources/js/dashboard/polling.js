@@ -342,10 +342,20 @@ function startScheduler() {
     });
 }
 
+function stop() {
+    if (schedulerHandle) {
+        clearInterval(schedulerHandle);
+        schedulerHandle = null;
+    }
+    polling.pollers.length = 0;
+}
+
 // Decide which pollers to run based on what's actually rendered. This is the
 // per-page lazy-loading: a page without any chart skips equity / aggregates;
-// a page without any KPI skips /api/stats.
+// a page without any KPI skips /api/stats. Idempotent: SPA navigation calls
+// stop() then start() again, so any previous pollers/timers are cleared first.
 function start(_page) {
+    stop();
     bindRangePills();
 
     const hasKpi = document.querySelector('[id^="kpi-"]') !== null;
@@ -410,4 +420,5 @@ window.dashboardPolling = {
     togglePause,
     state: polling.state,
     start,
+    stop,
 };

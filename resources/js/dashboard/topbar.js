@@ -66,6 +66,9 @@ export function dashboardTopbar() {
                 };
                 this.lastUpdate = s.lastUpdate;
             });
+            window.addEventListener('spa:navigated', (e) => {
+                this.title = TITLES[e.detail.page] || 'Dashboard';
+            });
         },
     };
 }

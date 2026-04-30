@@ -43,9 +43,9 @@
             @endphp
             <a
                 href="{{ route($item['route']) }}"
-                class="group flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors {{ $isActive
-                    ? 'bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
-                    : 'text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]' }}"
+                data-spa-link
+                data-spa-active="{{ $isActive ? 'true' : 'false' }}"
+                class="group flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-[var(--color-text-muted)] data-[spa-active=false]:hover:bg-[var(--color-surface-hover)] data-[spa-active=false]:hover:text-[var(--color-text)] data-[spa-active=true]:bg-[var(--color-accent-soft)] data-[spa-active=true]:text-[var(--color-accent)]"
                 :class="sidebarCollapsed ? 'justify-center' : ''"
                 title="{{ $item['label'] }}"
             >

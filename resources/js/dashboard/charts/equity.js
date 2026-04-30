@@ -128,8 +128,18 @@ export function renderEquity(el, points, range) {
     }
     document.getElementById(el.id + '-empty')?.classList.add('hidden');
     el.style.display = '';
+    // SPA navigation re-creates the chart container, so the cached ECharts
+    // instance may be bound to a now-detached node — dispose and reinit.
+    if (chart && chart.getDom() !== el) {
+        chart.dispose();
+        chart = null;
+    }
     if (!chart) chart = echarts.init(el, null, { renderer: 'canvas' });
     chart.setOption(buildOption(points, range), true);
+    // After SPA navigation the container width reads as 0 if init ran before
+    // the swapped subtree finished its first layout pass — re-measure once
+    // the browser has had a chance to lay out.
+    requestAnimationFrame(() => chart?.resize());
 }
 
 export function resizeEquity() {

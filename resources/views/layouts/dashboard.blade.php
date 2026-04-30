@@ -20,7 +20,7 @@
         <main class="flex-1 min-w-0 flex flex-col">
             @include('components.topbar')
 
-            <div class="flex-1 px-5 md:px-7 lg:px-9 py-6 max-w-[1500px] w-full mx-auto">
+            <div id="spa-content" class="flex-1 px-5 md:px-7 lg:px-9 py-6 max-w-[1500px] w-full mx-auto">
                 @yield('content')
             </div>
 

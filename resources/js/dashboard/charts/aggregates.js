@@ -9,7 +9,17 @@ echarts.use([BarChart, PieChart, LineChart, GridComponent, TooltipComponent, Leg
 const charts = {};
 
 function get(el) {
-    if (!charts[el.id]) charts[el.id] = echarts.init(el, null, { renderer: 'canvas' });
+    // SPA navigation re-creates the chart container, so dispose any cached
+    // instance bound to a now-detached node before reinitializing. Re-measure
+    // on the next frame in case init ran before the swapped subtree had laid out.
+    if (charts[el.id] && charts[el.id].getDom() !== el) {
+        charts[el.id].dispose();
+        delete charts[el.id];
+    }
+    if (!charts[el.id]) {
+        charts[el.id] = echarts.init(el, null, { renderer: 'canvas' });
+        requestAnimationFrame(() => charts[el.id]?.resize());
+    }
     return charts[el.id];
 }
 
@@ -180,7 +190,12 @@ export function renderWinRateSparkline(el, history) {
         el.innerHTML = '';
         return;
     }
+    if (charts[el.id] && charts[el.id].getDom() !== el) {
+        charts[el.id].dispose();
+        delete charts[el.id];
+    }
     if (!charts[el.id]) charts[el.id] = echarts.init(el, null, { renderer: 'canvas' });
+    requestAnimationFrame(() => charts[el.id]?.resize());
     charts[el.id].setOption({
         animation: false,
         backgroundColor: 'transparent',
