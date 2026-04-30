@@ -111,6 +111,14 @@ table {
     transform: translateY(0);
 }
 
+/* Tailwind v4 reset removes the implicit pointer cursor on <button>. Restore
+ * it for all enabled buttons + any element with role="button" so the UI feels
+ * clickable throughout the dashboard. */
+button:not(:disabled),
+[role='button']:not([aria-disabled='true']) {
+    cursor: pointer;
+}
+
 /* Sortable table headers */
 .sortable {
     cursor: pointer;

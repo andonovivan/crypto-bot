@@ -1,9 +1,22 @@
 import { getJson, postJson } from './api.js';
 import { fmtMoney, fmtPnl } from './formatters.js';
-import { renderEquity, resizeEquity } from './charts/equity.js';
-import { renderPnlBySymbol, renderCloseReason, renderTradesPerDay, renderWinRateSparkline, resizeAggregates } from './charts/aggregates.js';
 import { renderPositions } from './tables/positions.js';
 import { toast } from './toast.js';
+
+// Chart factories are loaded lazily — see ensureCharts() below. Keeping the
+// echarts import out of the main bundle drops first-paint JS by ~330kb on
+// pages that don't render any chart (Positions, Scanner, History, Failed,
+// Risk, Settings).
+let chartHelpers = null;
+async function ensureCharts() {
+    if (chartHelpers) return chartHelpers;
+    const [equity, aggregates] = await Promise.all([
+        import('./charts/equity.js'),
+        import('./charts/aggregates.js'),
+    ]);
+    chartHelpers = { ...equity, ...aggregates };
+    return chartHelpers;
+}
 
 const polling = {
     timers: {},
@@ -17,6 +30,7 @@ const polling = {
         lastUpdate: null,
     },
     listeners: new Set(),
+    pollers: [],   // { name, fn, interval, runOnVisible }
 };
 
 function emit() {
@@ -26,11 +40,6 @@ function emit() {
 function setText(id, text) {
     const el = document.getElementById(id);
     if (el) el.textContent = text;
-}
-
-function setHtml(id, html) {
-    const el = document.getElementById(id);
-    if (el) el.innerHTML = html;
 }
 
 function setColor(id, cls) {
@@ -107,7 +116,6 @@ async function fetchStats() {
         polling.state.todayPnl = data.today_pnl ?? 0;
         emit();
 
-        // Equity & 24h delta
         const equityEl = document.getElementById('kpi-equity');
         if (equityEl) {
             equityEl.textContent = fmtMoney(data.equity);
@@ -163,6 +171,7 @@ async function fetchStats() {
             setColor('kpi-rolling-wr', data.rolling_win_rate.current >= 0.5 ? 'text-[var(--color-success)]' : data.rolling_win_rate.window > 0 ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-muted)]');
             const sparkEl = document.getElementById('kpi-rolling-wr-spark');
             if (sparkEl && data.rolling_win_rate.history) {
+                const { renderWinRateSparkline } = await ensureCharts();
                 renderWinRateSparkline(sparkEl, data.rolling_win_rate.history);
             }
         }
@@ -187,7 +196,6 @@ async function fetchStats() {
             }
         }
 
-        // Risk page extras
         const bestEl = document.getElementById('risk-best-trade');
         if (bestEl) bestEl.innerHTML = data.best_trade
             ? `<span class="font-semibold">${data.best_trade.symbol}</span> · <span class="text-[var(--color-success)] font-mono">${fmtPnl(data.best_trade.pnl)}</span>`
@@ -241,7 +249,9 @@ async function fetchEquity() {
     try {
         const data = await getJson('/api/balance-history?range=' + encodeURIComponent(polling.equityRange));
         const el = document.getElementById('equity-chart');
-        if (el) renderEquity(el, data.points || [], polling.equityRange);
+        if (!el) return;
+        const { renderEquity } = await ensureCharts();
+        renderEquity(el, data.points || [], polling.equityRange);
     } catch (e) {
         console.error('fetchEquity error:', e);
     }
@@ -253,6 +263,8 @@ async function fetchAggregates() {
         const sym = document.getElementById('chart-pnl-by-symbol');
         const reason = document.getElementById('chart-close-reason');
         const day = document.getElementById('chart-trades-per-day');
+        if (!sym && !reason && !day) return;
+        const { renderPnlBySymbol, renderCloseReason, renderTradesPerDay } = await ensureCharts();
         if (sym) renderPnlBySymbol(sym, data.by_symbol);
         if (reason) renderCloseReason(reason, data.by_reason);
         if (day) renderTradesPerDay(day, data.by_day);
@@ -276,30 +288,90 @@ function bindRangePills() {
     });
 }
 
-function start(page) {
-    bindRangePills();
+// Pollers are registered via a tiny scheduler. The scheduler tracks each
+// poller's interval/last-fired time, fires them on a single setInterval tick,
+// and pauses everything when the tab is hidden so a backgrounded dashboard
+// doesn't keep hammering the API.
+function registerPoller(name, fn, intervalMs) {
+    polling.pollers.push({ name, fn, intervalMs, lastFired: 0 });
+}
 
-    fetchData();
-    polling.timers.data = setInterval(fetchData, 10000);
+let schedulerHandle = null;
+function tick() {
+    if (document.hidden) return;
+    const now = Date.now();
+    polling.pollers.forEach((p) => {
+        if (now - p.lastFired >= p.intervalMs) {
+            p.lastFired = now;
+            p.fn();
+        }
+    });
+}
 
-    fetchStats();
-    polling.timers.stats = setInterval(fetchStats, 30000);
+function startScheduler() {
+    if (schedulerHandle) clearInterval(schedulerHandle);
+    schedulerHandle = setInterval(tick, 1000);
 
-    if (document.getElementById('equity-chart')) {
-        fetchEquity();
-        polling.timers.equity = setInterval(fetchEquity, 60000);
-        window.addEventListener('resize', () => resizeEquity());
-    }
-
-    if (document.getElementById('chart-pnl-by-symbol') || document.getElementById('chart-close-reason') || document.getElementById('chart-trades-per-day')) {
-        fetchAggregates();
-        polling.timers.agg = setInterval(fetchAggregates, 60000);
-        window.addEventListener('resize', () => resizeAggregates());
-    }
+    // Kick all pollers immediately so the page populates without waiting up
+    // to 30s for the first fire.
+    polling.pollers.forEach((p) => {
+        p.lastFired = Date.now();
+        p.fn();
+    });
 
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) fetchData();
+        if (!document.hidden) {
+            // On unhide, run any poller whose interval has elapsed.
+            const now = Date.now();
+            polling.pollers.forEach((p) => {
+                if (now - p.lastFired >= p.intervalMs) {
+                    p.lastFired = now;
+                    p.fn();
+                }
+            });
+        }
     });
+}
+
+// Decide which pollers to run based on what's actually rendered. This is the
+// per-page lazy-loading: a page without any chart skips equity / aggregates;
+// a page without any KPI skips /api/stats.
+function start(_page) {
+    bindRangePills();
+
+    const hasKpi = document.querySelector('[id^="kpi-"]') !== null;
+    const hasRiskPanel = document.getElementById('risk-cb-state') !== null;
+    const hasPositionsTable = document.getElementById('positions-body') !== null;
+    const hasEquityChart = document.getElementById('equity-chart') !== null;
+    const hasAggregateChart = document.getElementById('chart-pnl-by-symbol')
+        || document.getElementById('chart-close-reason')
+        || document.getElementById('chart-trades-per-day');
+
+    // Topbar always wants /api/data for dryRun/paused/wallet + the heartbeat
+    // pulse, so this poller is unconditional. It's also the lightest endpoint.
+    registerPoller('data', fetchData, 10_000);
+
+    if (hasKpi || hasRiskPanel || hasPositionsTable) {
+        registerPoller('stats', fetchStats, 30_000);
+    }
+
+    if (hasEquityChart) {
+        registerPoller('equity', fetchEquity, 60_000);
+        window.addEventListener('resize', async () => {
+            const { resizeEquity } = await ensureCharts();
+            resizeEquity();
+        });
+    }
+
+    if (hasAggregateChart) {
+        registerPoller('aggregates', fetchAggregates, 60_000);
+        window.addEventListener('resize', async () => {
+            const { resizeAggregates } = await ensureCharts();
+            resizeAggregates();
+        });
+    }
+
+    startScheduler();
 }
 
 async function togglePause() {
@@ -316,8 +388,10 @@ async function togglePause() {
 
 window.dashboardPolling = {
     refreshNow: () => {
-        fetchData();
-        fetchStats();
+        polling.pollers.forEach((p) => {
+            p.lastFired = Date.now();
+            p.fn();
+        });
     },
     subscribe: (fn) => {
         polling.listeners.add(fn);
