@@ -256,8 +256,8 @@ async function fetchEquity() {
 
         const pnlEl = document.getElementById('equity-range-pnl');
         if (pnlEl) {
-            const hasData = points.length >= 2;
-            const delta = hasData ? points[points.length - 1].wallet_balance - points[0].wallet_balance : 0;
+            const hasData = points.length > 0 && data.baseline != null;
+            const delta = hasData ? points[points.length - 1].wallet_balance - data.baseline : 0;
             pnlEl.textContent = hasData ? fmtPnl(delta) : '—';
             pnlEl.classList.toggle('text-[var(--color-text-muted)]', !hasData);
             setColor('equity-range-pnl', hasData ? pnlClass(delta) : null);

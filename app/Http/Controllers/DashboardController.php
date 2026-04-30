@@ -495,9 +495,17 @@ class DashboardController extends Controller
 
         $snapshots = $query->get(['wallet_balance', 'available_balance', 'unrealized_profit', 'margin_balance', 'position_margin', 'open_positions', 'created_at']);
 
+        $startingBalance = (float) Settings::get('starting_balance');
+        // For "all", the baseline is the configured deposit so the delta equals true lifetime P&L.
+        // For finite ranges, the baseline is the first snapshot in the window (delta over the period).
+        $baseline = $rangeKey === 'all'
+            ? $startingBalance
+            : (float) ($snapshots->first()?->wallet_balance ?? $startingBalance);
+
         return response()->json([
             'range' => $rangeKey,
             'is_dry_run' => $isDryRun,
+            'baseline' => $baseline,
             'points' => $snapshots->map(fn (BalanceSnapshot $s) => [
                 'ts' => $s->created_at->timestamp,
                 'wallet_balance' => $s->wallet_balance,
