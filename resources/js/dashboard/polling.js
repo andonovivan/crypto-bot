@@ -251,7 +251,17 @@ async function fetchEquity() {
         const el = document.getElementById('equity-chart');
         if (!el) return;
         const { renderEquity } = await ensureCharts();
-        renderEquity(el, data.points || [], polling.equityRange);
+        const points = data.points || [];
+        renderEquity(el, points, polling.equityRange);
+
+        const pnlEl = document.getElementById('equity-range-pnl');
+        if (pnlEl) {
+            const hasData = points.length >= 2;
+            const delta = hasData ? points[points.length - 1].wallet_balance - points[0].wallet_balance : 0;
+            pnlEl.textContent = hasData ? fmtPnl(delta) : '—';
+            pnlEl.classList.toggle('text-[var(--color-text-muted)]', !hasData);
+            setColor('equity-range-pnl', hasData ? pnlClass(delta) : null);
+        }
     } catch (e) {
         console.error('fetchEquity error:', e);
     }

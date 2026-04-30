@@ -14,6 +14,10 @@
 <div class="mb-6">
     <x-chart-card title="Equity Curve" subtitle="Wallet & available balance · drawdown overlay" chart-id="equity-chart" height="h-80">
         <x-slot:actions>
+            <div class="hidden md:flex flex-col items-end leading-tight mr-3">
+                <div class="text-[10px] uppercase tracking-wider text-[var(--color-text-subtle)]">Total P&amp;L</div>
+                <div id="equity-range-pnl" class="font-mono font-semibold text-[var(--color-text-muted)]">—</div>
+            </div>
             <x-range-pills name="equity" :options="['1h','6h','24h','7d','30d','all']" active="24h" />
         </x-slot:actions>
     </x-chart-card>
