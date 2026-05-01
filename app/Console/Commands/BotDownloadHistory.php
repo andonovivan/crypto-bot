@@ -9,20 +9,22 @@ use Illuminate\Support\Facades\Http;
 
 /**
  * Downloads historical kline data from data.binance.vision and populates the
- * `kline_history` table for use by bot:backtest. Pulls monthly zips for both
- * the 15m (entry/exit timeframe) and 1h (HTF filter) intervals.
+ * `kline_history` table for use by bot:backtest. Default pulls monthly zips
+ * for the 15m (entry/exit timeframe) and 1h (HTF filter) intervals; pass
+ * `--intervals=1m` to backfill 1-minute bars for finer-grained ticker
+ * synthesis in the replay exchange.
  */
 class BotDownloadHistory extends Command
 {
     protected $signature = 'bot:download-history
         {--months=1 : Number of most recent completed calendar months to fetch}
         {--symbols= : Comma-separated list of symbols (default: all current USDT perps)}
+        {--intervals=15m,1h : Comma-separated kline intervals to fetch (e.g. 1m,15m,1h)}
         {--skip-existing : Skip (symbol,interval,month) combos that already have rows in kline_history}';
 
     protected $description = 'Download historical klines from data.binance.vision for backtesting';
 
     private const BASE_URL = 'https://data.binance.vision/data/futures/um/monthly/klines';
-    private const INTERVALS = ['15m', '1h'];
     private const TMP_DIR = '/tmp/kline-dl';
 
     public function handle(ExchangeInterface $exchange): int
@@ -30,6 +32,11 @@ class BotDownloadHistory extends Command
         $months = max(1, (int) $this->option('months'));
         $symbolsOpt = $this->option('symbols');
         $skipExisting = (bool) $this->option('skip-existing');
+        $intervals = array_values(array_filter(array_map('trim', explode(',', (string) $this->option('intervals')))));
+        if (! $intervals) {
+            $this->error('No valid intervals specified.');
+            return self::FAILURE;
+        }
 
         @mkdir(self::TMP_DIR, 0755, true);
 
@@ -37,11 +44,11 @@ class BotDownloadHistory extends Command
             ? array_filter(array_map('trim', explode(',', $symbolsOpt)))
             : $this->getUsdtPerps($exchange);
 
-        $this->info(sprintf('Downloading %d month(s) of data for %d symbols × %d intervals',
-            $months, count($symbols), count(self::INTERVALS)));
+        $this->info(sprintf('Downloading %d month(s) of data for %d symbols × %d intervals (%s)',
+            $months, count($symbols), count($intervals), implode(',', $intervals)));
 
         $ym = $this->monthsToFetch($months);
-        $totalJobs = count($symbols) * count(self::INTERVALS) * count($ym);
+        $totalJobs = count($symbols) * count($intervals) * count($ym);
 
         $bar = $this->output->createProgressBar($totalJobs);
         $bar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %elapsed:6s% %symbol% %interval% %month% %status%');
@@ -50,7 +57,7 @@ class BotDownloadHistory extends Command
         $stats = ['downloaded' => 0, 'skipped' => 0, 'missing' => 0, 'rows' => 0, 'errors' => 0];
 
         foreach ($symbols as $symbol) {
-            foreach (self::INTERVALS as $interval) {
+            foreach ($intervals as $interval) {
                 foreach ($ym as $m) {
                     $bar->setMessage($symbol, 'symbol');
                     $bar->setMessage($interval, 'interval');

@@ -25,11 +25,27 @@ class HistoricalReplayExchange implements ExchangeInterface
     /** @var array<string, array<int, array{o: float, h: float, l: float, c: float, v: float, qv: float}>> */
     private array $bars1h = [];
 
+    /** Slim 1m storage. Full bar fields (o/h/l/v) aren't needed — only close
+     *  and quote_volume drive the synthesized ticker. Storing closes + a
+     *  pre-summed cumulative-qv array lets getFuturesTickers1m do an O(1)
+     *  subtraction instead of a 1440-iteration sum per symbol per tick.
+     *  Memory wins are large at this scale (27M+ bars for a month at 600 syms).
+     *  Indexed parallel to openTimes1m: closes1m[$s][$i] is the close of the
+     *  bar at openTimes1m[$s][$i]; cumQv1m[$s][$i] = Σ qv[0..i] for that symbol.
+     * @var array<string, float[]> */
+    private array $closes1m = [];
+
+    /** @var array<string, float[]> */
+    private array $cumQv1m = [];
+
     /** @var array<string, int[]> sorted open_times per symbol */
     private array $openTimes15m = [];
 
     /** @var array<string, int[]> */
     private array $openTimes1h = [];
+
+    /** @var array<string, int[]> */
+    private array $openTimes1m = [];
 
     /** @var int Current replay time, unix milliseconds */
     private int $clockMs = 0;
@@ -47,16 +63,23 @@ class HistoricalReplayExchange implements ExchangeInterface
      * realized P&L still accumulates in Trade.pnl for final summary. */
     private bool $fixedSizing = false;
 
+    /** When true, loadKlines also pulls 1m bars and getFuturesTickers/getPrice
+     * synthesize the 24h ticker + current price from 1m data instead of the
+     * 15m close-quantized snapshot. Lets the backtest model the same intra-bar
+     * threshold-crossing events the live scanner sees over its 30s scan loop. */
+    private bool $use1m = false;
+
     private int $fromMs;
     private int $toMs;
 
     private ?BinanceExchange $realExchange = null;
 
-    public function __construct(int $fromMs, int $toMs, ?array $symbolFilter = null)
+    public function __construct(int $fromMs, int $toMs, ?array $symbolFilter = null, bool $use1m = false)
     {
         $this->fromMs = $fromMs;
         $this->toMs = $toMs;
         $this->clockMs = $fromMs;
+        $this->use1m = $use1m;
         $this->loadKlines($symbolFilter);
     }
 
@@ -110,6 +133,19 @@ class HistoricalReplayExchange implements ExchangeInterface
         return array_keys($this->bars15m);
     }
 
+    /**
+     * @return string[] symbols that have at least one 1m bar loaded (only
+     * populated when constructed with $use1m=true). The 1m universe is a
+     * subset of the 15m universe in practice — kline_history coverage rarely
+     * includes 1m without the corresponding 15m, but we expose this so callers
+     * can detect "--use-1m was requested but no 1m data is present" without
+     * the run silently producing 0 trades.
+     */
+    public function loaded1mSymbols(): array
+    {
+        return array_keys($this->openTimes1m);
+    }
+
     private function loadKlines(?array $symbolFilter): void
     {
         // Pull back enough lead-in candles before $fromMs so the scanner can
@@ -117,6 +153,10 @@ class HistoricalReplayExchange implements ExchangeInterface
         // 96 × 15m = 24h (for 24h change / volume); 26 × 1h for HTF EMA21.
         $leadIn15m = 200 * 15 * 60 * 1000;
         $leadIn1h = 50 * 60 * 60 * 1000;
+        // 1440 × 1m = 24h. The synthesized 24h ticker reads exactly 1440 bars
+        // back from the current clock; the +60 buffer absorbs gaps from
+        // delisted bars or download holes without losing the first hour.
+        $leadIn1m = 1500 * 60 * 1000;
 
         $q15 = DB::table('kline_history')
             ->select(['symbol', 'open_time', 'open', 'high', 'low', 'close', 'volume', 'quote_volume'])
@@ -159,6 +199,30 @@ class HistoricalReplayExchange implements ExchangeInterface
             ];
             $this->openTimes1h[$s][] = (int) $row->open_time;
         }
+
+        if ($this->use1m) {
+            $q1m = DB::table('kline_history')
+                ->select(['symbol', 'open_time', 'close', 'quote_volume'])
+                ->where('interval', '1m')
+                ->whereBetween('open_time', [$this->fromMs - $leadIn1m, $this->toMs]);
+            if ($symbolFilter) {
+                $q1m->whereIn('symbol', $symbolFilter);
+            }
+
+            $prevSymbol = null;
+            $cum = 0.0;
+            foreach ($q1m->orderBy('symbol')->orderBy('open_time')->cursor() as $row) {
+                $s = $row->symbol;
+                if ($s !== $prevSymbol) {
+                    $cum = 0.0;
+                    $prevSymbol = $s;
+                }
+                $cum += (float) $row->quote_volume;
+                $this->closes1m[$s][] = (float) $row->close;
+                $this->cumQv1m[$s][] = $cum;
+                $this->openTimes1m[$s][] = (int) $row->open_time;
+            }
+        }
     }
 
     /**
@@ -167,9 +231,12 @@ class HistoricalReplayExchange implements ExchangeInterface
      */
     private function indexAtClock(string $symbol, string $interval): ?int
     {
-        $times = $interval === '15m'
-            ? ($this->openTimes15m[$symbol] ?? null)
-            : ($this->openTimes1h[$symbol] ?? null);
+        $times = match ($interval) {
+            '1m' => $this->openTimes1m[$symbol] ?? null,
+            '15m' => $this->openTimes15m[$symbol] ?? null,
+            '1h' => $this->openTimes1h[$symbol] ?? null,
+            default => null,
+        };
         if (! $times) {
             return null;
         }
@@ -190,6 +257,15 @@ class HistoricalReplayExchange implements ExchangeInterface
 
     public function getFuturesTickers(): array
     {
+        // 1m mode: synthesize the rolling 24h aggregate from 1440 1m bars.
+        // This mirrors what live's /fapi/v1/ticker/24hr feed does — the
+        // ticker rolls minute-by-minute, so a coin can briefly cross a
+        // pump/volume threshold and live's 30s scan catches it. The
+        // 15m-quantized variant below cannot.
+        if ($this->use1m) {
+            return $this->getFuturesTickers1m();
+        }
+
         $out = [];
         foreach ($this->bars15m as $symbol => $_) {
             $idx = $this->indexAtClock($symbol, '15m');
@@ -229,10 +305,78 @@ class HistoricalReplayExchange implements ExchangeInterface
         return $out;
     }
 
+    /**
+     * 1m-resolution synthesis. Iterates symbols that have any 15m data (the
+     * universe definition stays the same — a symbol with 15m gaps but no 1m
+     * gaps shouldn't suddenly become tradable mid-run) and for each one looks
+     * up its current 1m close + the 1m close 1440 minutes ago. Uses the
+     * pre-summed cumQv1m array for O(1) 24h quote-volume calculation.
+     *
+     * `high` and `low` in the returned tuple come from the corresponding 15m
+     * bar — ShortScanner only reads them for display, not for gating.
+     */
+    private function getFuturesTickers1m(): array
+    {
+        $out = [];
+        foreach ($this->bars15m as $symbol => $_) {
+            $idx = $this->indexAtClock($symbol, '1m');
+            if ($idx === null) {
+                continue;
+            }
+            $closes = $this->closes1m[$symbol];
+            $cum = $this->cumQv1m[$symbol];
+
+            // 24h change: compare current close to close 1440 bars (24h) ago.
+            $backIdx = $idx - 1440;
+            if ($backIdx < 0) {
+                continue;
+            }
+            $priorClose = $closes[$backIdx];
+            $currentClose = $closes[$idx];
+            $priceChangePct = $priorClose > 0
+                ? (($currentClose - $priorClose) / $priorClose) * 100
+                : 0;
+
+            // 24h quote volume: cum[idx] - cum[idx - 1440] gives Σqv across
+            // the 1440 bars (idx-1439 .. idx inclusive).
+            $vol = $cum[$idx] - $cum[$backIdx];
+
+            // Use the current 15m bar's high/low for the tuple — purely
+            // informational for display; ShortScanner doesn't gate on these.
+            $idx15 = $this->indexAtClock($symbol, '15m');
+            $hi = 0.0;
+            $lo = 0.0;
+            if ($idx15 !== null) {
+                $bar15 = $this->bars15m[$symbol][$this->openTimes15m[$symbol][$idx15]];
+                $hi = $bar15['h'];
+                $lo = $bar15['l'];
+            }
+
+            $out[] = [
+                'symbol' => $symbol,
+                'price' => $currentClose,
+                'priceChangePct' => $priceChangePct,
+                'volume' => $vol,
+                'high' => $hi,
+                'low' => $lo,
+            ];
+        }
+        return $out;
+    }
+
     public function getPrice(string $symbol): float
     {
         if (isset($this->probePrices[$symbol])) {
             return $this->probePrices[$symbol];
+        }
+        // Prefer 1m close when 1m data is loaded — gives the engine and
+        // the cooldown/expiry checks a price that updates every minute
+        // instead of staying flat for the full 15m window.
+        if ($this->use1m) {
+            $idx1m = $this->indexAtClock($symbol, '1m');
+            if ($idx1m !== null) {
+                return $this->closes1m[$symbol][$idx1m];
+            }
         }
         $idx = $this->indexAtClock($symbol, '15m');
         if ($idx === null) {

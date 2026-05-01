@@ -31,6 +31,8 @@ class BotBacktest extends Command
         {--starting-balance=10000 : Simulated USDT starting wallet}
         {--fixed-sizing : Pin wallet balance to starting balance so compounding does not distort per-trade stats}
         {--truncate : Wipe dry-run Position/Trade rows before starting}
+        {--use-1m : Load 1m klines and tick the clock every 60s. Synthesizes the 24h ticker from 1m bars (rolls minute-by-minute) so the scanner sees the same threshold-crossing events live does. Requires kline_history rows for interval=1m over the run window plus 24h lead-in.}
+        {--no-force-close : Leave open positions in place at the end of the run instead of force-closing them. Used by bot:backtest-rolling so positions carry across month boundaries.}
         {--override=* : Repeatable key=value Settings::override() pair (e.g. --override=stop_loss_pct=1.5 --override=atr_sl_multiplier=2.0)}';
 
     protected $description = 'Replay historical klines through the strategy and report P&L';
@@ -98,10 +100,13 @@ class BotBacktest extends Command
         }
 
         try {
-            $this->info(sprintf('Loading klines from DB for %s → %s%s…',
-                $fromStr, $toStr, $symbolFilter ? ' (symbols: ' . implode(',', $symbolFilter) . ')' : ''));
+            $use1m = (bool) $this->option('use-1m');
+            $this->info(sprintf('Loading klines from DB for %s → %s%s%s…',
+                $fromStr, $toStr,
+                $symbolFilter ? ' (symbols: ' . implode(',', $symbolFilter) . ')' : '',
+                $use1m ? ' [1m mode]' : ''));
 
-            $replay = new HistoricalReplayExchange($fromMs, $toMs, $symbolFilter);
+            $replay = new HistoricalReplayExchange($fromMs, $toMs, $symbolFilter, $use1m);
             $replay->setRealExchange(app(\App\Services\Exchange\BinanceExchange::class));
             if ((bool) $this->option('fixed-sizing')) {
                 $replay->setFixedSizing(true);
@@ -113,7 +118,16 @@ class BotBacktest extends Command
                 $this->error('No klines loaded — run bot:download-history first.');
                 return self::FAILURE;
             }
-            $this->info('Loaded data for ' . count($loadedSymbols) . ' symbols.');
+            if ($use1m) {
+                $loaded1m = $replay->loaded1mSymbols();
+                if (empty($loaded1m)) {
+                    $this->error('--use-1m was set but no interval=1m kline_history rows were loaded for this range. Run: bot:download-history --intervals=1m --months=N --skip-existing');
+                    return self::FAILURE;
+                }
+                $this->info(sprintf('Loaded data for %d symbols (%d with 1m bars).', count($loadedSymbols), count($loaded1m)));
+            } else {
+                $this->info('Loaded data for ' . count($loadedSymbols) . ' symbols.');
+            }
 
             // Rebind the container so ShortScanner + TradingEngine + FundingSettlementService
             // resolve the replay exchange instead of the real dispatcher.
@@ -125,10 +139,10 @@ class BotBacktest extends Command
             $engine = app(TradingEngine::class);
             $fundingService = app(FundingSettlementService::class);
 
-            $tickMs = 15 * 60 * 1000;
+            $tickMs = $use1m ? 60 * 1000 : 15 * 60 * 1000;
             $totalTicks = intdiv($toMs - $fromMs, $tickMs);
 
-            $this->info(sprintf('Running %d × 15m ticks…', $totalTicks));
+            $this->info(sprintf('Running %d × %s ticks…', $totalTicks, $use1m ? '1m' : '15m'));
             $bar = $this->output->createProgressBar($totalTicks);
             $bar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %elapsed:6s%/%estimated:-6s% %status%');
             $bar->start();
@@ -186,11 +200,23 @@ class BotBacktest extends Command
             // Force-close any positions still open at the final simulated bar.
             // Without this, the live bot container (which shares the DB and sees
             // is_dry_run=true positions) would pick them up and close them at
-            // TODAY's price vs the March entry — skewing stats by orders of
-            // magnitude on any symbol that has drifted far from its March price.
-            $forcedClosed = $this->forceCloseStragglers($engine, $replay);
-            if ($forcedClosed > 0) {
-                $this->warn(sprintf('Force-closed %d stragglers at final simulated bar (CloseReason::Expired).', $forcedClosed));
+            // TODAY's price vs the entry — skewing stats by orders of magnitude
+            // on any symbol that has drifted far from its entry price.
+            //
+            // bot:backtest-rolling passes --no-force-close on every chunk except
+            // the last one, so open positions naturally carry across month
+            // boundaries and the live bot only inherits straggler risk on the
+            // final chunk (where force-close still runs).
+            if (! (bool) $this->option('no-force-close')) {
+                $forcedClosed = $this->forceCloseStragglers($engine, $replay);
+                if ($forcedClosed > 0) {
+                    $this->warn(sprintf('Force-closed %d stragglers at final simulated bar (CloseReason::Expired).', $forcedClosed));
+                }
+            } else {
+                $stillOpen = Position::open()->where('is_dry_run', true)->count();
+                if ($stillOpen > 0) {
+                    $this->warn(sprintf('--no-force-close: leaving %d open position(s) for the next chunk to manage.', $stillOpen));
+                }
             }
 
             $this->printSummary($fromStr, $toStr, $openEvents, $closeEvents, $errors, $startingBalance);
