@@ -337,7 +337,7 @@ class BotBacktest extends Command
     {
         $maxPositions = (int) Settings::get('max_positions') ?: 10;
         $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
-        $failedCooldown = (int) Settings::get('failed_entry_cooldown_minutes') ?: 360;
+        $failedCooldown = max(0, (int) Settings::get('failed_entry_cooldown_minutes'));
         $paused = (bool) Settings::get('trading_paused');
         if ($paused) {
             return 0;
@@ -369,13 +369,15 @@ class BotBacktest extends Command
             if ($recentClose) {
                 continue;
             }
-            $recentFail = Position::where('is_dry_run', true)
-                ->where('symbol', $candidate->symbol)
-                ->where('status', PositionStatus::Failed)
-                ->where('created_at', '>=', now()->subMinutes($failedCooldown))
-                ->exists();
-            if ($recentFail) {
-                continue;
+            if ($failedCooldown > 0) {
+                $recentFail = Position::where('is_dry_run', true)
+                    ->where('symbol', $candidate->symbol)
+                    ->where('status', PositionStatus::Failed)
+                    ->where('created_at', '>=', now()->subMinutes($failedCooldown))
+                    ->exists();
+                if ($recentFail) {
+                    continue;
+                }
             }
 
             $analysis = $scanner->analyze15m($candidate->symbol);

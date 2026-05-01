@@ -305,7 +305,7 @@ class DashboardController extends Controller
     {
         $autoTrade = $request->boolean('auto_trade', false);
         $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
-        $failedCooldown = (int) Settings::get('failed_entry_cooldown_minutes') ?: 360;
+        $failedCooldown = max(0, (int) Settings::get('failed_entry_cooldown_minutes'));
         $maxPositions = (int) Settings::get('max_positions') ?: 10;
         $paused = (bool) Settings::get('trading_paused');
 
@@ -329,10 +329,11 @@ class DashboardController extends Controller
             if (Trade::where('symbol', $candidate->symbol)->where('created_at', '>=', now()->subMinutes($cooldown))->exists()) {
                 $blockedReasons[] = "Cooldown ({$cooldown}m)";
             }
-            if (Position::where('symbol', $candidate->symbol)
-                ->where('status', PositionStatus::Failed)
-                ->where('created_at', '>=', now()->subMinutes($failedCooldown))
-                ->exists()
+            if ($failedCooldown > 0
+                && Position::where('symbol', $candidate->symbol)
+                    ->where('status', PositionStatus::Failed)
+                    ->where('created_at', '>=', now()->subMinutes($failedCooldown))
+                    ->exists()
             ) {
                 $blockedReasons[] = "Failed-entry cooldown ({$failedCooldown}m)";
             }
@@ -575,7 +576,7 @@ class DashboardController extends Controller
     public function scannerData(ShortScanner $scanner): JsonResponse
     {
         $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
-        $failedCooldown = (int) Settings::get('failed_entry_cooldown_minutes') ?: 360;
+        $failedCooldown = max(0, (int) Settings::get('failed_entry_cooldown_minutes'));
         $maxPositions = (int) Settings::get('max_positions') ?: 10;
         $paused = (bool) Settings::get('trading_paused');
 
@@ -600,10 +601,11 @@ class DashboardController extends Controller
             if (Trade::where('symbol', $candidate->symbol)->where('created_at', '>=', now()->subMinutes($cooldown))->exists()) {
                 $blockedReasons[] = "Cooldown ({$cooldown}m)";
             }
-            if (Position::where('symbol', $candidate->symbol)
-                ->where('status', PositionStatus::Failed)
-                ->where('created_at', '>=', now()->subMinutes($failedCooldown))
-                ->exists()
+            if ($failedCooldown > 0
+                && Position::where('symbol', $candidate->symbol)
+                    ->where('status', PositionStatus::Failed)
+                    ->where('created_at', '>=', now()->subMinutes($failedCooldown))
+                    ->exists()
             ) {
                 $blockedReasons[] = "Failed-entry cooldown ({$failedCooldown}m)";
             }

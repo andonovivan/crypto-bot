@@ -65,7 +65,10 @@ return [
         'stop_loss_pct' => (float) env('STOP_LOSS_PCT', 1.0),
         'max_hold_minutes' => (int) env('MAX_HOLD_MINUTES', 120),
         'cooldown_minutes' => (int) env('COOLDOWN_MINUTES', 120),
-        'failed_entry_cooldown_minutes' => (int) env('FAILED_ENTRY_COOLDOWN_MINUTES', 360),
+        // 0 disables the cooldown — same symbol can be retried immediately
+        // after a Failed entry. Matches backtest's effective behaviour
+        // (replay stubs out order rejections so Failed rows are rare).
+        'failed_entry_cooldown_minutes' => (int) env('FAILED_ENTRY_COOLDOWN_MINUTES', 0),
         'max_candle_body_pct' => (float) env('MAX_CANDLE_BODY_PCT', 3.0),
         'min_red_candles' => (int) env('MIN_RED_CANDLES', 2),
         'use_post_only_entry' => filter_var(env('USE_POST_ONLY_ENTRY', true), FILTER_VALIDATE_BOOLEAN),

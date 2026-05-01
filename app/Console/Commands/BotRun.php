@@ -62,9 +62,21 @@ class BotRun extends Command
                 $this->error("Cycle error: {$e->getMessage()}");
             }
 
-            $elapsed = microtime(true) - $loopStart;
-            $sleepTime = max(0, $scanInterval - $elapsed);
-            $sleptSoFar = 0;
+            // Align wakes to integer multiples of scan_interval since the
+            // unix epoch, so cycles fire at predictable boundaries (e.g.
+            // scan_interval=30 → :00 and :30 of every minute, scan_interval=60
+            // → :00 only). The scanner gate inside runCycle still requires a
+            // new closed 1m candle, so a wake at :00 is the one that actually
+            // hits the scanner — matching backtest's exact-boundary tick.
+            $now = microtime(true);
+            $nextWake = ceil($now / $scanInterval) * $scanInterval;
+            // If a cycle landed exactly on a boundary, ceil() returns the same
+            // boundary — bump forward one interval so we don't busy-loop.
+            if ($nextWake <= $now) {
+                $nextWake += $scanInterval;
+            }
+            $sleepTime = $nextWake - $now;
+            $sleptSoFar = 0.0;
             while ($sleptSoFar < $sleepTime && ! $this->shouldStop) {
                 $chunk = min(1.0, $sleepTime - $sleptSoFar);
                 usleep((int) ($chunk * 1_000_000));
@@ -81,7 +93,7 @@ class BotRun extends Command
     {
         $maxPositions = (int) Settings::get('max_positions') ?: 10;
         $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
-        $failedCooldown = (int) Settings::get('failed_entry_cooldown_minutes') ?: 360;
+        $failedCooldown = max(0, (int) Settings::get('failed_entry_cooldown_minutes'));
         $paused = (bool) Settings::get('trading_paused');
 
         // Manage existing open positions first
@@ -164,12 +176,14 @@ class BotRun extends Command
                 continue;
             }
 
-            $recentFail = Position::where('symbol', $candidate->symbol)
-                ->where('status', PositionStatus::Failed)
-                ->where('created_at', '>=', now()->subMinutes($failedCooldown))
-                ->exists();
-            if ($recentFail) {
-                continue;
+            if ($failedCooldown > 0) {
+                $recentFail = Position::where('symbol', $candidate->symbol)
+                    ->where('status', PositionStatus::Failed)
+                    ->where('created_at', '>=', now()->subMinutes($failedCooldown))
+                    ->exists();
+                if ($recentFail) {
+                    continue;
+                }
             }
 
             $analysis = $scanner->analyze15m($candidate->symbol);
