@@ -35,6 +35,7 @@ class BotBacktestRolling extends Command
         {--to= : End month YYYY-MM (exclusive, required)}
         {--symbols= : Comma-separated symbol filter (passed to each chunk)}
         {--starting-balance=10000 : Starting wallet for the very first chunk; subsequent chunks accumulate via DB-resident trades}
+        {--fixed-sizing : Pin each chunk to the starting balance so per-trade P&L reflects the strategy edge without compounding. Trade rows still accumulate; wallet_at_end column shows the would-be compounded value.}
         {--use-1m : Pass --use-1m to each chunk and (if --download-on-demand) fetch interval=1m archives for each month}
         {--download-on-demand : Run bot:download-history before each chunk to fetch missing kline_history rows for that month (and the prior month on chunk 1 for lead-in)}
         {--download-intervals=15m,1h : Intervals to fetch when --download-on-demand is on; "1m" is added automatically when --use-1m is set}
@@ -71,6 +72,7 @@ class BotBacktestRolling extends Command
 
         $symbols = (string) $this->option('symbols');
         $startingBalance = (float) $this->option('starting-balance');
+        $fixedSizing = (bool) $this->option('fixed-sizing');
         $use1m = (bool) $this->option('use-1m');
         $download = (bool) $this->option('download-on-demand');
         $cleanup = (bool) $this->option('cleanup-prior');
@@ -135,6 +137,9 @@ class BotBacktestRolling extends Command
             }
             if ($use1m) {
                 $args[] = '--use-1m';
+            }
+            if ($fixedSizing) {
+                $args[] = '--fixed-sizing';
             }
             if (! $isLast) {
                 $args[] = '--no-force-close';
