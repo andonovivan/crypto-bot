@@ -39,6 +39,11 @@ class BotBacktest extends Command
 
     public function handle(): int
     {
+        // HistoricalReplayExchange loads ~1.5–2 GB of kline arrays in --use-1m
+        // mode for a month-wide run across all USDT perps. The default 128M
+        // CLI memory_limit OOMs long before scanForEntries even fires.
+        ini_set('memory_limit', '-1');
+
         $fromStr = (string) $this->option('from');
         if (! $fromStr) {
             $this->error('--from is required (YYYY-MM-DD)');

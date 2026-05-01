@@ -18,6 +18,7 @@ class BotDownloadHistory extends Command
 {
     protected $signature = 'bot:download-history
         {--months=1 : Number of most recent completed calendar months to fetch}
+        {--end-month= : Anchor month YYYY-MM walking backwards (default: last completed month). e.g. --end-month=2026-03 --months=2 fetches Feb+Mar 2026.}
         {--symbols= : Comma-separated list of symbols (default: all current USDT perps)}
         {--intervals=15m,1h : Comma-separated kline intervals to fetch (e.g. 1m,15m,1h)}
         {--skip-existing : Skip (symbol,interval,month) combos that already have rows in kline_history}';
@@ -29,7 +30,13 @@ class BotDownloadHistory extends Command
 
     public function handle(ExchangeInterface $exchange): int
     {
+        // Bulk-insert batches of 1m CSV rows accumulate transient memory while
+        // unzipping + parsing; the default 128M CLI limit OOMs around the 25th
+        // symbol when 1m + 15m + 1h are all pulled in one run.
+        ini_set('memory_limit', '-1');
+
         $months = max(1, (int) $this->option('months'));
+        $endMonth = $this->option('end-month');
         $symbolsOpt = $this->option('symbols');
         $skipExisting = (bool) $this->option('skip-existing');
         $intervals = array_values(array_filter(array_map('trim', explode(',', (string) $this->option('intervals')))));
@@ -47,7 +54,12 @@ class BotDownloadHistory extends Command
         $this->info(sprintf('Downloading %d month(s) of data for %d symbols × %d intervals (%s)',
             $months, count($symbols), count($intervals), implode(',', $intervals)));
 
-        $ym = $this->monthsToFetch($months);
+        try {
+            $ym = $this->monthsToFetch($months, $endMonth);
+        } catch (\InvalidArgumentException $e) {
+            $this->error($e->getMessage());
+            return self::FAILURE;
+        }
         $totalJobs = count($symbols) * count($intervals) * count($ym);
 
         $bar = $this->output->createProgressBar($totalJobs);
@@ -99,10 +111,19 @@ class BotDownloadHistory extends Command
     /**
      * @return string[] YYYY-MM strings, most recent completed month first.
      */
-    private function monthsToFetch(int $count): array
+    private function monthsToFetch(int $count, ?string $endMonth = null): array
     {
+        if ($endMonth) {
+            $cursor = \Carbon\Carbon::createFromFormat('Y-m', $endMonth);
+            if (! $cursor) {
+                throw new \InvalidArgumentException("Invalid --end-month '{$endMonth}', expected YYYY-MM");
+            }
+            $cursor = $cursor->startOfMonth();
+        } else {
+            $cursor = now()->startOfMonth()->subMonth();
+        }
+
         $out = [];
-        $cursor = now()->startOfMonth()->subMonth();
         for ($i = 0; $i < $count; $i++) {
             $out[] = $cursor->format('Y-m');
             $cursor = $cursor->subMonth();
