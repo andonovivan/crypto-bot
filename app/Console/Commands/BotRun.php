@@ -20,6 +20,8 @@ class BotRun extends Command
 
     private bool $shouldStop = false;
 
+    private int $lastScannedCandleOpenTime = 0;
+
     public function handle(ShortScanner $scanner, TradingEngine $engine, ExchangeInterface $exchange, FundingSettlementService $fundingService): int
     {
         $isDryRun = (bool) Settings::get('dry_run');
@@ -106,6 +108,18 @@ class BotRun extends Command
         if (! (bool) Settings::get('dry_run')) {
             $this->safetyReconcile($engine, $exchange);
         }
+
+        // Gate the scanner to once per new closed 1m candle so live entry
+        // cadence matches `bot:backtest --use-1m`. Position management +
+        // safety reconcile above run every cycle regardless. Without this,
+        // a 30s loop fires the scanner ~60×/min while the backtest fires
+        // it 1×/min, so live can catch entries that backtest never models.
+        $nowSec = now()->getTimestamp();
+        $latestClosedOpenTime = (intdiv($nowSec, 60) - 1) * 60;
+        if ($latestClosedOpenTime <= $this->lastScannedCandleOpenTime) {
+            return;
+        }
+        $this->lastScannedCandleOpenTime = $latestClosedOpenTime;
 
         // Skip the scan entirely when there's no capacity to act on a candidate.
         // Saves the getFuturesTickers API call + log noise. Position management
