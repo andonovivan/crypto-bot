@@ -103,6 +103,27 @@ class BotBacktestRolling extends Command
         // user to have pre-downloaded it.
         $priorMonthForLeadIn = $startCarbon->copy()->subMonth()->format('Y-m');
 
+        // Chunk 0's data must be in DB before its backtest starts, so the
+        // lead-in month + chunk 0's own month are downloaded synchronously up
+        // front. Subsequent chunks pipeline: while chunk N runs, chunk N+1's
+        // data downloads in the background. Cuts ~backtest_time per chunk off
+        // the wall-clock total.
+        if ($download) {
+            foreach ([$priorMonthForLeadIn, $months[0]] as $fetchYm) {
+                $exit = $this->fetchMonthIfMissing($fetchYm, $intervals, $symbols);
+                if ($exit !== 0) {
+                    $this->error("Initial download for {$fetchYm} exited with code {$exit}; aborting rolling run.");
+                    return self::FAILURE;
+                }
+            }
+        }
+
+        // pendingDownload holds the bot:download-history process started in
+        // the prior iteration to fetch the CURRENT iteration's data. Null
+        // means no in-flight download (first iteration, or --download-on-demand
+        // off, or last chunk just finished).
+        $pendingDownload = null;
+
         foreach ($months as $i => $ym) {
             $isLast = ($i === $totalChunks - 1);
             $monthStart = "{$ym}-01";
@@ -111,16 +132,21 @@ class BotBacktestRolling extends Command
             $this->newLine();
             $this->info(sprintf('===== Chunk %d/%d : %s → %s =====', $i + 1, $totalChunks, $monthStart, $monthEnd));
 
-            // ---- Optional download step ----
-            if ($download) {
-                $monthsToFetch = $i === 0 ? [$priorMonthForLeadIn, $ym] : [$ym];
-                foreach ($monthsToFetch as $fetchYm) {
-                    $exit = $this->fetchMonthIfMissing($fetchYm, $intervals, $symbols);
-                    if ($exit !== 0) {
-                        $this->error("Download for {$fetchYm} exited with code {$exit}; aborting rolling run.");
-                        return self::FAILURE;
-                    }
+            // Wait for the previous iteration's background download to land
+            // before this chunk's backtest reads from kline_history.
+            if ($pendingDownload !== null) {
+                $exit = $this->awaitDownloadProcess($pendingDownload, "download-{$ym}");
+                $pendingDownload = null;
+                if ($exit !== 0) {
+                    $this->error("Background download for {$ym} exited with code {$exit}; aborting rolling run.");
+                    return self::FAILURE;
                 }
+            }
+
+            // Kick off next chunk's download in parallel with this chunk's
+            // backtest. Skip on the last iteration (nothing left to fetch).
+            if ($download && ! $isLast) {
+                $pendingDownload = $this->startDownloadProcess($months[$i + 1], $intervals, $symbols);
             }
 
             // Snapshot trade state so per-chunk metrics can be computed cleanly.
@@ -248,6 +274,73 @@ class BotBacktestRolling extends Command
             $args[] = '--symbols=' . $symbols;
         }
         return $this->runProcess($args, "download-{$ym}");
+    }
+
+    /**
+     * Start bot:download-history for a single month as a non-blocking process.
+     * The caller runs the chunk backtest in parallel and later calls
+     * awaitDownloadProcess() before consuming the data.
+     *
+     * Returns null when the target month is in the future (not yet published)
+     * — caller treats null the same as a clean no-op.
+     */
+    private function startDownloadProcess(string $ym, array $intervals, string $symbols): ?Process
+    {
+        $target = Carbon::parse("{$ym}-01", 'UTC')->startOfMonth();
+        $lastCompleted = Carbon::now('UTC')->startOfMonth()->subMonth();
+        if ($target->greaterThan($lastCompleted)) {
+            $this->warn("Skipping background download for {$ym} (target month is not yet published).");
+            return null;
+        }
+
+        $args = [
+            'php', '-d', 'memory_limit=-1', 'artisan', 'bot:download-history',
+            '--end-month=' . $ym,
+            '--months=1',
+            '--intervals=' . implode(',', $intervals),
+            '--skip-existing',
+        ];
+        if ($symbols !== '') {
+            $args[] = '--symbols=' . $symbols;
+        }
+
+        $this->info(sprintf('[download-%s background] %s', $ym, implode(' ', $args)));
+        $process = new Process($args, base_path());
+        $process->setTimeout(10800);
+        $process->start();
+        return $process;
+    }
+
+    /**
+     * Wait for a background download process and surface a one-line summary.
+     * Live progress is suppressed on background downloads — the chunk
+     * backtest's progress bar is using stdout in parallel, so interleaving
+     * the two would be unreadable. We dump only the final 3 lines (which
+     * normally end with "Done. downloaded=X skipped=Y missing=Z ...") plus
+     * the elapsed time and exit code.
+     */
+    private function awaitDownloadProcess(?Process $process, string $label): int
+    {
+        if ($process === null) {
+            return 0;
+        }
+        $start = microtime(true);
+        $process->wait();
+        $elapsed = (int) (microtime(true) - $start);
+        $exit = $process->getExitCode() ?? -1;
+
+        $output = trim($process->getOutput() . "\n" . $process->getErrorOutput());
+        $tail = $output !== ''
+            ? array_slice(preg_split('/\r?\n/', $output), -3)
+            : [];
+
+        $this->info(sprintf('[%s] completed exit=%d (%ds)', $label, $exit, $elapsed));
+        foreach ($tail as $line) {
+            if (trim($line) !== '') {
+                $this->line($line);
+            }
+        }
+        return $exit;
     }
 
     private function purgeKlinesForMonth(string $ym): int
