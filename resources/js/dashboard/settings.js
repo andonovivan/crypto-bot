@@ -138,6 +138,15 @@ async function load() {
     if (exDriver) exDriver.textContent = (data.exchange?.driver ?? '?').toUpperCase();
     const exTestnet = document.getElementById('settings-exchange-testnet');
     if (exTestnet) exTestnet.textContent = data.exchange?.testnet ? 'Yes' : 'No';
+
+    // Sections render after the initial page paint, so the browser's first jump to
+    // a `#settings-group-…` fragment finds nothing. Re-apply it once layout settles.
+    if (window.location.hash.startsWith('#settings-group-')) {
+        const hash = window.location.hash;
+        setTimeout(() => {
+            document.querySelector(hash)?.scrollIntoView({ block: 'start' });
+        }, 50);
+    }
 }
 
 async function save() {
@@ -177,6 +186,17 @@ export function bindSettingsPage() {
     document.getElementById('settings-save')?.addEventListener('click', save);
     document.getElementById('settings-discard')?.addEventListener('click', discard);
     document.getElementById('settings-reset')?.addEventListener('click', resetAll);
+
+    // Native fragment scrolling is unreliable here (the form is populated async, and
+    // even later clicks sometimes don't scroll). Handle TOC nav explicitly.
+    document.getElementById('settings-toc')?.addEventListener('click', (e) => {
+        const a = e.target.closest('a[href^="#settings-group-"]');
+        if (!a) return;
+        e.preventDefault();
+        const hash = a.getAttribute('href');
+        document.querySelector(hash)?.scrollIntoView({ block: 'start' });
+        history.replaceState(null, '', hash);
+    });
 
     renderListeners.add((count) => {
         const bar = document.getElementById('settings-savebar');
