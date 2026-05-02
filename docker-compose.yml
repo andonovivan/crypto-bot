@@ -7,6 +7,11 @@ services:
       MARIADB_DATABASE: crypto_bot
       MARIADB_USER: crypto
       MARIADB_PASSWORD: secret
+    # Backtest streams ~50M+ kline_history rows with cursor() and holds
+    # row-level read locks across the whole iteration; the default 128M
+    # InnoDB buffer pool overflows the lock table (error 1206). 2G gives
+    # plenty of headroom for current dataset sizes.
+    command: --innodb-buffer-pool-size=2147483648
     volumes:
       - dbdata:/var/lib/mysql
     healthcheck:
