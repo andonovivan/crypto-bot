@@ -223,31 +223,24 @@ class BotBacktestRolling extends Command
 
     /**
      * Fetch a single YYYY-MM month from data.binance.vision if not already
-     * present. Computes how far back the month is from "now" so the existing
-     * --months=N flag can target it; --skip-existing makes the call a no-op
-     * if data is already there.
+     * present. Uses the bot:download-history --end-month flag to target
+     * exactly one month — without it the older code path called --months=N
+     * (offset from "now"), which downloads N months instead of 1 and burns
+     * hours. --skip-existing makes the call a no-op if data is already there.
      */
     private function fetchMonthIfMissing(string $ym, array $intervals, string $symbols): int
     {
         $target = Carbon::parse("{$ym}-01", 'UTC')->startOfMonth();
-        $cursor = Carbon::now('UTC')->startOfMonth()->subMonth();
-        $monthsBack = 0;
-        while ($cursor->greaterThanOrEqualTo($target)) {
-            $monthsBack++;
-            if ($cursor->equalTo($target)) {
-                break;
-            }
-            $cursor = $cursor->subMonth();
-        }
-        if (! $cursor->equalTo($target)) {
-            // Target month is in the future — Binance archives won't have it.
+        $lastCompleted = Carbon::now('UTC')->startOfMonth()->subMonth();
+        if ($target->greaterThan($lastCompleted)) {
             $this->warn("Skipping download for {$ym} (target month is not yet published).");
             return 0;
         }
 
         $args = [
             'php', '-d', 'memory_limit=-1', 'artisan', 'bot:download-history',
-            '--months=' . $monthsBack,
+            '--end-month=' . $ym,
+            '--months=1',
             '--intervals=' . implode(',', $intervals),
             '--skip-existing',
         ];
