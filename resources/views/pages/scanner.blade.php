@@ -1,7 +1,8 @@
 @section('title', 'Scanner')
 
-<x-card title="Market Scanner" subtitle="USDT perpetuals · 24h pumps & dumps with 15m downtrend confirmation" padding="p-0">
+<x-card title="Market Scanner" subtitle="Candidates from every enabled strategy. Each row's badge shows which strategy proposed the symbol." padding="p-0">
     <x-slot:actions>
+        <span id="scanner-strategies" class="text-[11px] text-[var(--color-text-subtle)]"></span>
         <span id="scanner-updated" class="text-xs text-[var(--color-text-subtle)]"></span>
         <button id="scan-btn" class="px-3 py-1.5 rounded-lg text-xs bg-[var(--color-accent-soft)] text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-surface)] transition-colors">Scan</button>
         <button id="scan-auto-btn" class="px-3 py-1.5 rounded-lg text-xs bg-[var(--color-success-soft)] text-[var(--color-success)] hover:bg-[var(--color-success)] hover:text-[var(--color-surface)] transition-colors">Scan + Auto Trade</button>
@@ -10,10 +11,10 @@
     <x-table-shell
         table-key="scanner"
         tbody-id="scanner-body"
-        placeholder="Click Scan to find pump/dump candidates."
+        placeholder="Click Scan to find candidates from every enabled strategy."
         :colspan="10"
         :columns="[
-            ['label' => 'Symbol', 'sort' => 'symbol'],
+            ['label' => 'Symbol / Strategy', 'sort' => 'symbol'],
             ['label' => '24h %', 'sort' => 'price_change_pct'],
             ['label' => 'Volume', 'sort' => 'volume'],
             ['label' => 'Price', 'sort' => 'price'],
@@ -30,11 +31,11 @@
 
 <div class="mt-4 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-xl p-4 flex items-center gap-3 flex-wrap">
     <div class="flex flex-col">
-        <span class="text-[10px] uppercase tracking-wider text-[var(--color-text-subtle)]">Manual SHORT</span>
-        <span class="text-xs text-[var(--color-text-muted)]">Open a position on any candidate symbol</span>
+        <span class="text-[10px] uppercase tracking-wider text-[var(--color-text-subtle)]">Manual Entry</span>
+        <span class="text-xs text-[var(--color-text-muted)]">Open a position on any candidate symbol via its strategy</span>
     </div>
-    <select id="manual-symbol" class="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-[var(--color-accent)]">
+    <select id="manual-symbol" class="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-[var(--color-accent)] min-w-[20rem]">
         <option value="">Select symbol…</option>
     </select>
-    <button id="open-manual-btn" class="px-3 py-1.5 rounded-lg text-xs bg-[var(--color-danger-soft)] text-[var(--color-danger)] hover:bg-[var(--color-danger)] hover:text-[var(--color-surface)] transition-colors">Open SHORT</button>
+    <button id="open-manual-btn" class="px-3 py-1.5 rounded-lg text-xs bg-[var(--color-accent-soft)] text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-surface)] transition-colors">Open Position</button>
 </div>

@@ -9,8 +9,6 @@ use App\Models\Position;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
 use App\Services\Settings;
-use App\Services\ShortScanner;
-use App\Services\ShortSignal;
 use App\Services\TradingEngine;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -301,84 +299,52 @@ class DashboardController extends Controller
         ]);
     }
 
-    public function scanNow(ShortScanner $scanner, TradingEngine $engine, Request $request): JsonResponse
+    public function scanNow(TradingEngine $engine, Request $request): JsonResponse
     {
         $autoTrade = $request->boolean('auto_trade', false);
-        $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
-        $failedCooldown = max(0, (int) Settings::get('failed_entry_cooldown_minutes'));
-        $maxPositions = (int) Settings::get('max_positions') ?: 10;
-        $paused = (bool) Settings::get('trading_paused');
+        $strategyFilter = $request->string('strategy')->trim()->toString();
 
-        $candidates = $scanner->getCandidates();
-        $results = [];
+        $rows = $this->buildScannerRows($strategyFilter !== '' ? $strategyFilter : null);
+
         $trades = [];
-
-        foreach ($candidates as $candidate) {
-            $analysis = $scanner->analyze15m($candidate->symbol);
-            $blockedReasons = [];
-
-            if ($paused) {
-                $blockedReasons[] = 'Trading paused';
-            }
-            if (Position::open()->count() >= $maxPositions) {
-                $blockedReasons[] = 'Max total positions';
-            }
-            if (Position::open()->where('symbol', $candidate->symbol)->exists()) {
-                $blockedReasons[] = 'Already open';
-            }
-            if (Trade::where('symbol', $candidate->symbol)->where('created_at', '>=', now()->subMinutes($cooldown))->exists()) {
-                $blockedReasons[] = "Cooldown ({$cooldown}m)";
-            }
-            if ($failedCooldown > 0
-                && Position::where('symbol', $candidate->symbol)
-                    ->where('status', PositionStatus::Failed)
-                    ->where('created_at', '>=', now()->subMinutes($failedCooldown))
-                    ->exists()
-            ) {
-                $blockedReasons[] = "Failed-entry cooldown ({$failedCooldown}m)";
-            }
-            if ($analysis && ! $analysis->downtrendOk) {
-                $blockedReasons[] = $analysis->blockedReason ?? '15m trend not down';
-            }
-            if (! $analysis) {
-                $blockedReasons[] = 'Insufficient klines';
-            }
-
-            $canEnter = empty($blockedReasons);
-
-            $results[] = [
-                'symbol' => $candidate->symbol,
-                'price_change_pct' => $candidate->priceChangePct,
-                'volume' => $candidate->volume,
-                'price' => $candidate->price,
-                'reason' => $candidate->reason,
-                'ema_fast' => $analysis?->emaFast,
-                'ema_slow' => $analysis?->emaSlow,
-                'candle_body_pct' => $analysis?->candleBodyPct,
-                'last_candle_red' => $analysis?->lastCandleRed,
-                'funding_rate' => $analysis?->fundingRate,
-                'downtrend_ok' => $analysis?->downtrendOk ?? false,
-                'can_enter' => $canEnter,
-                'blocked_reasons' => $blockedReasons,
-            ];
-
-            if ($autoTrade && $canEnter && $analysis) {
-                $signal = new ShortSignal(
-                    symbol: $candidate->symbol,
-                    priceChangePct: $candidate->priceChangePct,
-                    reason: $candidate->reason,
-                );
-                $position = $engine->openShort($signal);
+        if ($autoTrade) {
+            $registry = app(\App\Services\Strategy\StrategyRegistry::class);
+            foreach ($rows['rows'] as $row) {
+                if (! $row['can_enter']) {
+                    continue;
+                }
+                $strategy = $registry->find($row['strategy_key']);
+                if (! $strategy || ! $strategy->isEnabled()) {
+                    continue;
+                }
+                // Re-fetch candidate + analysis to construct the Signal —
+                // we only kept lightweight row data above, not the DTOs.
+                $candidate = collect($strategy->getCandidates())
+                    ->first(fn ($c) => $c->symbol === $row['symbol']);
+                if (! $candidate) {
+                    continue;
+                }
+                $analysis = $strategy->analyze($row['symbol']);
+                if (! $analysis || ! $analysis->ok) {
+                    continue;
+                }
+                $signal = $strategy->buildSignal($candidate, $analysis);
+                $position = $engine->open($signal);
                 if ($position) {
-                    $trades[] = $position->symbol;
+                    $trades[] = [
+                        'symbol' => $position->symbol,
+                        'side' => $position->side,
+                        'strategy_key' => $position->strategy_key,
+                    ];
                 }
             }
         }
 
         return response()->json([
             'ok' => true,
-            'candidates' => $results,
-            'candidate_count' => count($results),
+            'strategies' => $rows['strategies'],
+            'candidates' => $rows['rows'],
+            'candidate_count' => count($rows['rows']),
             'trades_opened' => $trades,
         ]);
     }
@@ -573,89 +539,188 @@ class DashboardController extends Controller
         return response()->json(['ok' => true]);
     }
 
-    public function scannerData(ShortScanner $scanner): JsonResponse
+    public function scannerData(Request $request): JsonResponse
     {
-        $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
-        $failedCooldown = max(0, (int) Settings::get('failed_entry_cooldown_minutes'));
-        $maxPositions = (int) Settings::get('max_positions') ?: 10;
-        $paused = (bool) Settings::get('trading_paused');
-
-        $candidates = $scanner->getCandidates();
-        $totalOpen = Position::open()->count();
-
-        $rows = [];
-        foreach ($candidates as $candidate) {
-            $analysis = $scanner->analyze15m($candidate->symbol);
-            $symbolOpen = Position::open()->where('symbol', $candidate->symbol)->count();
-            $blockedReasons = [];
-
-            if ($paused) {
-                $blockedReasons[] = 'Trading paused';
-            }
-            if ($totalOpen >= $maxPositions) {
-                $blockedReasons[] = "Max total ({$totalOpen}/{$maxPositions})";
-            }
-            if ($symbolOpen > 0) {
-                $blockedReasons[] = 'Already open';
-            }
-            if (Trade::where('symbol', $candidate->symbol)->where('created_at', '>=', now()->subMinutes($cooldown))->exists()) {
-                $blockedReasons[] = "Cooldown ({$cooldown}m)";
-            }
-            if ($failedCooldown > 0
-                && Position::where('symbol', $candidate->symbol)
-                    ->where('status', PositionStatus::Failed)
-                    ->where('created_at', '>=', now()->subMinutes($failedCooldown))
-                    ->exists()
-            ) {
-                $blockedReasons[] = "Failed-entry cooldown ({$failedCooldown}m)";
-            }
-            if (! $analysis) {
-                $blockedReasons[] = 'No klines';
-            } elseif (! $analysis->downtrendOk) {
-                $blockedReasons[] = $analysis->blockedReason ?? '15m not down';
-            }
-
-            $rows[] = [
-                'symbol' => $candidate->symbol,
-                'price_change_pct' => $candidate->priceChangePct,
-                'volume' => $candidate->volume,
-                'price' => $candidate->price,
-                'reason' => $candidate->reason,
-                'ema_fast' => $analysis?->emaFast !== null ? round($analysis->emaFast, 6) : null,
-                'ema_slow' => $analysis?->emaSlow !== null ? round($analysis->emaSlow, 6) : null,
-                'candle_body_pct' => $analysis?->candleBodyPct,
-                'last_candle_red' => $analysis?->lastCandleRed,
-                'prior_candle_red' => $analysis?->priorCandleRed,
-                'funding_rate' => $analysis?->fundingRate,
-                'downtrend_ok' => $analysis?->downtrendOk ?? false,
-                'open_positions' => $symbolOpen,
-                'can_enter' => empty($blockedReasons),
-                'blocked_reasons' => $blockedReasons,
-            ];
-        }
+        $strategyFilter = $request->string('strategy')->trim()->toString();
+        $rows = $this->buildScannerRows($strategyFilter !== '' ? $strategyFilter : null);
 
         return response()->json([
             'ok' => true,
-            'candidates' => $rows,
+            'strategies' => $rows['strategies'],
+            'candidates' => $rows['rows'],
             'scanned_at' => now()->timestamp,
         ]);
+    }
+
+    /**
+     * Iterate every enabled strategy (or just the one requested) and emit a
+     * flat list of candidate rows. Each row includes its `strategy_key` /
+     * `side` so the UI can render a strategy badge and a side-aware action
+     * button. Per-strategy cooldown is honored: a recent close by THIS
+     * strategy on this symbol blocks re-entry by the same strategy, but a
+     * different strategy can still queue the symbol.
+     *
+     * @return array{strategies: array<int, array{key:string,label:string,side:string,enabled:bool}>, rows: array<int, array<string, mixed>>}
+     */
+    private function buildScannerRows(?string $strategyKey): array
+    {
+        $registry = app(\App\Services\Strategy\StrategyRegistry::class);
+        $maxPositions = (int) Settings::get('max_positions') ?: 10;
+        $paused = (bool) Settings::get('trading_paused');
+        $totalOpen = Position::open()->count();
+
+        $strategiesMeta = [];
+        foreach ($registry->inOrder() as $s) {
+            $strategiesMeta[] = [
+                'key' => $s->key(),
+                'label' => $s->label(),
+                'side' => $s->side(),
+                'enabled' => $s->isEnabled(),
+            ];
+        }
+
+        // Pick which strategies actually run a scan this request. The
+        // dashboard scan covers all ENABLED strategies by default; an
+        // explicit ?strategy=KEY narrows it to one (and force-runs even
+        // when disabled, so the UI can preview a strategy before flipping
+        // it on).
+        $toScan = [];
+        if ($strategyKey !== null) {
+            $s = $registry->find($strategyKey);
+            if ($s) {
+                $toScan[] = $s;
+            }
+        } else {
+            $toScan = $registry->enabled();
+        }
+
+        $rows = [];
+        foreach ($toScan as $strategy) {
+            $sk = $strategy->key();
+            $cooldown = (int) Settings::get('strategy.'.$sk.'.cooldown_minutes') ?: 120;
+            $failedCooldown = max(0, (int) Settings::get('strategy.'.$sk.'.failed_entry_cooldown_minutes'));
+
+            foreach ($strategy->getCandidates() as $candidate) {
+                $symbol = $candidate->symbol;
+                $analysis = $strategy->analyze($symbol);
+                $symbolOpen = Position::open()->where('symbol', $symbol)->count();
+
+                $blocked = [];
+                if ($paused) {
+                    $blocked[] = 'Trading paused';
+                }
+                if ($totalOpen >= $maxPositions) {
+                    $blocked[] = "Max total ({$totalOpen}/{$maxPositions})";
+                }
+                if ($symbolOpen > 0) {
+                    $blocked[] = 'Already open';
+                }
+                if (! $strategy->isEnabled()) {
+                    $blocked[] = 'Strategy disabled';
+                }
+                $recentClose = Trade::where('symbol', $symbol)
+                    ->where('strategy_key', $sk)
+                    ->where('created_at', '>=', now()->subMinutes($cooldown))
+                    ->exists();
+                if ($recentClose) {
+                    $blocked[] = "Cooldown ({$cooldown}m)";
+                }
+                if ($failedCooldown > 0
+                    && Position::where('symbol', $symbol)
+                        ->where('strategy_key', $sk)
+                        ->where('status', PositionStatus::Failed)
+                        ->where('created_at', '>=', now()->subMinutes($failedCooldown))
+                        ->exists()
+                ) {
+                    $blocked[] = "Failed-entry cooldown ({$failedCooldown}m)";
+                }
+                if (! $analysis) {
+                    $blocked[] = 'No klines';
+                } elseif (! $analysis->ok) {
+                    $blocked[] = $analysis->blockedReason ?? 'Strategy gate failed';
+                }
+
+                // Surface the legacy short-shape fields (ema_fast, ema_slow,
+                // last_candle_red, etc.) the JS already knows how to render.
+                // Long-strategy fields land alongside via different names so
+                // the UI can branch off `side` if it wants to render
+                // green-candle pills instead of red.
+                $f = $analysis?->fields ?? [];
+
+                $rows[] = [
+                    'strategy_key' => $sk,
+                    'strategy_label' => $strategy->label(),
+                    'side' => $strategy->side(),
+                    'symbol' => $symbol,
+                    'price_change_pct' => $candidate->priceChangePct,
+                    'volume' => $candidate->volume,
+                    'price' => $candidate->price,
+                    'reason' => $candidate->reason,
+                    'ema_fast' => isset($f['emaFast']) ? round((float) $f['emaFast'], 6) : null,
+                    'ema_slow' => isset($f['emaSlow']) ? round((float) $f['emaSlow'], 6) : null,
+                    'candle_body_pct' => $f['candleBodyPct'] ?? null,
+                    'last_candle_red' => $f['lastCandleRed'] ?? null,
+                    'prior_candle_red' => $f['priorCandleRed'] ?? null,
+                    'last_candle_green' => $f['lastCandleGreen'] ?? null,
+                    'prior_candle_green' => $f['priorCandleGreen'] ?? null,
+                    'funding_rate' => $f['fundingRate'] ?? null,
+                    'trend_ok' => $analysis?->ok ?? false,
+                    'open_positions' => $symbolOpen,
+                    'can_enter' => empty($blocked),
+                    'blocked_reasons' => $blocked,
+                ];
+            }
+        }
+
+        return [
+            'strategies' => $strategiesMeta,
+            'rows' => $rows,
+        ];
     }
 
     public function openPosition(Request $request, TradingEngine $engine): JsonResponse
     {
         $request->validate([
             'symbol' => 'required|string',
+            'strategy_key' => 'nullable|string',
         ]);
 
         $symbol = strtoupper($request->input('symbol'));
+        $registry = app(\App\Services\Strategy\StrategyRegistry::class);
 
-        $signal = new ShortSignal(
+        // Resolve strategy: explicit > first enabled. Reject when neither
+        // is available so the user sees a clear failure mode rather than
+        // a silent no-op.
+        $strategyKey = (string) $request->input('strategy_key', '');
+        if ($strategyKey !== '') {
+            $strategy = $registry->find($strategyKey);
+            if (! $strategy) {
+                return response()->json([
+                    'ok' => false,
+                    'message' => "Unknown strategy: {$strategyKey}",
+                ], 422);
+            }
+        } else {
+            $enabled = $registry->enabled();
+            if (empty($enabled)) {
+                return response()->json([
+                    'ok' => false,
+                    'message' => 'No enabled strategies — turn one on under Settings before opening manually.',
+                ], 422);
+            }
+            $strategy = $enabled[0];
+        }
+
+        $signal = new \App\Services\Strategy\Signal(
             symbol: $symbol,
+            side: $strategy->side(),
             priceChangePct: 0.0,
             reason: 'manual',
+            atr: 0.0,
+            strategyKey: $strategy->key(),
         );
 
-        $position = $engine->openShort($signal);
+        $position = $engine->open($signal);
 
         if (! $position) {
             return response()->json([
@@ -670,6 +735,7 @@ class DashboardController extends Controller
                 'id' => $position->id,
                 'symbol' => $position->symbol,
                 'side' => $position->side,
+                'strategy_key' => $position->strategy_key,
                 'entry_price' => $position->entry_price,
                 'quantity' => $position->quantity,
                 'position_size_usdt' => $position->position_size_usdt,

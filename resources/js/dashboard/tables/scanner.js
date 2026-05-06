@@ -11,25 +11,67 @@ function reasonPill(reason) {
         return '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wide uppercase border bg-[var(--color-success-soft)] text-[var(--color-success)] border-[var(--color-success)]/30">Pump</span>';
     if (reason === 'dump')
         return '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wide uppercase border bg-[var(--color-danger-soft)] text-[var(--color-danger)] border-[var(--color-danger)]/30">Dump</span>';
+    if (reason === 'pump_continuation')
+        return '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wide uppercase border bg-[var(--color-warning-soft)] text-[var(--color-warning)] border-[var(--color-warning)]/30">Continuation</span>';
     return '';
+}
+
+function strategyPill(c) {
+    // Side-coloured strategy badge so a glance distinguishes SHORT vs LONG
+    // candidates without reading the row's button label.
+    const side = c.side || 'SHORT';
+    const tone = side === 'LONG'
+        ? 'bg-[var(--color-success-soft)] text-[var(--color-success)] border-[var(--color-success)]/30'
+        : 'bg-[var(--color-danger-soft)] text-[var(--color-danger)] border-[var(--color-danger)]/30';
+    return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wide uppercase border ${tone}">${escapeHtml(c.strategy_key || '?')}</span>`;
 }
 
 function trendPill(c) {
     if (c.ema_fast == null || c.ema_slow == null) {
         return '<span class="text-[var(--color-text-subtle)] text-xs">—</span>';
     }
-    if (c.ema_fast < c.ema_slow) return '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-[var(--color-success-soft)] text-[var(--color-success)]">DOWN</span>';
-    if (c.ema_fast > c.ema_slow) return '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-[var(--color-danger-soft)] text-[var(--color-danger)]">UP</span>';
+    // SHORT strategies want EMA fast < slow (down trend favourable).
+    // LONG strategies want EMA fast > slow (up trend favourable).
+    const side = c.side || 'SHORT';
+    const isUp = c.ema_fast > c.ema_slow;
+    const isDown = c.ema_fast < c.ema_slow;
+    const favourable = (side === 'LONG' && isUp) || (side === 'SHORT' && isDown);
+    if (isUp) {
+        const tone = favourable ? 'bg-[var(--color-success-soft)] text-[var(--color-success)]' : 'bg-[var(--color-danger-soft)] text-[var(--color-danger)]';
+        return `<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase ${tone}">UP</span>`;
+    }
+    if (isDown) {
+        const tone = favourable ? 'bg-[var(--color-success-soft)] text-[var(--color-success)]' : 'bg-[var(--color-danger-soft)] text-[var(--color-danger)]';
+        return `<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase ${tone}">DOWN</span>`;
+    }
     return '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]">FLAT</span>';
 }
 
 function candleCell(c) {
-    if (c.last_candle_red === null || c.last_candle_red === undefined) return '<span class="text-[var(--color-text-subtle)]">—</span>';
-    const redCount = (c.last_candle_red ? 1 : 0) + (c.prior_candle_red ? 1 : 0);
-    const tone = redCount === 2 ? 'bg-[var(--color-success-soft)] text-[var(--color-success)]'
-        : redCount === 1 ? 'bg-[var(--color-warning-soft)] text-[var(--color-warning)]'
+    // Direction-aware: SHORT strategies care about red candles, LONG about
+    // green. The DTO carries both pairs — use whichever matches the side.
+    const side = c.side || 'SHORT';
+    let lastFav, priorFav, label2;
+    if (side === 'LONG') {
+        if (c.last_candle_green === null || c.last_candle_green === undefined) {
+            return '<span class="text-[var(--color-text-subtle)]">—</span>';
+        }
+        lastFav = !!c.last_candle_green;
+        priorFav = !!c.prior_candle_green;
+        label2 = 'GREEN';
+    } else {
+        if (c.last_candle_red === null || c.last_candle_red === undefined) {
+            return '<span class="text-[var(--color-text-subtle)]">—</span>';
+        }
+        lastFav = !!c.last_candle_red;
+        priorFav = !!c.prior_candle_red;
+        label2 = 'RED';
+    }
+    const favCount = (lastFav ? 1 : 0) + (priorFav ? 1 : 0);
+    const tone = favCount === 2 ? 'bg-[var(--color-success-soft)] text-[var(--color-success)]'
+        : favCount === 1 ? 'bg-[var(--color-warning-soft)] text-[var(--color-warning)]'
         : 'bg-[var(--color-danger-soft)] text-[var(--color-danger)]';
-    const label = redCount === 2 ? '2/2 RED' : redCount === 1 ? '1/2 RED' : '0/2 RED';
+    const label = `${favCount}/2 ${label2}`;
     const body = c.candle_body_pct != null
         ? ` <span class="text-[var(--color-text-subtle)] text-[10px]">${c.candle_body_pct.toFixed(2)}%</span>`
         : '';
@@ -43,6 +85,15 @@ function fundingCell(rate) {
     return `<span class="${cls} font-mono text-xs">${rate >= 0 ? '+' : ''}${pct}%</span>`;
 }
 
+function actionButton(c) {
+    const side = c.side || 'SHORT';
+    const label = side === 'LONG' ? 'Long' : 'Short';
+    const tone = side === 'LONG'
+        ? 'bg-[var(--color-success-soft)] text-[var(--color-success)] hover:bg-[var(--color-success)] hover:text-[var(--color-surface)]'
+        : 'bg-[var(--color-danger-soft)] text-[var(--color-danger)] hover:bg-[var(--color-danger)] hover:text-[var(--color-surface)]';
+    return `<button data-action="open-row" data-symbol="${escapeHtml(c.symbol)}" data-strategy="${escapeHtml(c.strategy_key)}" data-side="${side}" class="px-2 py-1 rounded text-[11px] ${tone} transition-colors">${label}</button>`;
+}
+
 function rowHtml(c) {
     const changeCls = c.price_change_pct >= 0 ? 'text-[var(--color-success)]' : 'text-[var(--color-danger)]';
     const ok = c.can_enter
@@ -54,8 +105,8 @@ function rowHtml(c) {
 
     return `<tr class="border-t border-[var(--color-border)] hover:bg-[var(--color-surface-hover)] transition-colors">
         <td class="px-4 py-3">
-            <div class="font-semibold">${c.symbol}</div>
-            <div class="mt-0.5">${reasonPill(c.reason)}</div>
+            <div class="font-semibold">${escapeHtml(c.symbol)}</div>
+            <div class="mt-0.5 flex gap-1 flex-wrap">${strategyPill(c)}${reasonPill(c.reason)}</div>
         </td>
         <td class="px-4 py-3 font-mono font-semibold ${changeCls}">${c.price_change_pct >= 0 ? '+' : ''}${c.price_change_pct.toFixed(2)}%</td>
         <td class="px-4 py-3 font-mono text-xs">${fmtVolume(c.volume)}</td>
@@ -65,9 +116,7 @@ function rowHtml(c) {
         <td class="px-4 py-3">${fundingCell(c.funding_rate)}</td>
         <td class="px-4 py-3 font-mono text-xs text-center">${c.open_positions}</td>
         <td class="px-4 py-3">${ok}${reasonText}</td>
-        <td class="px-4 py-3 whitespace-nowrap">
-            <button data-action="short" data-symbol="${c.symbol}" class="px-2 py-1 rounded text-[11px] bg-[var(--color-danger-soft)] text-[var(--color-danger)] hover:bg-[var(--color-danger)] hover:text-[var(--color-surface)] transition-colors">Short</button>
-        </td>
+        <td class="px-4 py-3 whitespace-nowrap">${actionButton(c)}</td>
     </tr>`;
 }
 
@@ -88,17 +137,38 @@ function render(data) {
     const body = document.getElementById('scanner-body');
     if (!body) return;
     if (!data.candidates?.length) {
-        body.innerHTML = `<tr><td colspan="10" class="text-center text-xs text-[var(--color-text-subtle)] py-8">No pump/dump candidates right now.</td></tr>`;
-        return;
+        body.innerHTML = `<tr><td colspan="10" class="text-center text-xs text-[var(--color-text-subtle)] py-8">No candidates from any enabled strategy right now.</td></tr>`;
+    } else {
+        body.innerHTML = sortRows(data.candidates).map(rowHtml).join('');
     }
-    body.innerHTML = sortRows(data.candidates).map(rowHtml).join('');
     updateArrows();
 
+    // Manual entry dropdown: each row becomes "STRATEGY · SYMBOL" so the
+    // user can target a specific (strategy, symbol) pair when there might be
+    // duplicates across strategies. value = `strategy_key|symbol`.
     const sel = document.getElementById('manual-symbol');
     if (sel) {
         const cur = sel.value;
-        sel.innerHTML = '<option value="">Select symbol…</option>' +
-            data.candidates.map((s) => `<option value="${s.symbol}" ${s.symbol === cur ? 'selected' : ''}>${s.symbol}</option>`).join('');
+        const opts = (data.candidates || []).map((s) => {
+            const value = `${s.strategy_key}|${s.symbol}`;
+            const label = `${s.symbol} · ${s.strategy_key} (${s.side})`;
+            return `<option value="${escapeHtml(value)}" ${value === cur ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+        }).join('');
+        sel.innerHTML = '<option value="">Select symbol…</option>' + opts;
+    }
+
+    // Strategy summary line above the table
+    const stratEl = document.getElementById('scanner-strategies');
+    if (stratEl) {
+        const enabled = (data.strategies || []).filter((s) => s.enabled);
+        const disabled = (data.strategies || []).filter((s) => !s.enabled);
+        const enabledTxt = enabled.length
+            ? enabled.map((s) => `<span class="text-[var(--color-success)]">${escapeHtml(s.key)}</span>`).join(', ')
+            : '<span class="text-[var(--color-warning)]">none enabled</span>';
+        const disabledTxt = disabled.length
+            ? ` · disabled: ${disabled.map((s) => `<span class="text-[var(--color-text-subtle)]">${escapeHtml(s.key)}</span>`).join(', ')}`
+            : '';
+        stratEl.innerHTML = `Active: ${enabledTxt}${disabledTxt}`;
     }
 
     const ts = document.getElementById('scanner-updated');
@@ -146,34 +216,32 @@ function stopTimer() {
     }
 }
 
-// Delegated click handler for the per-row Short button. Attached once at
+// Delegated click handler for the per-row open button. Attached once at
 // module load so that SPA navigation (which re-runs bindScanner()) doesn't
-// stack duplicate listeners — without this, a single Short click after N
-// visits to /scanner fired N POSTs to /api/open-position.
+// stack duplicate listeners.
 document.addEventListener('click', async (e) => {
-    const shortBtn = e.target.closest('#scanner-body [data-action="short"]');
-    if (!shortBtn) return;
-    const symbol = shortBtn.dataset.symbol;
-    if (!confirm(`Open SHORT position on ${symbol}?`)) return;
-    shortBtn.disabled = true;
-    const orig = shortBtn.textContent;
-    shortBtn.textContent = 'Opening…';
+    const btn = e.target.closest('#scanner-body [data-action="open-row"]');
+    if (!btn) return;
+    const symbol = btn.dataset.symbol;
+    const strategy = btn.dataset.strategy;
+    const side = btn.dataset.side || 'SHORT';
+    if (!confirm(`Open ${side} on ${symbol} via ${strategy}?`)) return;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = 'Opening…';
     try {
-        await postJson('/api/open-position', { symbol });
-        toast.success(`Opened SHORT on ${symbol}`);
+        await postJson('/api/open-position', { symbol, strategy_key: strategy });
+        toast.success(`Opened ${side} on ${symbol} (${strategy})`);
         fetchScanner(true);
         window.dashboardPolling?.refreshNow();
     } catch (err) {
         toast.error(err.message);
     } finally {
-        shortBtn.disabled = false;
-        shortBtn.textContent = orig;
+        btn.disabled = false;
+        btn.textContent = orig;
     }
 });
 
-// Same singleton treatment for visibility — startTimer() guards against
-// duplicate intervals via stopTimer(), but accumulating listeners still
-// queued multiple stop/start cycles per visibility change.
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) stopTimer();
     else if (document.getElementById('scanner-body')) startTimer();
@@ -200,8 +268,11 @@ export function bindScanner() {
         btn.textContent = 'Scanning…';
         try {
             const data = await postJson('/api/scan', { auto_trade: true });
-            let msg = `Found ${data.candidate_count} candidate(s)`;
-            if (data.trades_opened?.length) msg += ` — opened: ${data.trades_opened.join(', ')}`;
+            const opened = (data.trades_opened || [])
+                .map((t) => `${t.symbol} (${t.strategy_key})`)
+                .join(', ');
+            let msg = `Found ${data.candidate_count} candidate(s) across all enabled strategies`;
+            if (opened) msg += ` — opened: ${opened}`;
             toast.success(msg);
             fetchScanner(true);
             window.dashboardPolling?.refreshNow();
@@ -215,15 +286,20 @@ export function bindScanner() {
 
     document.getElementById('open-manual-btn')?.addEventListener('click', async () => {
         const sel = document.getElementById('manual-symbol');
-        const symbol = sel?.value;
-        if (!symbol) {
+        const value = sel?.value;
+        if (!value) {
             toast.error('Pick a symbol first');
             return;
         }
-        if (!confirm(`Open SHORT on ${symbol}?`)) return;
+        const [strategy_key, symbol] = value.split('|');
+        if (!symbol || !strategy_key) {
+            toast.error('Invalid manual selection');
+            return;
+        }
+        if (!confirm(`Open ${symbol} via ${strategy_key}?`)) return;
         try {
-            await postJson('/api/open-position', { symbol });
-            toast.success(`Opened SHORT on ${symbol}`);
+            const r = await postJson('/api/open-position', { symbol, strategy_key });
+            toast.success(`Opened ${r.position?.side || ''} on ${symbol} (${strategy_key})`);
             fetchScanner(true);
             window.dashboardPolling?.refreshNow();
         } catch (err) {
