@@ -2,7 +2,12 @@
 
 ## Project Overview
 
-Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all USDT perpetuals every 30s, opens SHORT positions on coins that pumped >=25% or dumped <=-10% over 24h when the 15m chart confirms a downtrend, using 25x leverage for quick 2% profit exits. Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
+Laravel 13 (PHP 8.4) **multi-strategy trading bot** for Binance Futures, built around a plug-in strategy architecture. Two strategies ship today, both registered in `config/strategies.php`:
+
+- **`short_scalp`** (default ON) — shorts pump/dump candidates in the +25% to +50% / ≤-10% 24h band when the 15m chart confirms a downtrend. The historical workhorse; T8 settings (trailing TP arm 1.0% / trail 0.5%, fixed 2.5% SL, 8h hold) backtested ~65-70% win rate at R:R 0.85.
+- **`long_continuation`** — longs the +50–100% 24h pump band that `short_scalp` explicitly avoids (research showed pumps ≥50% have a continuation pattern, median +12.6% further over 24h). Currently enabled in dry-run after L1 baseline showed +$1.68/trade edge on March 2026; awaiting full L2-L7 + walk-forward validation before live.
+
+Both strategies coexist behind one global `max_positions` cap with optional per-strategy sub-caps, share the same wallet, and run in lockstep on the same scanner gate (one scan per closed 1m candle). Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
 
 ## Architecture
 
@@ -29,17 +34,38 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 - **Funding rates**: `getFundingRates($symbol)` returns current funding rate, next funding time, mark price per symbol (cached 60s)
 - **Futures tickers**: `getFuturesTickers()` returns 24h stats for all USDT perpetuals in one call — the key API used by the scanner (1 API weight)
 
-### Core Flow (Short-Scalp)
-1. **BotRun** — continuous loop, default 30s interval
+### Core Flow (multi-strategy)
+1. **BotRun** — continuous loop, default 30s interval. Constructor-injects `StrategyRegistry`; iterates registered+enabled strategies in the order declared by `config/strategies.php['order']`.
 2. **Per cycle**:
    - Settle funding fees at 8h UTC boundaries via `FundingSettlementService`
-   - **Manage open positions**: for each open position, fetch latest price, call `checkPosition()` to update unrealized P&L and check TP/SL/expiry. `checkPosition()` behavior differs by mode — see "SL/TP close reconciliation" below.
+   - **Manage open positions** (strategy-agnostic): for each open position regardless of strategy, fetch latest price, call `checkPosition()` to update unrealized P&L and check TP/SL/expiry. `checkPosition()` behavior differs by mode — see "SL/TP close reconciliation" below.
    - **Safety reconcile** (live only): call `getOpenPositions()` once and for any DB `Position::open()` missing from the exchange list, invoke `TradingEngine::reconcileMissingPosition()` which probes bracket order status via `getOrderStatus` and records the close. The reverse check also fires: any Binance-side position with no matching DB row is logged as a warning (throttled to once per 15 min per symbol). These untracked positions are **not adopted** — the bot has no way to know the intended SL/TP — so the operator is expected to investigate.
-   - **Scanner gate**: `runCycle` returns before invoking the scanner unless a new closed 1m candle has appeared since the last scan (tracked via `BotRun::$lastScannedCandleOpenTime`). Position management + safety reconcile above always run; only the entry-side scanner is gated. This makes live entry cadence match `bot:backtest --use-1m` (1 scan per closed 1m bar) regardless of `scan_interval`. With the default 30s loop, the scan fires within ~30s of each minute boundary; tighten `scan_interval` to reduce that lag.
-   - **Find new entries**: `ShortScanner::getCandidates()` returns pump/dump candidates (one API call for all tickers)
-   - For each candidate: apply cheap gates (paused, max_positions, already-open-on-symbol, cooldown), then `analyze15m()` for the Strict downtrend check, then open SHORT via `TradingEngine::openShort()` if eligible
-3. **Cycle summary** logged: `Cycle: candidates=N analyzed=M opened=V openPositions=X`
+   - **Scanner gate**: `runCycle` returns before invoking the entry loop unless a new closed 1m candle has appeared since the last scan (tracked via `BotRun::$lastScannedCandleOpenTime`). Position management + safety reconcile above always run; only the entry-side scanner is gated. This makes live entry cadence match `bot:backtest --use-1m` (1 scan per closed 1m bar) regardless of `scan_interval`. With the default 30s loop, the scan fires within ~30s of each minute boundary; tighten `scan_interval` to reduce that lag.
+   - **Entry loop** (per enabled strategy, in declared order):
+     - `$strategy->getCandidates()` returns its own `Candidate[]` (one ticker call per strategy via direction-specific filters)
+     - foreach candidate: apply cross-strategy invariant (one open position per symbol globally), per-`(symbol, strategy_key)` cooldown + failed-entry cooldown, per-strategy `max_positions` sub-cap if set, then `$strategy->analyze($symbol)` and `$strategy->buildSignal($candidate, $analysis)` if `analysis->ok`. Open via `$engine->open($signal)`.
+     - **Cross-cycle dedupe**: a symbol opened by strategy A this cycle is skipped by strategy B in the same cycle (first-in-`order` wins). The bands of the two shipped strategies don't overlap, so this rarely fires.
+3. **Cycle summary** logged per strategy + total: `strategy=short_scalp candidates=4 analyzed=2 opened=0` then `Cycle: total candidates=4 analyzed=2 opened=0 openPositions=2`.
 4. **Idempotency**: `TradingEngine::checkPosition`, `closePosition`, `reconcileFillFromStream`, and `reconcileMissingPosition` all refresh the row and bail if `status !== Open`. Multiple paths (ws-prices ticks, ws-user-data fills, BotRun cycle, manual dashboard actions) can race without double-counting.
+
+### Plug-in Strategy Architecture
+
+All strategies implement [`StrategyInterface`](app/Services/Strategy/StrategyInterface.php) (`key()`, `label()`, `side()`, `isEnabled()`, `getCandidates()`, `analyze()`, `buildSignal()`). Concrete classes live under `app/Services/Strategy/<Key>/` and are registered in [`config/strategies.php`](config/strategies.php) — both the `classes` map (key → class) and the `order` array (priority for symbol-collision dedupe). The [`StrategyServiceProvider`](app/Providers/StrategyServiceProvider.php) builds a `StrategyRegistry` singleton at boot.
+
+**Generic DTOs** under `app/Services/Strategy/`:
+- `Candidate {symbol, price, priceChangePct, volume, reason}`
+- `Analysis {ok, blockedReason, atr, fields[]}` — `fields` is a free-form keyed array; the dashboard renders side-aware pills based on `lastCandleRed`/`lastCandleGreen` etc.
+- `Signal {symbol, side, priceChangePct, reason, atr, strategyKey, meta}`
+
+**TradingEngine entry**: `open(Signal): ?Position` is the canonical entry point. Routes by `signal->side` to private `openShortInternal` / `openLongInternal`. Persists `strategy_key` on every `Position::create` and every `Trade::create` site (`closePosition`, `finalizeClose`, `takePartialTp`, `recordFailsafeCloseAsTrade`, `recordFailedEntry`). Honors optional per-strategy `max_positions` sub-cap (`strategy.<key>.max_positions`) on top of the global cap.
+
+`openShort(ShortSignal)` survives as a thin shim (`return $this->open(Signal::fromShortSignal($s))`) — deprecated, scheduled for removal once any remaining external callers migrate.
+
+**Cross-strategy invariants**:
+- One open position per symbol globally — enforced by `Position::open()->where('symbol', X)->exists()` check in both BotRun and TradingEngine.
+- Cooldowns scope per `(symbol, strategy_key)` — strategy A closing a symbol does not block strategy B from re-entering that symbol immediately (subject to its own cooldown).
+- `max_positions` is a global cap; per-strategy sub-caps are additive (null = no sub-cap).
+- The two shipped strategies have non-overlapping 24h bands by design (short: pump 25–50% or dump ≤-10%; long: pump >50–100%), so they never compete for the same symbol within a single scan.
 
 ### SL/TP close reconciliation (mode-dependent)
 
@@ -86,36 +112,54 @@ Laravel 13 (PHP 8.4) **short-scalp trading bot** for Binance Futures. Scans all 
 
 **Drawdown circuit breaker** (`circuit_breaker_enabled`, default `false`):
 
-Evaluated at every `TradingEngine::openShort()` call — gates entries only, already-open positions continue to be managed normally.
+Evaluated at every `TradingEngine::open()` call (both SHORT and LONG paths) — gates entries only, already-open positions continue to be managed normally.
 
 - **Equity** = `walletBalance + sum(unrealized_pnl on open positions)`.
 - **Peak** = rolling high-water mark, persisted in cache key `circuit_breaker:equity_peak`. Updated on every check; anchored to the trough when the breaker trips.
 - **Drawdown** = `(peak - equity) / peak × 100`.
 - **Trip condition**: `drawdown >= circuit_breaker_drawdown_pct` (default 25%) → write `circuit_breaker:cooldown_until = now + circuit_breaker_cooldown_hours` (default 24h) and block new entries.
-- **Short-circuit**: while `cooldown_until > now()`, `openShort()` returns early.
+- **Short-circuit**: while `cooldown_until > now()`, both `openShortInternal()` and `openLongInternal()` return early.
 - **Clock reset**: cache key `circuit_breaker:measurement_start` is a v1 remnant — set by older code paths but not consulted by the current detector; safe to ignore but not yet removed.
 - `circuit_breaker_window_hours` exists in `Settings::KEYS` for backwards compat but is **not read** by the v2 detector. Only the drawdown-and-cooldown pair matters.
 - `bot:backtest --truncate` clears all three cache keys so the backtest starts with a clean risk-control slate.
 
-### Scanner (ShortScanner)
-- **One-shot ticker scan**: `getCandidates()` calls `getFuturesTickers()` once per cycle, filters by pump/dump thresholds (with optional `pump_max_pct` upper cap) + volume window (`min_volume_usdt` to `max_volume_usdt`, both `0` disables the bound), returns `ShortCandidate[]` sorted by absolute 24h change
-- **Per-candidate klines**: `analyze15m(symbol)` fetches 30 15m candles (with 15s in-memory cache), returns `ShortAnalysis` with EMA fast/slow, candle state, funding rate, ATR14 (for ATR-based SL sizing), 1h HTF confirmation, downtrendOk flag, and blocked reason. When `strict_downtrend_enabled=false`, the EMA / red-candle / body-cap / HTF gates are all skipped — only the funding-rate guard can block. The DTO fields are still computed for dashboard display.
-- **HTF confirmation**: when `htf_filter_enabled=true` AND `strict_downtrend_enabled=true`, `checkHigherTfDowntrend()` fetches `htf_ema_period + 5` 1h klines and returns `close[last] < EMA[last]`. Fails open on fetch error
-- **ATR calculation**: `TechnicalAnalysis::calculateATR(klines, 14)` is computed from the same 15m klines and attached to `ShortAnalysis.atr` — consumed by `TradingEngine::placeBrackets()` for ATR-based SL sizing
-- **Kline cache**: 15-second TTL in-memory cache prevents duplicate API calls within same loop iteration. Keyed on `Carbon::now()` (sim-time aware) so the cache expires at deterministic tick boundaries during backtests instead of drifting with wall-clock.
+### Scanners
 
-### Position Management (SHORT-only)
-- **SHORT entry**: `TradingEngine::openShort(ShortSignal)` — calculates qty from margin × leverage / entry price, places SHORT via `placeEntryOrder()`, then STOP_MARKET SL plus either TAKE_PROFIT_MARKET (default) or TRAILING_STOP_MARKET (when `trailing_tp_enabled=true`) on the favorable side. Both bracket variants store their algoId in `Position.tp_order_id`.
-- **Entry flow (`placeEntryOrder`)**: if `use_post_only_entry` is true, attempt a LIMIT SELL at best ask with `timeInForce=GTX` (post-only, maker-only). Poll order status every 500ms for `limit_order_timeout_seconds` (default 3s). On full fill → return `entry_type=LIMIT_MAKER`. On partial fill + timeout → cancel, MARKET the remainder → `entry_type=MIXED`. On timeout with no fill, or post-only rejection (Binance -2021/-2010) → MARKET the full qty → `entry_type=MARKET_FALLBACK`. If `use_post_only_entry=false`, skip straight to MARKET (`entry_type=MARKET`). LONG entries (via `reversePosition`) always use MARKET.
-- **Maker fee discount**: When `entry_type=LIMIT_MAKER`, entry-side fees use the maker rate instead of taker. MIXED/MARKET_FALLBACK/MARKET use taker.
-- **One position per symbol (invariant)**: enforced in `openShort` via open-position existence check. Not a user setting.
+Each strategy ships its own scanner under `app/Services/Strategy/<Key>/`. They share a common contract via the strategy class (`getCandidates()` / `analyze()`) but their internal helpers are direction-specific.
+
+**`ShortScanner`** ([app/Services/ShortScanner.php](app/Services/ShortScanner.php), wrapped by `ShortScalpStrategy`):
+- One-shot ticker scan: `getCandidates()` calls `getFuturesTickers()` once per cycle, filters by pump/dump thresholds (with optional `pump_max_pct` upper cap) + volume window, returns `ShortCandidate[]` sorted by absolute 24h change.
+- Per-candidate klines: `analyze15m(symbol)` fetches 30 15m candles (with 15s in-memory cache), returns `ShortAnalysis` with EMA fast/slow, candle state (red), funding rate, ATR14, 1h HTF confirmation, `downtrendOk` flag.
+- HTF confirmation: when `strict_downtrend_enabled=true` AND `htf_filter_enabled=true`, requires 1h close < 1h EMA.
+- The `ShortScalpStrategy` adapter maps these legacy DTOs to the generic `Candidate` / `Analysis` / `Signal` types.
+
+**`LongContinuationScanner`** ([app/Services/Strategy/LongContinuation/LongContinuationScanner.php](app/Services/Strategy/LongContinuation/LongContinuationScanner.php), used directly by `LongContinuationStrategy`):
+- Mirror of `ShortScanner` for the +50–100% pump band (boundary-strict on the lower bound so the +50 boundary belongs to short).
+- Strict 15m uptrend gate (when enabled): EMA fast > slow on current+prior, last N green candles, body cap, price > EMA fast.
+- HTF: 1h close > 1h EMA.
+- Funding guard is INVERTED vs short: longs PAY funding when positive, so this scanner skips rates ABOVE `funding_max_rate` (default +0.10%) — opposite of short's "skip rates too negative".
+
+Both scanners share:
+- **Kline cache**: 15s TTL in-memory cache, keyed on `Carbon::now()->getTimestamp()` (sim-time aware) so backtests are deterministic. Without this, two identical backtest runs could serve different klines for the same sim-tick.
+- **TechnicalAnalysis**: `calculateEMA`, `calculateATR(klines, 14)`, etc. — completely direction-agnostic.
+
+### Position Management (both sides)
+- **Entry**: `TradingEngine::open(Signal): ?Position` — routes to `openShortInternal` or `openLongInternal` based on `signal->side`. Both internals share `placeEntryOrder()`, `placeBrackets()`, `calculateSlTp()` — all already side-parameterized.
+- **Bracket geometry**:
+  - SHORT: SL above entry (`entry × (1 + sl_pct/100)`), TP below entry; trailing-TP arms below entry (favorable).
+  - LONG: SL below entry (`entry × (1 - sl_pct/100)`), TP above entry; trailing-TP arms above entry (favorable).
+- **Entry flow (`placeEntryOrder`)**: if `use_post_only_entry` is true, attempt a LIMIT (SELL for SHORT, BUY for LONG) at best ask/bid with `timeInForce=GTX` (post-only, maker-only). Poll every 500ms for `limit_order_timeout_seconds` (default 3s). On full fill → `entry_type=LIMIT_MAKER`. On partial fill + timeout → cancel, MARKET the remainder → `entry_type=MIXED`. On timeout/no-fill or post-only rejection → MARKET full qty → `entry_type=MARKET_FALLBACK`. If `use_post_only_entry=false`, straight MARKET.
+- **Maker fee discount**: When `entry_type=LIMIT_MAKER`, entry-side fees use the maker rate instead of taker.
+- **One position per symbol (invariant)**: enforced via `Position::open()->where('symbol', X)->exists()` — applies globally across strategies.
+- **Per-strategy `max_positions` sub-cap**: optional. `Settings::get('strategy.<key>.max_positions')` non-null → counted against `Position::open()->where('strategy_key', $key)->count()`.
 - **SL/TP order tracking**: Each position stores `sl_order_id` and `tp_order_id`. On close, only that position's orders are cancelled.
 - **SL/TP fail-safe**: If SL or TP order placement fails after opening, the position is immediately closed and any partial orders cancelled. No unprotected positions.
-- **Margin check**: Before opening, verifies `availableBalance >= margin`
-- **P&L (SHORT)**: `(entry - current) × qty`
+- **Margin check**: Before opening, verifies `availableBalance >= margin`.
+- **P&L**: `(entry - current) × qty` for SHORT, `(current - entry) × qty` for LONG.
 - **Fees**: Deducted on close — entry fee + exit fee. Exit is always taker (MARKET close). Entry is maker or taker depending on `entry_type`. Stored in `Trade.fees`.
 - **Funding fees**: Accumulated per position via `FundingSettlementService` at 8h boundaries. Snapshotted into `Trade.funding_fee` on close.
-- **Manual actions** (dashboard): `addToPosition` averages entry with new margin (also routed through `placeEntryOrder`); `reversePosition` closes the SHORT and opens a LONG with the same USDT size (LONG positions created this way still get checked for TP/SL/expiry by the engine but are never auto-opened).
+- **Strategy attribution**: Position+Trade rows carry `strategy_key`. Dashboard `by_strategy` stats and per-strategy cooldown queries use this column.
+- **Manual actions** (dashboard): `addToPosition` averages entry with new margin; `reversePosition` closes one side and opens the opposite (the new position's `strategy_key` is preserved).
 
 ### Funding Rate Tracking
 - **Mechanism**: Binance perpetual futures settle funding every 8h (00:00, 08:00, 16:00 UTC). Positive rate = longs pay shorts; negative = shorts pay longs.
@@ -128,12 +172,19 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 
 | File | Purpose |
 |------|---------|
-| `app/Services/ShortScanner.php` | Scans all USDT perps, filters pump/dump candidates, Strict 15m downtrend check |
-| `app/Services/ShortCandidate.php` | Readonly DTO: `{symbol, price, priceChangePct, volume, reason}` (pump/dump) |
-| `app/Services/ShortAnalysis.php` | Readonly DTO: EMA fast/slow, candle state, funding rate, ATR, HTF verdict, downtrendOk, blockedReason |
-| `app/Services/ShortSignal.php` | Lightweight DTO for `TradingEngine::openShort` (includes `atr` for ATR-based SL sizing) |
-| `app/Services/TechnicalAnalysis.php` | EMA + ATR14 calculations |
-| `app/Services/TradingEngine.php` | SHORT open/close/checkPosition (dry-run SL/TP trigger + live expiry), `placeEntryOrder` (post-only → MARKET fallback), `placeBrackets` (ATR-based or pct-based SL; native TRAILING_STOP_MARKET on the favorable side when trailing is enabled), `maybeTakePartialTp` (scale-out at `partial_tp_trigger_pct`), `maybeTrailStop` (dry-run-only trailing simulation — Binance handles trailing server-side in live), `trailingExitReason` (labels trailed slHit fills as TakeProfit when the stop sits favorable), `reconcileFillFromStream` / `reconcileMissingPosition` / `reconcileFromBrackets` / `finalizeClose` (live reconciliation paths), drawdown circuit-breaker check, manual add/reverse helpers |
+| `app/Services/Strategy/StrategyInterface.php` | Plug-in contract: `key()`, `label()`, `side()`, `isEnabled()`, `getCandidates()`, `analyze()`, `buildSignal()`. |
+| `app/Services/Strategy/StrategyRegistry.php` | Container singleton holding registered strategies; `enabled()`, `inOrder()`, `find($key)`. |
+| `app/Services/Strategy/AbstractStrategy.php` | Optional base providing `isEnabled()` (reads `strategy.<key>.enabled`) and `setting($k)` namespace helper. |
+| `app/Services/Strategy/{Signal,Candidate,Analysis}.php` | Generic DTOs replacing the legacy `Short*` types (which still exist as adapters). |
+| `app/Services/Strategy/ShortScalp/ShortScalpStrategy.php` | Adapter wrapping `ShortScanner` behind `StrategyInterface`. Maps DTOs. |
+| `app/Services/Strategy/LongContinuation/LongContinuationStrategy.php` | Long-continuation strategy implementation. |
+| `app/Services/Strategy/LongContinuation/LongContinuationScanner.php` | Scanner for the +50–100% pump band: green-candle gate, EMA fast > slow, 1h HTF up, inverted funding guard. |
+| `app/Providers/StrategyServiceProvider.php` | Builds `StrategyRegistry` from `config/strategies.php` at boot. |
+| `config/strategies.php` | `classes` map (key → class), `order` (priority for symbol-collision dedupe), `enabled` defaults. |
+| `app/Services/ShortScanner.php` | Original short-scalp scanner (still used; wrapped by `ShortScalpStrategy`). |
+| `app/Services/ShortCandidate.php` / `ShortAnalysis.php` / `ShortSignal.php` | Legacy DTOs — kept for backwards compat through Phase 4 cleanup. |
+| `app/Services/TechnicalAnalysis.php` | Direction-agnostic indicators: EMA, ATR14, RSI, MACD. |
+| `app/Services/TradingEngine.php` | Canonical entry: `open(Signal)` routes by side to `openShortInternal` / `openLongInternal`. Persists `strategy_key` on every Position+Trade row. Honors per-strategy `max_positions` sub-cap. `openShort(ShortSignal)` shim is `@deprecated`. Shared helpers: `placeEntryOrder`, `placeBrackets`, `calculateSlTp` (all side-aware); `maybeTakePartialTp`, `maybeTrailStop`, `trailingExitReason`; reconciliation: `reconcileFillFromStream`, `reconcileMissingPosition`, `reconcileFromBrackets`, `finalizeClose`. |
 | `app/Services/Settings.php` | DB-first settings with config fallback. `override($key, $value)` / `clearOverrides()` shadow the DB for this PHP process only — used by `bot:backtest` to flip `dry_run=true` and apply per-run tuning without stomping on live shared state. |
 | `app/Services/FundingSettlementService.php` | 8h funding rate settlement for open positions |
 | `app/Services/Exchange/ExchangeInterface.php` | Contract for all exchange operations |
@@ -141,20 +192,20 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 | `app/Services/Exchange/DryRunExchange.php` | Paper trading simulation |
 | `app/Services/Exchange/HistoricalReplayExchange.php` | Offline replay exchange for `bot:backtest` — serves `kline_history` rows against a movable clock, stubs out order APIs, writes DB rows with `is_dry_run=true`. Supports fixed-sizing mode (`setFixedSizing`) and symbol-scoped probe prices (`setProbePrice`/`clearProbePrice`) for intra-bar SL/TP simulation. |
 | `app/Services/Exchange/ExchangeDispatcher.php` | Runtime router: reads `Settings::get('dry_run')` on each call, delegates to live or dry |
-| `app/Http/Controllers/DashboardController.php` | All API endpoints. `stats()` and `tradeAggregates()` build the new Overview/Risk metrics; `data()` powers positions + topbar; `settings()` returns grouped metadata via `Settings::groups()` |
+| `app/Http/Controllers/DashboardController.php` | All API endpoints. `stats()` returns combined-account fields + a `by_strategy` array (per-strategy P&L, win rate, exposure). `scanNow()` / `scannerData()` iterate all enabled strategies and emit a flat list of candidates each tagged with `strategy_key`/`side` (optional `?strategy=KEY` filter — force-shows even disabled strategies for preview). `openPosition()` accepts a `strategy_key` body field; defaults to the first enabled strategy. `data()` powers positions + topbar; `settings()` returns grouped metadata via `Settings::groups()`. |
 | `resources/views/dashboard.blade.php` | Thin shell — extends `layouts/dashboard` and `@include`s the page partial named by the route's `defaults('page', ...)` |
 | `resources/views/layouts/dashboard.blade.php` | Sidebar + topbar shell, loads `@vite(...)` |
 | `resources/views/pages/{overview,positions,scanner,history,failed,risk,settings}.blade.php` | Per-route page partials |
 | `resources/views/components/{card,chart-card,kpi-tile,pagination,range-pills,sidebar,table-shell,topbar}.blade.php` | Reusable Blade components |
 | `resources/js/dashboard/` | Per-page scheduler (`polling.js`), API client, formatters, toast bus, table renderers, dynamically-imported chart factories (`charts/equity.js`, `charts/aggregates.js`, `charts/theme.js` — ECharts is code-split into its own chunk) |
-| `config/settings_meta.php` | Settings UI metadata: 7 functional groups, per-key descriptions, numeric `min/max/step` constraints |
+| `config/settings_meta.php` | Settings UI metadata: 12 functional groups (Generic Trading, 7 Short-Scalp groups, 3 Long-Continuation groups, Risk Controls), per-key descriptions, numeric `min/max/step` constraints. All strategy keys are namespaced as `strategy.<key>.*`. |
 | `routes/web.php` | Route definitions — 7 dashboard page routes (all served by `index()`, distinguished via `defaults('page', ...)`) plus the JSON API |
 | `app/Console/Commands/BotRun.php` | Continuous scan+monitor loop with graceful shutdown |
 | `app/Console/Commands/BotWsPrices.php` | Long-running WebSocket worker for `!markPrice@arr` → `binance:prices` cache |
 | `app/Console/Commands/BotWsUserData.php` | Long-running WebSocket worker for Binance user-data stream — reconciles SL/TP fills via `ORDER_TRADE_UPDATE` events |
 | `app/Console/Commands/BotSnapshotBalance.php` | One-shot command that writes a `BalanceSnapshot` row from `getAccountData()`. Scheduled every 5 min for the equity-curve widget. |
 | `app/Console/Commands/BotStatus.php` | CLI status overview |
-| `app/Console/Commands/BotBacktest.php` | Replays `kline_history` rows through the live `ShortScanner` + `TradingEngine` code using `Carbon::setTestNow` + `HistoricalReplayExchange`. Same code path as live, so backtest results track live behavior. |
+| `app/Console/Commands/BotBacktest.php` | Replays `kline_history` rows through the live multi-strategy stack (`StrategyRegistry` → each strategy's scanner → `TradingEngine::open()`) using `Carbon::setTestNow` + `HistoricalReplayExchange`. Same code path as live, so backtest results track live behavior. Supports `--strategies=KEY1,KEY2` to filter. |
 | `app/Console/Commands/BotDownloadHistory.php` | Downloads monthly 15m + 1h kline zips from `data.binance.vision`, upserts into `kline_history`. Prerequisite for `bot:backtest`. |
 | `app/Models/BalanceSnapshot.php` | Equity-curve sample rows: `wallet_balance`, `available_balance`, `margin_balance`, `position_margin`, `open_positions`, `is_dry_run`, `created_at`. `$timestamps=false` (explicit `created_at` only). |
 | `bootstrap/app.php` | CSRF exemption for `api/*` routes |
@@ -162,11 +213,13 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 
 ## Settings (runtime-configurable from dashboard)
 
-### Generic Trading
+**Naming convention**: shared/global keys are flat at the root (`max_positions`, `dry_run`, etc.); strategy-owned keys are namespaced as `strategy.<key>.<setting>`. Legacy flat keys (e.g. `pump_threshold_pct`) still resolve via aliases in `Settings::ALIASES` for backwards compatibility — `Settings::get('pump_threshold_pct')` and `Settings::get('strategy.short_scalp.pump_threshold_pct')` return the same value.
+
+### Generic Trading (shared across strategies)
 | Key | Default | Description |
 |-----|---------|-------------|
 | `position_size_pct` | 10.0 | Margin as % of wallet (aggressive sizing) |
-| `max_positions` | 10 | Max concurrent open positions across all symbols |
+| `max_positions` | 10 | Global cap on simultaneously open positions across all strategies |
 | `leverage` | 25 | Futures leverage |
 | `dry_run` | true | Paper trading mode (runtime toggle via `ExchangeDispatcher` — close positions before flipping) |
 | `starting_balance` | 10000 | Simulated starting balance |
@@ -175,54 +228,67 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 | `funding_tracking_enabled` | true | Track funding fees per position |
 | `ws_prices_enabled` | true | WebSocket price stream (documentation toggle; worker is process-level) |
 
-### Short-Scalp Strategy
+### Short-Scalp Strategy (`strategy.short_scalp.*`)
 | Key | Default | Description |
 |-----|---------|-------------|
+| `enabled` | true | Master toggle for this strategy |
 | `scan_interval` | 30 | Seconds between scan cycles |
-| `pump_threshold_pct` | 25.0 | 24h gain threshold to qualify (+%) |
-| `pump_max_pct` | 50.0 | Skip pumps above this (continuation-pattern territory). `0` disables the upper cap. |
+| `pump_threshold_pct` | 25.0 | 24h gain lower bound (`>=`) |
+| `pump_max_pct` | 50.0 | 24h gain upper bound (`<=`). Above this is continuation territory — handed off to `long_continuation`. `0` disables the upper cap. |
 | `dump_threshold_pct` | 10.0 | 24h loss threshold to qualify (stored positive, compared to -value) |
 | `min_volume_usdt` | 10_000_000 | Minimum 24h quote volume |
-| `max_volume_usdt` | 25_000_000 | Skip pumps above this (high-vol coins have larger SL excursions). `0` disables the upper cap. |
-| `ema_fast` | 9 | 15m EMA fast period |
-| `ema_slow` | 21 | 15m EMA slow period |
-| `take_profit_pct` | 2.0 | TP distance below entry |
-| `stop_loss_pct` | 1.0 | SL distance above entry |
-| `max_hold_minutes` | 120 | Hard expiry (2h) |
-| `cooldown_minutes` | 120 | Post-close wait before re-entering same symbol (2h) |
-| `max_candle_body_pct` | 3.0 | Reject if last 15m candle body exceeds this (frenzied volatility filter) |
-| `min_red_candles` | 2 | Minimum consecutive closed 15m red candles required (1 = old behavior, 2 = default, 3 = conservative) |
-| `strict_downtrend_enabled` | true | When false, skip the entire 15m confirmation block (EMA cross + red candles + body cap + 1h HTF). Only the funding-rate guard remains. Used by the wide-SL trailing strategy. |
-| `use_post_only_entry` | true | Attempt LIMIT maker entry at best ask; fall back to MARKET on timeout/rejection |
+| `max_volume_usdt` | 25_000_000 | Skip pumps with volume above this. `0` disables the upper cap. |
+| `ema_fast` / `ema_slow` | 9 / 21 | 15m EMA periods |
+| `take_profit_pct` | 2.0 | TP distance below entry (used when trailing TP off) |
+| `stop_loss_pct` | 1.0 | SL distance above entry (fallback when ATR SL off) |
+| `max_hold_minutes` | 120 | Hard expiry |
+| `cooldown_minutes` | 120 | Post-close wait — scoped per-`(symbol, short_scalp)`; another strategy can re-enter the symbol immediately |
+| `failed_entry_cooldown_minutes` | 0 | Post-failure cooldown — `0` disables |
+| `max_candle_body_pct` | 3.0 | Reject if last 15m candle body exceeds this |
+| `min_red_candles` | 2 | Minimum consecutive closed 15m red candles required |
+| `strict_downtrend_enabled` | true | When false, skip the entire 15m confirmation block; only funding-rate guard remains. Used by the wide-SL trailing strategy (T8). |
+| `use_post_only_entry` | true | LIMIT maker entry first, MARKET fallback |
 | `limit_order_timeout_seconds` | 3 | Poll window for post-only fill before MARKET fallback |
-| `failed_entry_cooldown_minutes` | 360 | Post-failure cooldown per symbol (6h) — skip symbols whose last entry was rejected by the exchange |
-
-### Higher-Timeframe Filter
-| Key | Default | Description |
-|-----|---------|-------------|
-| `htf_filter_enabled` | true | Require 1h close below 1h EMA before opening a SHORT |
+| `htf_filter_enabled` | true | Require 1h close below 1h EMA |
 | `htf_ema_period` | 21 | EMA period on the 1h timeframe |
-
-### ATR-Based Stop Loss
-| Key | Default | Description |
-|-----|---------|-------------|
-| `atr_sl_enabled` | true | Use `atr_sl_multiplier × ATR14` for SL distance instead of `stop_loss_pct`. Clamped to `(entry / leverage) × 0.70` to avoid liquidation-side stops. TP stays pct-based. |
+| `atr_sl_enabled` | true | Use `atr_sl_multiplier × ATR14` instead of `stop_loss_pct` |
 | `atr_sl_multiplier` | 1.5 | ATR multiplier for SL offset |
-
-### Partial Take-Profit
-| Key | Default | Description |
-|-----|---------|-------------|
 | `partial_tp_trigger_pct` | 1.0 | Scale-out trigger (% favorable). `0` disables. |
-| `partial_tp_size_pct` | 50.0 | % of position qty to close at the trigger (remainder stays under the original TP/SL brackets) |
+| `partial_tp_size_pct` | 50.0 | % of position to close at partial trigger |
+| `trailing_tp_enabled` | false | Replace fixed TP with TRAILING_STOP_MARKET. Disable partial TP when on (they compete) |
+| `trailing_tp_arm_pct` | 2.0 | Favorable % at which trail arms |
+| `trailing_tp_trail_pct` | 1.5 | Trail distance / Binance callback rate. Clamped to 0.1–5.0% live. |
 
-### Trailing Take-Profit
+### Long-Continuation Strategy (`strategy.long_continuation.*`)
 | Key | Default | Description |
 |-----|---------|-------------|
-| `trailing_tp_enabled` | false | Replace the fixed TP with a Binance native TRAILING_STOP_MARKET. Disable `partial_tp_trigger_pct` when on — they compete for the favorable-side exit. |
-| `trailing_tp_arm_pct` | 2.0 | Favorable % at which the trail arms (sets `activationPrice = entry × (1 ∓ pct/100)`). |
-| `trailing_tp_trail_pct` | 1.5 | Trail distance (= Binance `callbackRate`). Clamped to Binance's published 0.1–5.0% range at order placement. Backtest-tuned best ≈ 0.7%. |
+| `enabled` | false | Master toggle. Off until backtest validation completes. |
+| `pump_threshold_pct` | 50.0 | 24h gain lower bound (strict-greater so the +50% boundary belongs to short_scalp) |
+| `pump_max_pct` | 100.0 | 24h gain upper bound. Above 100% is the "Extreme" pump bucket — fewer events, more outlier-driven. `0` disables the upper cap. |
+| `min_volume_usdt` / `max_volume_usdt` | 5M / 100M | Liquidity window. Wider than short's 10M-25M because pump-continuation coins tend to be heavier. |
+| `ema_fast` / `ema_slow` | 9 / 21 | 15m EMA periods |
+| `min_green_candles` | 2 | Minimum consecutive closed 15m green candles required (mirror of short's `min_red_candles`) |
+| `max_candle_body_pct` | 5.0 | Wider than short's 3% — pump-continuation candles are fat by nature |
+| `funding_max_rate` | 0.001 | LONGs *pay* funding when positive — skip rates ABOVE this cap (default +0.10% per 8h). Inverted vs short's "skip too negative". |
+| `strict_uptrend_enabled` | true | Require EMA fast > slow on current+prior, last N green, body cap, 1h HTF up. Mirror of short's `strict_downtrend_enabled`. |
+| `htf_filter_enabled` | true | Require 1h close above 1h EMA |
+| `htf_ema_period` | 21 | EMA period on the 1h timeframe |
+| `stop_loss_pct` | 3.0 | SL distance below entry. Wider than short's 2.5%. |
+| `atr_sl_enabled` | false | Deterministic for v1; flip to true for ATR-based SL |
+| `atr_sl_multiplier` | 1.5 | |
+| `take_profit_pct` | 3.0 | Fallback TP (used only when trailing TP is off) |
+| `partial_tp_trigger_pct` / `partial_tp_size_pct` | 0 / 50 | Disabled by default — competes with trailing |
+| `trailing_tp_enabled` | true | Native TRAILING_STOP_MARKET above entry |
+| `trailing_tp_arm_pct` | 1.5 | Tighter than short's 2.0 — continuations exhaust fast |
+| `trailing_tp_trail_pct` | 1.0 | Wider than short's 0.7 — pump-noise tolerance |
+| `max_hold_minutes` | 720 | 12h (half of short's recommended 1440) |
+| `cooldown_minutes` | 240 | 4h post-close — pump events are once-per-pump |
+| `failed_entry_cooldown_minutes` | 0 | Inherits same semantics as short |
+| `use_post_only_entry` | false | Pumping markets disfavor maker fills — straight MARKET by default |
+| `limit_order_timeout_seconds` | 3 | |
+| `max_positions` | 3 | Per-strategy sub-cap. Pump-continuation events are rare (~15/month from research); >3 simultaneous setups is likely noise. Counted against the global `max_positions` ceiling. |
 
-### Risk Controls
+### Risk Controls (shared)
 | Key | Default | Description |
 |-----|---------|-------------|
 | `circuit_breaker_enabled` | false | Gate new entries when realized+unrealized drawdown breaches the threshold |
@@ -236,16 +302,16 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 |--------|------|--------|
 | GET | `/` | Dashboard view |
 | GET | `/api/data` | Positions (with estimated fees & net P&L), trades, summary JSON |
-| GET | `/api/stats` | Aggregated metrics for Overview KPIs + Risk page: equity (+24h Δ), current/max drawdown, profit factor (30d), rolling 20-trade win rate (+ 100-trade history sparkline), avg trade duration, today P&L, exposure %, best/worst trade, current streak, circuit-breaker state, 30d funding split |
+| GET | `/api/stats` | Aggregated metrics for Overview KPIs + Risk page (combined-account view) **plus** a `by_strategy` array (per-strategy P&L, win rate, avg duration, exposure, today P&L). Combined view fields are unchanged — `by_strategy` is additive. |
 | GET | `/api/trades` | Paginated trade history `{page, per_page, sort_by, sort_dir}` |
 | GET | `/api/trades/aggregates` | Rollups for the Overview charts: P&L by symbol (top 10), close-reason mix (30d), trades per day (30d, densified) |
 | GET | `/api/failed-entries` | Paginated `Position` rows with `status=Failed` |
-| GET | `/api/settings` | Current settings + grouping metadata (`Settings::groups()`) for the Settings UI |
-| GET | `/api/scanner` | Scan candidates: pump/dump filter + 15m analysis + blocked reasons |
+| GET | `/api/settings` | Current settings + grouping metadata (`Settings::groups()`) for the Settings UI. Includes per-strategy enable toggles via the namespaced `strategy.<key>.enabled` keys. |
+| GET | `/api/scanner` | Iterates ALL enabled strategies and emits a flat list of candidate rows, each tagged with `strategy_key`/`side`/`strategy_label`. Top-level `strategies[]` block lists every registered strategy and its enabled state. Optional `?strategy=KEY` filter — force-shows even disabled strategies for preview (rows then carry "Strategy disabled" in `blocked_reasons`). |
 | GET | `/api/balance-history` | Equity-curve points `{range: 1h\|6h\|24h\|7d\|30d\|all}` — filters by current `dry_run` |
-| POST | `/api/settings` | Save settings `{settings: {key: value}}` |
-| POST | `/api/scan` | Scan + auto-trade `{auto_trade: bool}` |
-| POST | `/api/open-position` | Manually open SHORT `{symbol: string}` (direction forced to SHORT) |
+| POST | `/api/settings` | Save settings `{settings: {key: value}}` (accepts both legacy flat keys and namespaced `strategy.<key>.<setting>` form) |
+| POST | `/api/scan` | Scan + auto-trade across all enabled strategies `{auto_trade: bool, strategy?: string}`. Returns `trades_opened: [{symbol, side, strategy_key}]`. |
+| POST | `/api/open-position` | Manually open `{symbol: string, strategy_key?: string}`. `strategy_key` defaults to the first enabled strategy if omitted; the strategy's `side()` determines direction. |
 | POST | `/api/close` | Close position `{position_id: int}` |
 | POST | `/api/close-all` | Close every open position at market |
 | POST | `/api/add-margin` | Add to position `{position_id: int, amount_usdt: float}` |
@@ -256,7 +322,11 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 
 **Tables**: `positions`, `trades`, `balance_snapshots`, `bot_settings`, `kline_history`, `cache`, `jobs`, `users`
 
-**`kline_history`** (populated by `bot:download-history`, read by `HistoricalReplayExchange`): composite PK `(symbol, interval, open_time)`; columns `open`/`high`/`low`/`close` as `DECIMAL(25,12)`, `volume`/`quote_volume` as `DECIMAL(30,12)`, plus `close_time` (bigint ms) and `trade_count` (int). `interval` is stored as the Binance string literal (`15m`, `1h`) to match the API. Upserted in 1000-row batches during download. Storing both 15m (entry/exit timeframe) and 1h (HTF filter) rows in one table keeps the replay loader trivial.
+**`positions` / `trades` strategy attribution**: both tables have a `strategy_key` column (varchar nullable, indexed). Every new Position+Trade row carries the originating strategy's key (e.g. `'short_scalp'`, `'long_continuation'`). The Phase-1 multi-strategy migration backfilled `'short_scalp'` for all pre-existing rows. Composite indexes `(strategy_key, status)` on positions and `(strategy_key, created_at)` on trades keep per-strategy queries fast as the tables grow. Cooldown checks scope per `(symbol, strategy_key)`; the global one-position-per-symbol invariant remains enforced via `Position::open()->where('symbol', X)->exists()`.
+
+**`bot_settings`**: settings storage. Phase-1 migration renamed all short-scalp keys from flat (e.g. `pump_threshold_pct`) to namespaced (`strategy.short_scalp.pump_threshold_pct`). Legacy flat keys still resolve via the alias map in `Settings::ALIASES` for backwards compatibility.
+
+**`kline_history`** (populated by `bot:download-history`, read by `HistoricalReplayExchange`): composite PK `(symbol, interval, open_time)`; columns `open`/`high`/`low`/`close` as `DECIMAL(25,12)`, `volume`/`quote_volume` as `DECIMAL(30,12)`, plus `close_time` (bigint ms) and `trade_count` (int). `interval` is stored as the Binance string literal (`15m`, `1h`, `1m`) to match the API. Upserted in 1000-row batches during download. Storing 15m + 1h + 1m rows in one table keeps the replay loader trivial.
 
 **Trailing TP columns on `positions`**: `trailing_tp_armed` (bool, default false) and `trailing_extreme_price` (decimal nullable). Only used by `maybeTrailStop` in dry-run; live mode tracks the extreme server-side inside Binance and never writes these fields. The trailing order's algoId still goes in `tp_order_id` so cancellation / reconciliation paths are uniform.
 
@@ -264,7 +334,7 @@ Evaluated at every `TradingEngine::openShort()` call — gates entries only, alr
 - `PositionStatus`: Open, Closed, Expired, StoppedOut, Failed
 - `CloseReason`: TakeProfit, StopLoss, Expired, Manual, Reversed
 
-**Failed positions**: `Position` rows with `status=Failed` + `error_message` surface entry rejections (Binance refused the order, bracket placement failed, etc.) so they're visible in the dashboard rather than log-only. `Position::open()` scope excludes them, so they don't count toward `max_positions` or the one-per-symbol invariant. Written by `TradingEngine::recordFailedEntry()` from both the `placeEntryOrder` exception path and the post-entry/bracket-failure path (including the "UNPROTECTED — close also failed" case). A Failed row also blocks new entries on the same symbol for `failed_entry_cooldown_minutes` (default 6h).
+**Failed positions**: `Position` rows with `status=Failed` + `error_message` surface entry rejections (Binance refused the order, bracket placement failed, etc.) so they're visible in the dashboard rather than log-only. `Position::open()` scope excludes them, so they don't count toward `max_positions` or the one-per-symbol invariant. Written by `TradingEngine::recordFailedEntry()` from both the `placeEntryOrder` exception path and the post-entry/bracket-failure path (including the "UNPROTECTED — close also failed" case). A Failed row also blocks new entries on the same `(symbol, strategy_key)` for `strategy.<key>.failed_entry_cooldown_minutes` (default 0 = disabled).
 
 ## Development Commands
 
@@ -318,28 +388,32 @@ Backtest workflow (see the Backtest Harness section for details):
 
 ## Backtest Harness
 
-Replays historical 15m + 1h klines through the **actual** `ShortScanner` + `TradingEngine` code — no reimplementation. This keeps backtest results honest to live behavior: if a change passes backtest, the same code is what runs in production.
+Replays historical 15m + 1h (+ optional 1m) klines through the **actual** strategy code (`StrategyRegistry` → each strategy's scanner → `TradingEngine::open()`) — no reimplementation. This keeps backtest results honest to live behavior: if a change passes backtest, the same code is what runs in production.
 
 ### Pipeline
 
 1. **`bot:download-history`** populates `kline_history` from `data.binance.vision` monthly zips.
-   - Flags: `--months=N` (default 1, fetches most recent N completed calendar months), `--symbols=BTCUSDT,ETHUSDT` (default: all USDT perps from current exchangeInfo), `--skip-existing` (skip `(symbol, interval, month)` combos that already have rows).
-   - Downloads both `15m` and `1h` intervals per symbol. `15m` drives entry/exit decisions; `1h` drives the HTF filter.
+   - Flags: `--months=N` (default 1, fetches most recent N completed calendar months), `--end-month=YYYY-MM` (anchor walking backwards; default = last completed month), `--symbols=BTCUSDT,ETHUSDT` (default: all USDT perps from current exchangeInfo), `--intervals=15m,1h` (default; add `1m` for `--use-1m` runs), `--skip-existing` (skip `(symbol, interval, month)` combos that already have rows).
+   - `15m` drives entry/exit decisions; `1h` drives the HTF filter; `1m` synthesises the 24h ticker for `--use-1m` runs.
    - Uses `unzip` shell-out on the downloaded zip, then batched (1000-row) DB upsert on `(symbol, interval, open_time)`. 404s on a `(symbol, month)` combo (symbol didn't exist yet) are counted as `missing` and don't error out.
 
 2. **`bot:backtest`** runs the replay.
-   - Flags: `--from=YYYY-MM-DD` (required), `--to=YYYY-MM-DD` (default from+30d, exclusive), `--symbols=...` (default: all loaded), `--starting-balance=10000`, `--fixed-sizing`, `--truncate`, `--override=key=value` (repeatable; accepts any `Settings::KEYS` entry with automatic type coercion).
+   - Flags: `--from=YYYY-MM-DD` (required), `--to=YYYY-MM-DD` (default from+30d, exclusive), `--symbols=...` (default: all loaded), `--starting-balance=10000`, `--fixed-sizing`, `--use-1m`, `--truncate`, `--no-force-close`, `--strategies=KEY1,KEY2` (default: all enabled), `--override=key=value` (repeatable; accepts any `Settings::KEYS` entry — including legacy aliases — with automatic type coercion).
    - `--truncate` wipes all `is_dry_run=true` `Position` + `Trade` rows and clears the three `circuit_breaker:*` cache keys so the run starts clean.
    - Always forces `Settings::override('dry_run', true)` + `trading_paused=false` + the supplied starting balance. DB `bot_settings` rows aren't touched — the live container keeps its own state.
 
+3. **`bot:backtest-rolling`** chunks long runs by month to fit 1m-mode memory.
+   - Adds `--from=YYYY-MM` / `--to=YYYY-MM` (exclusive), `--download-on-demand` (per-chunk fetch), `--cleanup-prior` (delete kline_history rows ≥2 chunks behind to keep disk bounded), `--strategies=` pass-through, `--summary-log=PATH` (per-month CSV).
+   - State carries across chunks via DB-resident Trade rows + cache; per-chunk subprocesses provide hard memory isolation.
+
 ### Replay loop
 
-- `HistoricalReplayExchange::__construct($fromMs, $toMs, $symbolFilter)` loads all 15m + 1h rows into memory. Lead-in: **200 × 15m bars** (~50h) before `$fromMs` so the scanner has room for EMA/ATR warm-up and 24h rolling aggregates on the very first tick; **50 × 1h bars** for the HTF EMA21. Per-symbol `open_times` arrays are pre-sorted for O(log n) binary search on clock lookup.
-- The driver ticks the clock in 15-minute increments: `$replay->setClock($ms)` + `Carbon::setTestNow($ts)`. The scanner's sim-time kline cache expires at tick boundaries, so repeated runs are deterministic.
+- `HistoricalReplayExchange::__construct($fromMs, $toMs, $symbolFilter, $use1m)` loads all 15m + 1h rows into memory (and 1m if `$use1m=true`). Lead-in: **200 × 15m bars** (~50h) before `$fromMs` for EMA/ATR warm-up + 24h rolling aggregates; **50 × 1h bars** for the HTF EMA21; **1500 × 1m bars** in 1m mode for the synthesised 24h ticker. Per-symbol `open_times` arrays are pre-sorted for O(log n) binary search on clock lookup.
+- The driver ticks the clock in 15-minute increments (or 60s in `--use-1m` mode): `$replay->setClock($ms)` + `Carbon::setTestNow($ts)`. The scanner's sim-time kline cache expires at tick boundaries, so repeated runs are deterministic.
 - Each tick:
   1. `FundingSettlementService::settleFunding()` — but `HistoricalReplayExchange::getFundingRates()` returns `[]`, so funding is effectively zero during backtests (stubbed; noted as off-by-a-few-bps on long holds).
   2. For every open `is_dry_run=true` position, call `tickPosition()` to probe intra-bar SL/TP via the 15m bar's high/low.
-  3. `scanForEntries()` — runs `ShortScanner::getCandidates()`, applies cheap gates (cooldown, failed-entry cooldown, max_positions, one-per-symbol), then `analyze15m()` + `TradingEngine::openShort()` on the winners.
+  3. `scanForEntries()` — iterates the resolved strategy list (from `--strategies` or `StrategyRegistry::enabled()`), each calls `getCandidates()` + `analyze()` + `buildSignal()` → `TradingEngine::open()`. Per-strategy cooldown, max_positions sub-cap, and the cross-strategy one-position-per-symbol invariant all apply identically to the live code.
 
 ### Intra-bar SL/TP probe
 
@@ -377,11 +451,11 @@ Component-driven Blade + Tailwind v4 + Alpine.js + ECharts (code-split). Sidebar
 
 - **Overview** (`/`): top KPI strip (equity + 24h Δ, current drawdown, today P&L, open exposure) → equity curve with drawdown overlay (1h/6h/24h/7d/30d/all range pills) → performance band (profit factor 30d, rolling 20-trade win rate with sparkline, avg trade duration, max drawdown) → charts row (P&L by symbol top 10 bar, close-reason donut, trades-per-day histogram) → Open Positions table.
 - **Positions** (`/positions`): wallet/available/margin/exposure KPIs + the same Open Positions table. Pull from `/api/data` only (no stats fetch).
-- **Scanner** (`/scanner`): pump/dump candidates table (auto-refreshes every 15s when tab visible) + manual SHORT entry control.
+- **Scanner** (`/scanner`): multi-strategy candidates table (auto-refreshes every 15s when tab visible). Each row carries a strategy badge (red for SHORT, green for LONG) and a side-aware "Short" / "Long" button. Trend pill, last-candle pill, and "favorable count" all flip based on `side`. Manual entry dropdown: `SYMBOL · strategy_key (SIDE)` composite — value is `strategy_key|symbol`. Top-of-table summary line: "Active: KEY1 · disabled: KEY2".
 - **History** (`/history`): paginated closed-trade table.
 - **Failed** (`/failed`): paginated `Position::status=Failed` rows with error messages.
 - **Risk** (`/risk`): drawdown KPIs + circuit-breaker state card + recent-performance card (best/worst trade, current win/loss streak, 30d funding split) + Open Positions table.
-- **Settings** (`/settings`): 7 grouped sections from `config/settings_meta.php` (Generic Trading, Scalp Strategy, HTF Filter, ATR SL, Partial TP, Trailing TP, Risk Controls) + Danger Zone (reset). Sticky TOC, search filter (fuzzy on key + label + description), sticky save bar that surfaces only when fields are dirty. Toggles for booleans, number inputs with per-key `min/max/step`. 41 keys total.
+- **Settings** (`/settings`): 12 grouped sections from `config/settings_meta.php` — Generic Trading, 7 Short-Scalp groups (`global` toggle + Entry / Exit / HTF / ATR / Partial TP / Trailing TP), 3 Long-Continuation groups (`global` toggle + Entry / Exit), Risk Controls — plus Danger Zone (reset). Each strategy group leads with its `strategy.<key>.enabled` toggle so on/off is the first thing you see. Sticky TOC, search filter (fuzzy on key + label + description), sticky save bar that surfaces only when fields are dirty. Toggles for booleans, number inputs with per-key `min/max/step`. ~70 keys total.
 
 **Polling and lazy loading** ([resources/js/dashboard/polling.js](resources/js/dashboard/polling.js)): a tiny per-page scheduler registers only the pollers needed by the current page. Every page polls `/api/data` (10s) for the topbar; `/api/stats` (30s) is registered only when a `[id^="kpi-"]` element or risk panel exists; equity / aggregates pollers (60s each) are registered only when their chart elements are present. The scheduler pauses every poller while `document.hidden` is true and runs each due poller on visibility return.
 
@@ -399,11 +473,14 @@ Component-driven Blade + Tailwind v4 + Alpine.js + ECharts (code-split). Sidebar
 - **Mode-dependent SL/TP close path**: In **dry-run** mode, `checkPosition()` price-triggers SL/TP and calls `closePosition()`; `maybeTrailStop` ratchets the SL toward the running extreme on a favorable move when trailing TP is on. In **live** mode, Binance owns the close via `STOP_MARKET` / `TAKE_PROFIT_MARKET` (or `TRAILING_STOP_MARKET` when trailing is on) brackets; the bot's `checkPosition()` only updates P&L and handles expiry, and `maybeTrailStop` short-circuits because Binance trails the order server-side. Live close reconciliation happens via `ws-user-data` (primary), `BotRun` safety reconcile (fallback), or `closePosition()`'s idempotent error path (race with manual close). This avoids the previous race where a bot-issued MARKET close would error out against a Binance SL/TP fill that already flattened the position.
 - **listenKey lifecycle**: Binance user-data listenKeys are valid 60 min and must be kept alive every 30 min or less via `PUT /fapi/v1/listenKey`. The `ws-user-data` worker schedules this; on any disconnect it requests a fresh listenKey (previous one may have silently expired). If the worker is down for longer than 60s, `BotRun`'s safety reconcile (every 30s cycle) picks up missed fills via `getOpenPositions` + `getOrderStatus`.
 - **Live trading readiness**: Per-order cancellation ensures closing one position doesn't destroy other symbols' orders. Fail-safe on open ensures no unprotected positions. Reconciliation converges through multiple paths (ws stream, safety poll, manual close) — all guarded by `status !== Open` refresh checks so idempotency holds.
-- **LONG positions**: The bot never auto-opens LONG positions. A LONG can only exist if created manually via the `Reverse` button (SHORT → LONG). `checkPosition`/`closePosition`/`calculatePnl` still handle both sides for these manually-created positions.
+- **LONG positions**: opened only when an enabled strategy has `side()='LONG'` (currently `long_continuation`, default OFF) emits a Signal, **or** when the dashboard `Reverse` button flips a SHORT into a LONG. The cross-strategy invariant (one open position per symbol globally) prevents conflicting directions on the same coin.
 - **`dry_run` toggle caveat**: `ExchangeDispatcher` reads the setting on every call, so flipping the dashboard toggle takes effect on the next bot cycle. **But open positions are tied to whichever exchange created them** (real orders on Binance vs DB-only rows with `is_dry_run=true`). Flipping mid-flight routes close orders to the wrong side. **Always close all open positions before toggling `dry_run`.**
 - **Backtest shares the dry-run DB**: `bot:backtest` writes `is_dry_run=true` `Position` + `Trade` rows. If the `bot` container is also running in dry-run mode, it will see those rows and try to manage them — including closing backtest stragglers at today's price. Safest workflow: `./develop stop bot ws-worker ws-user-data` before a backtest, or always pass `--truncate` and let `forceCloseStragglers()` flatten everything at the final simulated bar. The bigger equity-curve widget on the dashboard will also mix live and backtest history (both are `is_dry_run=true` samples); the range pills or a manual `balance_snapshots` purge are the only separators.
-- **HTF filter fails open**: if the 1h kline fetch errors or returns fewer than `htf_ema_period + 1` bars, `checkHigherTfDowntrend()` returns `true` — the filter is permissive on data gaps rather than restrictive. Backtests inherit this: a symbol with spotty 1h history will pass HTF even when the 15m state alone wouldn't justify an entry.
-- **ATR SL default is ON**: `atr_sl_enabled=true` out of the box, so `stop_loss_pct` is only consulted as a fallback when ATR data is unavailable or the setting is flipped off. When tuning the fixed-pct SL, also flip `atr_sl_enabled=false` (or pass `--override=atr_sl_enabled=false` to `bot:backtest`) or the change will be silently ignored.
+- **HTF filter fails open**: if the 1h kline fetch errors or returns fewer than `htf_ema_period + 1` bars, both `ShortScanner::checkHigherTfDowntrend()` and `LongContinuationScanner::checkHigherTfUptrend()` return `true` — the filter is permissive on data gaps rather than restrictive. Backtests inherit this: a symbol with spotty 1h history will pass HTF even when the 15m state alone wouldn't justify an entry.
+- **ATR SL default differs by strategy**: `strategy.short_scalp.atr_sl_enabled=true` out of the box, so the short strategy's `stop_loss_pct` is only consulted as a fallback. `strategy.long_continuation.atr_sl_enabled=false` so the long strategy uses its `stop_loss_pct=3.0` directly. When tuning the fixed-pct SL on the short strategy, flip `atr_sl_enabled=false` or the override will be silently ignored.
 - **Trailing TP and partial TP are mutually exclusive in spirit**: both target the favorable side. Leaving `partial_tp_trigger_pct > 0` while `trailing_tp_enabled=true` will scale out half at the partial trigger and leave the remainder under the trailing stop, which mostly defeats the trailing TP's job of riding the move. The recommended trailing config sets `partial_tp_trigger_pct=0`.
 - **`callbackRate` clamping**: Binance accepts 0.1–5.0%; values outside that band are rejected with `-2021/-1102` and would orphan the position with no favorable-side bracket. `BinanceExchange::openTrailingStop()` clamps before submission so a config typo can't kill an entry mid-flight. Backtest harness has no clamp (uses arbitrary `trailing_tp_trail_pct`), but live placement always respects the band.
 - **Trailing-armed SL labelling**: in dry-run, when the trailing stop ratchets into the favorable side of entry and then fires, `trailingExitReason()` returns `CloseReason::TakeProfit` (not `StopLoss`), even though the close went through the slHit branch. The Trade row reflects "TakeProfit" so the close-reason mix and dashboard summaries treat trailed exits as wins, matching how live `TRAILING_STOP_MARKET` fills are reconciled (also as TakeProfit, via `tp_order_id` match in `ws-user-data`).
+- **Funding guard semantics differ by side**: the short-scalp scanner skips a candidate when the funding rate is **too negative** (default `< -0.05%`) — shorts pay heavy funding when rates flip negative. The long-continuation scanner does the inverse: skips when the rate is **too positive** (default `> +0.10%`) — longs pay heavy funding when rates run hot. Don't apply one rule to the other strategy's setting key.
+- **Per-strategy code deployment**: source isn't bind-mounted into the worker containers (only `storage/logs` is). After editing PHP files, deploy with `docker cp app/ crypto-bot-bot-1:/app/ && docker cp app/ crypto-bot-app-1:/app/ && docker compose restart bot ws-worker ws-user-data scheduler` — every container that reads from `/app/app/` needs the copy. After editing JS in `resources/js/dashboard/`, run `npm run build` and `docker cp public/build crypto-bot-app-1:/app/public/`.
+- **Strategy `enabled` flag is per-process state**: BotRun reads it once at startup to print the "Enabled strategies" header, and once per cycle inside the entry loop. Toggling `strategy.<key>.enabled` from the dashboard takes effect on the next cycle (≤30s) without a worker restart, but the startup header won't refresh until the worker reboots.
