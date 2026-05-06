@@ -917,8 +917,74 @@ class DashboardController extends Controller
                 'received' => round($fundingReceived, 4),
                 'net' => round($fundingPaid + $fundingReceived, 4),
             ],
+            'by_strategy' => $this->buildStrategyBreakdown($isDryRun),
             'ts' => $now->timestamp,
         ]);
+    }
+
+    /**
+     * Per-strategy P&L breakdown that sits ALONGSIDE the combined-account
+     * fields above. The combined view (wallet, equity, today_pnl) is
+     * unchanged — this just adds a strategies-list rollup the dashboard can
+     * render in a sibling panel.
+     *
+     * @return array<int, array{key: string, label: string, side: string, enabled: bool, trades: int, wins: int, losses: int, pnl: float, today_pnl: float, win_rate: float, open_count: int, open_exposure_usdt: float}>
+     */
+    private function buildStrategyBreakdown(bool $isDryRun): array
+    {
+        $registry = app(\App\Services\Strategy\StrategyRegistry::class);
+        $strategies = $registry->inOrder();
+
+        // Aggregate trades and open positions by strategy_key in two queries
+        // each so the controller stays O(strategies) regardless of trade count.
+        $tradesBy = \App\Models\Trade::where('is_dry_run', $isDryRun)
+            ->selectRaw('strategy_key, COUNT(*) AS n, SUM(pnl) AS pnl, SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins, SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) AS losses')
+            ->groupBy('strategy_key')
+            ->get()
+            ->keyBy('strategy_key');
+
+        $todayCutoff = now()->startOfDay();
+        $todayBy = \App\Models\Trade::where('is_dry_run', $isDryRun)
+            ->where('created_at', '>=', $todayCutoff)
+            ->selectRaw('strategy_key, SUM(pnl + funding_fee) AS today_pnl')
+            ->groupBy('strategy_key')
+            ->get()
+            ->keyBy('strategy_key');
+
+        $openBy = \App\Models\Position::open()
+            ->where('is_dry_run', $isDryRun)
+            ->selectRaw('strategy_key, COUNT(*) AS n, SUM(position_size_usdt) AS exposure_usdt')
+            ->groupBy('strategy_key')
+            ->get()
+            ->keyBy('strategy_key');
+
+        $out = [];
+        foreach ($strategies as $strategy) {
+            $key = $strategy->key();
+            $t = $tradesBy[$key] ?? null;
+            $td = $todayBy[$key] ?? null;
+            $o = $openBy[$key] ?? null;
+
+            $n = (int) ($t->n ?? 0);
+            $wins = (int) ($t->wins ?? 0);
+            $losses = (int) ($t->losses ?? 0);
+
+            $out[] = [
+                'key' => $key,
+                'label' => $strategy->label(),
+                'side' => $strategy->side(),
+                'enabled' => $strategy->isEnabled(),
+                'trades' => $n,
+                'wins' => $wins,
+                'losses' => $losses,
+                'pnl' => round((float) ($t->pnl ?? 0), 2),
+                'today_pnl' => round((float) ($td->today_pnl ?? 0), 2),
+                'win_rate' => $n > 0 ? round(100 * $wins / $n, 2) : 0.0,
+                'open_count' => (int) ($o->n ?? 0),
+                'open_exposure_usdt' => round((float) ($o->exposure_usdt ?? 0), 2),
+            ];
+        }
+        return $out;
     }
 
     public function tradeAggregates(Request $request): JsonResponse

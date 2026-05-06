@@ -9,8 +9,8 @@ use App\Services\Exchange\ExchangeInterface;
 use App\Services\Exchange\HistoricalReplayExchange;
 use App\Services\FundingSettlementService;
 use App\Services\Settings;
-use App\Services\ShortScanner;
-use App\Services\ShortSignal;
+use App\Services\Strategy\StrategyInterface;
+use App\Services\Strategy\StrategyRegistry;
 use App\Services\TradingEngine;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
@@ -33,7 +33,8 @@ class BotBacktest extends Command
         {--truncate : Wipe dry-run Position/Trade rows before starting}
         {--use-1m : Load 1m klines and tick the clock every 60s. Synthesizes the 24h ticker from 1m bars (rolls minute-by-minute) so the scanner sees the same threshold-crossing events live does. Requires kline_history rows for interval=1m over the run window plus 24h lead-in.}
         {--no-force-close : Leave open positions in place at the end of the run instead of force-closing them. Used by bot:backtest-rolling so positions carry across month boundaries.}
-        {--override=* : Repeatable key=value Settings::override() pair (e.g. --override=stop_loss_pct=1.5 --override=atr_sl_multiplier=2.0)}';
+        {--strategies= : Comma-separated strategy keys to enable for this run (e.g. short_scalp,long_continuation). Defaults to all enabled strategies in config/strategies.php order.}
+        {--override=* : Repeatable key=value Settings::override() pair (e.g. --override=strategy.short_scalp.stop_loss_pct=1.5)}';
 
     protected $description = 'Replay historical klines through the strategy and report P&L';
 
@@ -134,15 +135,44 @@ class BotBacktest extends Command
                 $this->info('Loaded data for ' . count($loadedSymbols) . ' symbols.');
             }
 
-            // Rebind the container so ShortScanner + TradingEngine + FundingSettlementService
-            // resolve the replay exchange instead of the real dispatcher.
+            // Rebind the container so the strategy registry + TradingEngine +
+            // FundingSettlementService resolve the replay exchange instead of
+            // the real dispatcher.
             app()->instance(ExchangeInterface::class, $replay);
 
             // Re-resolve services so they pick up the new binding (Laravel caches scoped
             // resolution, but fresh `make()` calls see the new instance).
-            $scanner = app(ShortScanner::class);
+            // Force the registry to rebuild so its strategies are constructed
+            // with the replay exchange in their dependency graph.
+            app()->forgetInstance(StrategyRegistry::class);
+            $registry = app(StrategyRegistry::class);
             $engine = app(TradingEngine::class);
             $fundingService = app(FundingSettlementService::class);
+
+            // Resolve enabled strategies for this run, optionally filtered by
+            // the --strategies CLI flag. Default = all enabled in registry.
+            $strategiesOpt = (string) $this->option('strategies');
+            if ($strategiesOpt !== '') {
+                $requestedKeys = array_values(array_filter(array_map('trim', explode(',', $strategiesOpt))));
+                $strategies = [];
+                foreach ($requestedKeys as $key) {
+                    $s = $registry->find($key);
+                    if (! $s) {
+                        $this->error("Unknown strategy key: {$key}");
+                        return self::FAILURE;
+                    }
+                    $strategies[] = $s;
+                }
+            } else {
+                $strategies = $registry->enabled();
+            }
+
+            if (empty($strategies)) {
+                $this->warn('No strategies to run (none enabled, or --strategies filter empty).');
+            } else {
+                $names = array_map(fn (StrategyInterface $s) => $s->key().' ['.$s->side().']', $strategies);
+                $this->info('Strategies: ' . implode(', ', $names));
+            }
 
             $tickMs = $use1m ? 60 * 1000 : 15 * 60 * 1000;
             $totalTicks = intdiv($toMs - $fromMs, $tickMs);
@@ -176,7 +206,7 @@ class BotBacktest extends Command
 
                     $closeEvents += $openCount - Position::open()->where('is_dry_run', true)->count();
 
-                    $opened = $this->scanForEntries($scanner, $engine, $replay);
+                    $opened = $this->scanForEntries($strategies, $engine, $replay);
                     $openEvents += $opened;
                 } catch (\Throwable $e) {
                     $errors++;
@@ -333,68 +363,77 @@ class BotBacktest extends Command
         }
     }
 
-    private function scanForEntries(ShortScanner $scanner, TradingEngine $engine, HistoricalReplayExchange $replay): int
+    /**
+     * @param  StrategyInterface[]  $strategies
+     */
+    private function scanForEntries(array $strategies, TradingEngine $engine, HistoricalReplayExchange $replay): int
     {
         $maxPositions = (int) Settings::get('max_positions') ?: 10;
-        $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
-        $failedCooldown = max(0, (int) Settings::get('failed_entry_cooldown_minutes'));
         $paused = (bool) Settings::get('trading_paused');
         if ($paused) {
             return 0;
         }
 
-        $opened = 0;
-
         // Skip the scan when at capacity — keeps backtest behaviour aligned
         // with BotRun. Position management above already ran.
-        $currentOpen = Position::open()->where('is_dry_run', true)->count();
-        if ($currentOpen >= $maxPositions) {
+        if (Position::open()->where('is_dry_run', true)->count() >= $maxPositions) {
             return 0;
         }
 
-        $candidates = $scanner->getCandidates();
+        $opened = 0;
+        $handledSymbols = [];
 
-        foreach ($candidates as $candidate) {
-            $currentOpen = Position::open()->where('is_dry_run', true)->count();
-            if ($currentOpen >= $maxPositions) {
-                break;
-            }
-            if (Position::open()->where('is_dry_run', true)->where('symbol', $candidate->symbol)->exists()) {
-                continue;
-            }
-            $recentClose = Trade::where('is_dry_run', true)
-                ->where('symbol', $candidate->symbol)
-                ->where('created_at', '>=', now()->subMinutes($cooldown))
-                ->exists();
-            if ($recentClose) {
-                continue;
-            }
-            if ($failedCooldown > 0) {
-                $recentFail = Position::where('is_dry_run', true)
-                    ->where('symbol', $candidate->symbol)
-                    ->where('status', PositionStatus::Failed)
-                    ->where('created_at', '>=', now()->subMinutes($failedCooldown))
-                    ->exists();
-                if ($recentFail) {
+        foreach ($strategies as $strategy) {
+            $strategyKey = $strategy->key();
+            $cooldown = (int) Settings::get('strategy.'.$strategyKey.'.cooldown_minutes') ?: 120;
+            $failedCooldown = max(0, (int) Settings::get('strategy.'.$strategyKey.'.failed_entry_cooldown_minutes'));
+
+            $candidates = $strategy->getCandidates();
+
+            foreach ($candidates as $candidate) {
+                $symbol = $candidate->symbol;
+                if (isset($handledSymbols[$symbol])) {
                     continue;
                 }
-            }
+                if (Position::open()->where('is_dry_run', true)->count() >= $maxPositions) {
+                    break 2;
+                }
+                // Cross-strategy invariant: one open position per symbol globally.
+                if (Position::open()->where('is_dry_run', true)->where('symbol', $symbol)->exists()) {
+                    continue;
+                }
+                // Per-(symbol, strategy_key) cooldown.
+                $recentClose = Trade::where('is_dry_run', true)
+                    ->where('symbol', $symbol)
+                    ->where('strategy_key', $strategyKey)
+                    ->where('created_at', '>=', now()->subMinutes($cooldown))
+                    ->exists();
+                if ($recentClose) {
+                    continue;
+                }
+                if ($failedCooldown > 0) {
+                    $recentFail = Position::where('is_dry_run', true)
+                        ->where('symbol', $symbol)
+                        ->where('strategy_key', $strategyKey)
+                        ->where('status', PositionStatus::Failed)
+                        ->where('created_at', '>=', now()->subMinutes($failedCooldown))
+                        ->exists();
+                    if ($recentFail) {
+                        continue;
+                    }
+                }
 
-            $analysis = $scanner->analyze15m($candidate->symbol);
-            if (! $analysis || ! $analysis->downtrendOk) {
-                continue;
-            }
+                $analysis = $strategy->analyze($symbol);
+                if (! $analysis || ! $analysis->ok) {
+                    continue;
+                }
 
-            $signal = new ShortSignal(
-                symbol: $candidate->symbol,
-                priceChangePct: $candidate->priceChangePct,
-                reason: $candidate->reason,
-                atr: $analysis->atr,
-            );
-
-            $position = $engine->openShort($signal);
-            if ($position) {
-                $opened++;
+                $signal = $strategy->buildSignal($candidate, $analysis);
+                $position = $engine->open($signal);
+                if ($position) {
+                    $opened++;
+                    $handledSymbols[$symbol] = true;
+                }
             }
         }
 

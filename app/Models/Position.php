@@ -11,6 +11,7 @@ class Position extends Model
     protected $fillable = [
         'symbol',
         'side',
+        'strategy_key',
         'entry_price',
         'quantity',
         'position_size_usdt',

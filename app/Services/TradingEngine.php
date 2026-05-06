@@ -7,6 +7,7 @@ use App\Enums\PositionStatus;
 use App\Models\Position;
 use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
+use App\Services\Strategy\Signal;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -18,7 +19,50 @@ class TradingEngine
         private ExchangeInterface $exchange,
     ) {}
 
+    /**
+     * Canonical entry point introduced by the multi-strategy refactor. Routes
+     * by signal side to the existing SHORT logic (preserved verbatim) or the
+     * new LONG mirror. Each open Position is tagged with $signal->strategyKey
+     * so the dashboard can attribute P&L per strategy.
+     *
+     * Per-strategy `max_positions` sub-cap is enforced here so it applies
+     * uniformly regardless of side. Null = no sub-cap (only the global
+     * `max_positions` ceiling applies).
+     */
+    public function open(Signal $signal): ?Position
+    {
+        $perStrategyMax = Settings::get('strategy.'.$signal->strategyKey.'.max_positions');
+        if ($perStrategyMax !== null && $perStrategyMax !== '') {
+            $cap = (int) $perStrategyMax;
+            if ($cap > 0 && Position::open()->where('strategy_key', $signal->strategyKey)->count() >= $cap) {
+                Log::info('Strategy sub-cap reached, skipping', [
+                    'symbol' => $signal->symbol,
+                    'strategy' => $signal->strategyKey,
+                    'cap' => $cap,
+                ]);
+                return null;
+            }
+        }
+
+        return match ($signal->side) {
+            'SHORT' => $this->openShortInternal($signal),
+            'LONG'  => $this->openLongInternal($signal),
+            default => null,
+        };
+    }
+
+    /**
+     * Legacy shim for callers that still hold a ShortSignal. Drop in Phase 4
+     * once every call site has migrated to the generic Signal.
+     *
+     * @deprecated Use TradingEngine::open(Signal) directly.
+     */
     public function openShort(ShortSignal $signal): ?Position
+    {
+        return $this->open(Signal::fromShortSignal($signal));
+    }
+
+    private function openShortInternal(Signal $signal): ?Position
     {
         $maxPositions = (int) Settings::get('max_positions') ?: 10;
         $leverage = (int) Settings::get('leverage') ?: 25;
@@ -168,6 +212,7 @@ class TradingEngine
             $position = Position::create([
                 'symbol' => $signal->symbol,
                 'side' => 'SHORT',
+                'strategy_key' => $signal->strategyKey,
                 'entry_price' => $entryPrice,
                 'quantity' => $order['quantity'],
                 'position_size_usdt' => $positionSizeUsdt,
@@ -215,12 +260,201 @@ class TradingEngine
     }
 
     /**
+     * Mirror of openShortInternal for LONG strategies. Uses the same gates
+     * (max_positions, one-per-symbol, circuit breaker), same sizing math,
+     * and the same placeEntryOrder / placeBrackets helpers (already
+     * side-parameterized). The failsafe close path swaps closeShort →
+     * closeLong; the SL/TP geometry is correct via calculateSlTp's LONG
+     * branch (SL below entry, TP above entry; trailing-arm above entry).
+     */
+    private function openLongInternal(Signal $signal): ?Position
+    {
+        $maxPositions = (int) Settings::get('max_positions') ?: 10;
+        $leverage = (int) Settings::get('leverage') ?: 25;
+        $maxHoldMinutes = (int) Settings::get('max_hold_minutes') ?: 120;
+        $isDryRun = (bool) Settings::get('dry_run');
+
+        if (Position::open()->count() >= $maxPositions) {
+            Log::warning('Max positions reached, skipping', ['symbol' => $signal->symbol]);
+            return null;
+        }
+        if (Position::open()->where('symbol', $signal->symbol)->exists()) {
+            return null;
+        }
+
+        if ((bool) Settings::get('circuit_breaker_enabled')) {
+            $breaker = $this->checkCircuitBreaker();
+            if ($breaker !== null) {
+                Log::info('Circuit breaker active — skipping entry', array_merge(
+                    ['symbol' => $signal->symbol],
+                    $breaker,
+                ));
+                return null;
+            }
+        }
+
+        $exchange = $this->exchange->resolve();
+
+        $maxLev = $exchange->getMaxLeverage($signal->symbol);
+        if ($maxLev > 0 && $maxLev < $leverage) {
+            Log::info('Clamping leverage to symbol max', [
+                'symbol' => $signal->symbol,
+                'requested' => $leverage,
+                'max' => $maxLev,
+            ]);
+            $leverage = $maxLev;
+        }
+
+        $accountData = $exchange->getAccountData();
+        $positionSizePct = (float) Settings::get('position_size_pct') ?: 10.0;
+        $margin = $accountData['walletBalance'] * ($positionSizePct / 100);
+        $positionSizeUsdt = round($margin * max($leverage, 1), 2);
+
+        if ($accountData['availableBalance'] < $margin) {
+            Log::warning('Insufficient available balance for new position', [
+                'symbol' => $signal->symbol,
+                'required_margin' => $margin,
+                'available_balance' => $accountData['availableBalance'],
+            ]);
+            return null;
+        }
+
+        if (! $exchange->isTradable($signal->symbol)) {
+            Log::warning('Symbol not tradable', ['symbol' => $signal->symbol]);
+            return null;
+        }
+
+        $price = null;
+        try {
+            $price = $exchange->getPrice($signal->symbol);
+            $exchange->setMarginType($signal->symbol, 'ISOLATED');
+            $exchange->setLeverage($signal->symbol, $leverage);
+
+            $quantity = $exchange->calculateQuantity($signal->symbol, $positionSizeUsdt, $price);
+            if ($quantity <= 0) {
+                Log::warning('Calculated quantity is zero', ['symbol' => $signal->symbol]);
+                return null;
+            }
+
+            $order = $this->placeEntryOrder($exchange, $signal->symbol, $quantity, 'LONG');
+            $entryPrice = $order['price'] > 0 ? $order['price'] : $price;
+
+            try {
+                $slTp = $this->placeBrackets($exchange, $signal->symbol, $entryPrice, $order['quantity'], 'LONG', $signal->atr, $leverage);
+            } catch (\Throwable $e) {
+                Log::error('Failed to set SL/TP — closing position for safety', [
+                    'symbol' => $signal->symbol,
+                    'error' => $e->getMessage(),
+                ]);
+
+                try {
+                    $exchange->cancelOrders($signal->symbol);
+                } catch (\Throwable $cancelErr) {
+                    Log::warning('Failed to cancel stray bracket orders', [
+                        'symbol' => $signal->symbol,
+                        'error' => $cancelErr->getMessage(),
+                    ]);
+                }
+
+                $closeErrMsg = null;
+                $closeOrder = null;
+                try {
+                    $closeOrder = $exchange->closeLong($signal->symbol, $order['quantity']);
+                } catch (\Throwable $closeErr) {
+                    $closeErrMsg = $closeErr->getMessage();
+                    Log::error('CRITICAL: Failed to close unprotected position', [
+                        'symbol' => $signal->symbol,
+                        'error' => $closeErrMsg,
+                    ]);
+                }
+
+                $msg = 'Bracket placement failed: ' . $e->getMessage();
+                if ($closeErrMsg) {
+                    $msg .= ' | UNPROTECTED — close also failed: ' . $closeErrMsg;
+                }
+
+                if ($closeOrder !== null) {
+                    $this->recordFailsafeCloseAsTrade(
+                        $signal,
+                        $leverage,
+                        $positionSizeUsdt,
+                        $entryPrice,
+                        $isDryRun,
+                        $order,
+                        $closeOrder,
+                        $msg,
+                        $exchange,
+                    );
+                } else {
+                    $this->recordFailedEntry($signal, $leverage, $positionSizeUsdt, $entryPrice, $isDryRun, $msg, $order);
+                }
+                return null;
+            }
+
+            $rates = $exchange->getCommissionRate($signal->symbol);
+            $entryFeeRate = ($order['entry_type'] ?? 'MARKET') === 'LIMIT_MAKER'
+                ? $rates['maker']
+                : $rates['taker'];
+            $initialEntryFee = round($entryPrice * $order['quantity'] * $entryFeeRate, 8);
+
+            $position = Position::create([
+                'symbol' => $signal->symbol,
+                'side' => 'LONG',
+                'strategy_key' => $signal->strategyKey,
+                'entry_price' => $entryPrice,
+                'quantity' => $order['quantity'],
+                'position_size_usdt' => $positionSizeUsdt,
+                'stop_loss_price' => $slTp['sl'],
+                'take_profit_price' => $slTp['tp'],
+                'current_price' => $entryPrice,
+                'leverage' => $leverage,
+                'status' => PositionStatus::Open,
+                'exchange_order_id' => $order['orderId'],
+                'sl_order_id' => $slTp['sl_order_id'],
+                'tp_order_id' => $slTp['tp_order_id'],
+                'total_entry_fee' => $initialEntryFee,
+                'is_dry_run' => $isDryRun,
+                'opened_at' => now(),
+                'expires_at' => now()->addMinutes($maxHoldMinutes),
+            ]);
+
+            Log::info('LONG opened', [
+                'symbol' => $signal->symbol,
+                'entry' => $entryPrice,
+                'qty' => $order['quantity'],
+                'sl' => $slTp['sl'],
+                'tp' => $slTp['tp'],
+                'reason' => $signal->reason,
+                '24h' => round($signal->priceChangePct, 2) . '%',
+                'entry_type' => $order['entry_type'] ?? 'MARKET',
+                'strategy' => $signal->strategyKey,
+            ]);
+
+            return $position;
+        } catch (\Throwable $e) {
+            Log::error('Failed to open LONG', [
+                'symbol' => $signal->symbol,
+                'error' => $e->getMessage(),
+            ]);
+            $this->recordFailedEntry(
+                $signal,
+                $leverage,
+                $positionSizeUsdt,
+                $price ?? 0.0,
+                $isDryRun,
+                'Entry rejected: ' . $e->getMessage(),
+            );
+            return null;
+        }
+    }
+
+    /**
      * Persist a Failed position row so entry rejections show up in the trade history
      * instead of being silent log-only events. `$order` is optionally passed for the
      * post-entry / pre-bracket failure path where we did get a fill.
      */
     private function recordFailedEntry(
-        ShortSignal $signal,
+        Signal $signal,
         int $leverage,
         float $positionSizeUsdt,
         float $price,
@@ -236,7 +470,8 @@ class TradingEngine
         try {
             Position::create([
                 'symbol' => $signal->symbol,
-                'side' => 'SHORT',
+                'side' => $signal->side,
+                'strategy_key' => $signal->strategyKey,
                 'entry_price' => $entryPrice,
                 'quantity' => $order['quantity'] ?? 0,
                 'position_size_usdt' => $positionSizeUsdt,
@@ -267,7 +502,7 @@ class TradingEngine
      * back to the closeShort response's avgPrice (also accurate for MARKET).
      */
     private function recordFailsafeCloseAsTrade(
-        ShortSignal $signal,
+        Signal $signal,
         int $leverage,
         float $positionSizeUsdt,
         float $entryPrice,
@@ -287,7 +522,8 @@ class TradingEngine
 
             $position = Position::create([
                 'symbol' => $signal->symbol,
-                'side' => 'SHORT',
+                'side' => $signal->side,
+                'strategy_key' => $signal->strategyKey,
                 'entry_price' => $entryPrice,
                 'quantity' => $qty,
                 'position_size_usdt' => $positionSizeUsdt,
@@ -634,6 +870,7 @@ class TradingEngine
                 'position_id' => $locked->id,
                 'symbol' => $locked->symbol,
                 'side' => $locked->side,
+                'strategy_key' => $locked->strategy_key,
                 'type' => 'close',
                 'entry_price' => $locked->entry_price,
                 'exit_price' => $exitPrice,
@@ -1008,6 +1245,7 @@ class TradingEngine
                 'position_id' => $locked->id,
                 'symbol' => $locked->symbol,
                 'side' => $locked->side,
+                'strategy_key' => $locked->strategy_key,
                 'type' => 'close',
                 'entry_price' => $locked->entry_price,
                 'exit_price' => $exitPrice,

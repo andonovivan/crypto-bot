@@ -42,6 +42,7 @@ class BotBacktestRolling extends Command
         {--cleanup-prior : Delete kline_history rows for months >=2 chunks behind the cursor (frees DB space; keeps the most-recent prior month for the next chunk lead-in)}
         {--summary-log= : Path to append per-month CSV summary (default: storage/app/backtest-rolling-{ts}.csv)}
         {--override=* : Repeatable Settings overrides (passed through to every chunk)}
+        {--strategies= : Comma-separated strategy keys to enable for the run (passed to each chunk; default: all enabled)}
         {--truncate : Wipe is_dry_run rows before chunk 1 (chunk 2+ continues from chunk 1 state)}';
 
     protected $description = 'Run bot:backtest month-by-month with state carrying across chunks (memory-friendly for 1m runs)';
@@ -78,6 +79,7 @@ class BotBacktestRolling extends Command
         $cleanup = (bool) $this->option('cleanup-prior');
         $truncate = (bool) $this->option('truncate');
         $overrides = (array) $this->option('override');
+        $strategiesOpt = (string) $this->option('strategies');
 
         $intervals = array_values(array_filter(array_map('trim', explode(',', (string) $this->option('download-intervals')))));
         if ($use1m && ! in_array('1m', $intervals, true)) {
@@ -172,6 +174,9 @@ class BotBacktestRolling extends Command
             }
             if ($truncate && $i === 0) {
                 $args[] = '--truncate';
+            }
+            if ($strategiesOpt !== '') {
+                $args[] = '--strategies=' . $strategiesOpt;
             }
             foreach ($overrides as $o) {
                 $args[] = '--override=' . $o;

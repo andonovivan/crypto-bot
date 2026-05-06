@@ -8,22 +8,26 @@ use App\Models\Trade;
 use App\Services\Exchange\ExchangeInterface;
 use App\Services\FundingSettlementService;
 use App\Services\Settings;
-use App\Services\ShortScanner;
-use App\Services\ShortSignal;
+use App\Services\Strategy\StrategyInterface;
+use App\Services\Strategy\StrategyRegistry;
 use App\Services\TradingEngine;
 use Illuminate\Console\Command;
 
 class BotRun extends Command
 {
     protected $signature = 'bot:run {--interval= : Scan interval in seconds (overrides settings)}';
-    protected $description = 'Run the Short-Scalp trading bot in a continuous loop';
+    protected $description = 'Run the bot trading loop across all enabled strategies';
 
     private bool $shouldStop = false;
 
     private int $lastScannedCandleOpenTime = 0;
 
-    public function handle(ShortScanner $scanner, TradingEngine $engine, ExchangeInterface $exchange, FundingSettlementService $fundingService): int
-    {
+    public function handle(
+        StrategyRegistry $registry,
+        TradingEngine $engine,
+        ExchangeInterface $exchange,
+        FundingSettlementService $fundingService,
+    ): int {
         $isDryRun = (bool) Settings::get('dry_run');
         $scanInterval = (int) ($this->option('interval') ?: Settings::get('scan_interval') ?: 30);
 
@@ -33,23 +37,25 @@ class BotRun extends Command
             pcntl_signal(SIGINT, fn () => $this->shouldStop = true);
         }
 
-        $this->info('Strategy: Short-Scalp');
-        $this->info($isDryRun ? '  Mode: DRY RUN (no real trades)' : '  Mode: LIVE TRADING');
-        $this->info('  Scan interval: ' . $scanInterval . 's');
-        $this->info('  Filter: 24h >= +' . (Settings::get('pump_threshold_pct') ?: 25) . '% OR <= -' . (Settings::get('dump_threshold_pct') ?: 10) . '%');
-        $this->info('  Min volume: $' . number_format((float) (Settings::get('min_volume_usdt') ?: 10_000_000)));
-        $this->info('  15m EMA: ' . (Settings::get('ema_fast') ?: 9) . '/' . (Settings::get('ema_slow') ?: 21));
-        $this->info('  TP: ' . (Settings::get('take_profit_pct') ?: 2) . '% | SL: ' . (Settings::get('stop_loss_pct') ?: 1) . '%');
-        $this->info('  Max hold: ' . (Settings::get('max_hold_minutes') ?: 120) . ' min | Cooldown: ' . (Settings::get('cooldown_minutes') ?: 120) . ' min');
-        $this->info('  Leverage: ' . (Settings::get('leverage') ?: 25) . 'x | Position: ' . (Settings::get('position_size_pct') ?: 10) . '% of balance');
-        $this->info('  Max positions: ' . (Settings::get('max_positions') ?: 10));
-        $this->info('  Max 15m candle body: ' . (Settings::get('max_candle_body_pct') ?: 3) . '%');
-        $this->info('  Funding tracking: ' . (Settings::get('funding_tracking_enabled') ? 'enabled' : 'disabled'));
+        $this->info($isDryRun ? 'Mode: DRY RUN (no real trades)' : 'Mode: LIVE TRADING');
+        $this->info('Scan interval: ' . $scanInterval . 's');
+        $this->info('Leverage: ' . (Settings::get('leverage') ?: 25) . 'x | Position: ' . (Settings::get('position_size_pct') ?: 10) . '% of balance');
+        $this->info('Max positions (global cap): ' . (Settings::get('max_positions') ?: 10));
+        $this->info('Funding tracking: ' . (Settings::get('funding_tracking_enabled') ? 'enabled' : 'disabled'));
         $this->newLine();
 
-        while (! $this->shouldStop) {
-            $loopStart = microtime(true);
+        $enabled = $registry->enabled();
+        if (empty($enabled)) {
+            $this->warn('No enabled strategies. Set strategy.<key>.enabled=true to activate one.');
+        } else {
+            $this->info('Enabled strategies (in cycle order):');
+            foreach ($enabled as $s) {
+                $this->info(sprintf('  - %s [%s] %s', $s->key(), $s->side(), $s->label()));
+            }
+            $this->newLine();
+        }
 
+        while (! $this->shouldStop) {
             try {
                 $fundingService->settleFunding();
             } catch (\Throwable $e) {
@@ -57,7 +63,7 @@ class BotRun extends Command
             }
 
             try {
-                $this->runCycle($scanner, $engine, $exchange);
+                $this->runCycle($registry, $engine, $exchange);
             } catch (\Throwable $e) {
                 $this->error("Cycle error: {$e->getMessage()}");
             }
@@ -70,8 +76,6 @@ class BotRun extends Command
             // hits the scanner — matching backtest's exact-boundary tick.
             $now = microtime(true);
             $nextWake = ceil($now / $scanInterval) * $scanInterval;
-            // If a cycle landed exactly on a boundary, ceil() returns the same
-            // boundary — bump forward one interval so we don't busy-loop.
             if ($nextWake <= $now) {
                 $nextWake += $scanInterval;
             }
@@ -89,14 +93,12 @@ class BotRun extends Command
         return self::SUCCESS;
     }
 
-    private function runCycle(ShortScanner $scanner, TradingEngine $engine, ExchangeInterface $exchange): void
+    private function runCycle(StrategyRegistry $registry, TradingEngine $engine, ExchangeInterface $exchange): void
     {
         $maxPositions = (int) Settings::get('max_positions') ?: 10;
-        $cooldown = (int) Settings::get('cooldown_minutes') ?: 120;
-        $failedCooldown = max(0, (int) Settings::get('failed_entry_cooldown_minutes'));
         $paused = (bool) Settings::get('trading_paused');
 
-        // Manage existing open positions first
+        // Manage existing open positions first — strategy-agnostic.
         $openPositions = Position::open()->get();
         foreach ($openPositions as $position) {
             if ($this->shouldStop) {
@@ -122,10 +124,7 @@ class BotRun extends Command
         }
 
         // Gate the scanner to once per new closed 1m candle so live entry
-        // cadence matches `bot:backtest --use-1m`. Position management +
-        // safety reconcile above run every cycle regardless. Without this,
-        // a 30s loop fires the scanner ~60×/min while the backtest fires
-        // it 1×/min, so live can catch entries that backtest never models.
+        // cadence matches `bot:backtest --use-1m`.
         $nowSec = now()->getTimestamp();
         $latestClosedOpenTime = (intdiv($nowSec, 60) - 1) * 60;
         if ($latestClosedOpenTime <= $this->lastScannedCandleOpenTime) {
@@ -133,11 +132,6 @@ class BotRun extends Command
         }
         $this->lastScannedCandleOpenTime = $latestClosedOpenTime;
 
-        // Skip the scan entirely when there's no capacity to act on a candidate.
-        // Saves the getFuturesTickers API call + log noise. Position management
-        // above already ran; the ws-prices worker keeps SL/TP reactions sharp
-        // regardless. Re-checked per-candidate below in case a position closes
-        // mid-iteration and frees a slot.
         $currentOpen = Position::open()->count();
         if ($paused || $currentOpen >= $maxPositions) {
             $this->info(sprintf(
@@ -147,78 +141,121 @@ class BotRun extends Command
             return;
         }
 
-        $candidates = $scanner->getCandidates();
-        $analyzed = 0;
-        $opened = 0;
+        $enabled = $registry->enabled();
+        if (empty($enabled)) {
+            return;
+        }
 
-        foreach ($candidates as $candidate) {
-            if ($this->shouldStop) {
-                return;
-            }
+        // Track symbols already opened this cycle so a later-priority strategy
+        // doesn't fire on a symbol the first one just claimed. The actual
+        // one-position-per-symbol invariant is also enforced by the engine,
+        // but this avoids burning analyze() calls on duplicates.
+        $handledSymbols = [];
+        $totalCandidates = 0;
+        $totalAnalyzed = 0;
+        $totalOpened = 0;
 
-            if ($paused) {
+        foreach ($enabled as $strategy) {
+            if ($this->shouldStop || $paused) {
                 break;
             }
 
-            $currentOpen = Position::open()->count();
-            if ($currentOpen >= $maxPositions) {
-                break;
-            }
+            $strategyKey = $strategy->key();
+            $cooldownMin = (int) Settings::get('strategy.'.$strategyKey.'.cooldown_minutes') ?: 120;
+            $failedCooldownMin = max(0, (int) Settings::get('strategy.'.$strategyKey.'.failed_entry_cooldown_minutes'));
 
-            if (Position::open()->where('symbol', $candidate->symbol)->exists()) {
-                continue;
-            }
+            $candidates = $strategy->getCandidates();
+            $totalCandidates += count($candidates);
+            $stratAnalyzed = 0;
+            $stratOpened = 0;
 
-            $recentClose = Trade::where('symbol', $candidate->symbol)
-                ->where('created_at', '>=', now()->subMinutes($cooldown))
-                ->exists();
-            if ($recentClose) {
-                continue;
-            }
+            foreach ($candidates as $candidate) {
+                if ($this->shouldStop) {
+                    return;
+                }
 
-            if ($failedCooldown > 0) {
-                $recentFail = Position::where('symbol', $candidate->symbol)
-                    ->where('status', PositionStatus::Failed)
-                    ->where('created_at', '>=', now()->subMinutes($failedCooldown))
-                    ->exists();
-                if ($recentFail) {
+                $symbol = $candidate->symbol;
+
+                // Already-handled-this-cycle dedupe (cross-strategy).
+                if (isset($handledSymbols[$symbol])) {
                     continue;
+                }
+
+                if (Position::open()->count() >= $maxPositions) {
+                    break 2; // exit both candidate and strategy loops
+                }
+
+                // Cross-strategy invariant: one open position per symbol
+                // globally, regardless of which strategy owns it.
+                if (Position::open()->where('symbol', $symbol)->exists()) {
+                    continue;
+                }
+
+                // Per-(symbol, strategy) cooldown: a recent close by THIS
+                // strategy blocks re-entry by this strategy. Other strategies
+                // are unaffected.
+                $recentClose = Trade::where('symbol', $symbol)
+                    ->where('strategy_key', $strategyKey)
+                    ->where('created_at', '>=', now()->subMinutes($cooldownMin))
+                    ->exists();
+                if ($recentClose) {
+                    continue;
+                }
+
+                if ($failedCooldownMin > 0) {
+                    $recentFail = Position::where('symbol', $symbol)
+                        ->where('strategy_key', $strategyKey)
+                        ->where('status', PositionStatus::Failed)
+                        ->where('created_at', '>=', now()->subMinutes($failedCooldownMin))
+                        ->exists();
+                    if ($recentFail) {
+                        continue;
+                    }
+                }
+
+                $analysis = $strategy->analyze($symbol);
+                $stratAnalyzed++;
+                $totalAnalyzed++;
+
+                if (! $analysis || ! $analysis->ok) {
+                    continue;
+                }
+
+                $signal = $strategy->buildSignal($candidate, $analysis);
+
+                $position = $engine->open($signal);
+                if ($position) {
+                    $stratOpened++;
+                    $totalOpened++;
+                    $handledSymbols[$symbol] = true;
+                    $this->info(sprintf(
+                        '  [%s] %s ENTRY @ %s (24h: %+.2f%%, reason: %s, strategy: %s)',
+                        $symbol,
+                        $signal->side,
+                        $position->entry_price,
+                        $candidate->priceChangePct,
+                        $candidate->reason,
+                        $strategyKey,
+                    ));
                 }
             }
 
-            $analysis = $scanner->analyze15m($candidate->symbol);
-            $analyzed++;
-
-            if (! $analysis || ! $analysis->downtrendOk) {
-                continue;
-            }
-
-            $signal = new ShortSignal(
-                symbol: $candidate->symbol,
-                priceChangePct: $candidate->priceChangePct,
-                reason: $candidate->reason,
-                atr: $analysis->atr,
-            );
-
-            $position = $engine->openShort($signal);
-            if ($position) {
-                $opened++;
+            if (! empty($candidates)) {
                 $this->info(sprintf(
-                    '  [%s] SHORT ENTRY @ %s (24h: %+.2f%%, body %.2f%%, reason: %s)',
-                    $candidate->symbol,
-                    $position->entry_price,
-                    $candidate->priceChangePct,
-                    $analysis->candleBodyPct,
-                    $candidate->reason,
+                    '  strategy=%s candidates=%d analyzed=%d opened=%d',
+                    $strategyKey,
+                    count($candidates),
+                    $stratAnalyzed,
+                    $stratOpened,
                 ));
             }
         }
 
         $this->info(sprintf(
-            'Cycle: candidates=%d analyzed=%d opened=%d openPositions=%d',
-            count($candidates),
-            $analyzed,
-            $opened,
+            'Cycle: total candidates=%d analyzed=%d opened=%d openPositions=%d',
+            $totalCandidates,
+            $totalAnalyzed,
+            $totalOpened,
             Position::open()->count(),
         ));
     }
@@ -260,9 +297,7 @@ class BotRun extends Command
         }
 
         // Reverse check: positions on Binance that we have no DB row for.
-        // The bot does not adopt them (we don't know the intended SL/TP),
-        // just warns so the operator can investigate. Throttle to once
-        // per 15 minutes per symbol to avoid log spam.
+        // Throttled to once per 15 min per symbol to avoid log spam.
         $now = time();
         foreach ($onExchange as $symbol => $ex) {
             if (isset($dbSymbols[$symbol])) {

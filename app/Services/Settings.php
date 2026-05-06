@@ -7,7 +7,7 @@ use App\Models\BotSetting;
 class Settings
 {
     public const KEYS = [
-        // Generic trading
+        // Generic trading (shared across strategies)
         'position_size_pct' => ['config' => 'crypto.trading.position_size_pct', 'type' => 'float', 'label' => 'Position Size (% of balance)'],
         'max_positions' => ['config' => 'crypto.trading.max_positions', 'type' => 'int', 'label' => 'Max Total Positions'],
         'leverage' => ['config' => 'crypto.trading.leverage', 'type' => 'int', 'label' => 'Leverage'],
@@ -18,46 +18,65 @@ class Settings
         'funding_tracking_enabled' => ['config' => 'crypto.trading.funding_tracking_enabled', 'type' => 'bool', 'label' => 'Track Funding Fees'],
         'ws_prices_enabled' => ['config' => 'crypto.trading.ws_prices_enabled', 'type' => 'bool', 'label' => 'WebSocket Price Stream'],
 
-        // Short-scalp strategy
-        'scan_interval' => ['config' => 'crypto.scalp.scan_interval', 'type' => 'int', 'label' => 'Scan Interval (seconds)'],
-        'pump_threshold_pct' => ['config' => 'crypto.scalp.pump_threshold_pct', 'type' => 'float', 'label' => 'Pump Threshold (24h %)'],
-        'pump_max_pct' => ['config' => 'crypto.scalp.pump_max_pct', 'type' => 'float', 'label' => 'Pump Upper Cap (24h %, 0=disabled)'],
-        'dump_threshold_pct' => ['config' => 'crypto.scalp.dump_threshold_pct', 'type' => 'float', 'label' => 'Dump Threshold (24h %, positive)'],
-        'min_volume_usdt' => ['config' => 'crypto.scalp.min_volume_usdt', 'type' => 'float', 'label' => 'Min 24h Volume (USDT)'],
-        'max_volume_usdt' => ['config' => 'crypto.scalp.max_volume_usdt', 'type' => 'float', 'label' => 'Max 24h Volume (USDT, 0=disabled)'],
-        'ema_fast' => ['config' => 'crypto.scalp.ema_fast', 'type' => 'int', 'label' => 'EMA Fast (15m)'],
-        'ema_slow' => ['config' => 'crypto.scalp.ema_slow', 'type' => 'int', 'label' => 'EMA Slow (15m)'],
-        'take_profit_pct' => ['config' => 'crypto.scalp.take_profit_pct', 'type' => 'float', 'label' => 'Take Profit (%)'],
-        'stop_loss_pct' => ['config' => 'crypto.scalp.stop_loss_pct', 'type' => 'float', 'label' => 'Stop Loss (%)'],
-        'max_hold_minutes' => ['config' => 'crypto.scalp.max_hold_minutes', 'type' => 'int', 'label' => 'Max Hold (minutes)'],
-        'cooldown_minutes' => ['config' => 'crypto.scalp.cooldown_minutes', 'type' => 'int', 'label' => 'Cooldown After Close (minutes)'],
-        'failed_entry_cooldown_minutes' => ['config' => 'crypto.scalp.failed_entry_cooldown_minutes', 'type' => 'int', 'label' => 'Cooldown After Failed Entry (minutes)'],
-        'max_candle_body_pct' => ['config' => 'crypto.scalp.max_candle_body_pct', 'type' => 'float', 'label' => 'Max 15m Candle Body (%)'],
-        'min_red_candles' => ['config' => 'crypto.scalp.min_red_candles', 'type' => 'int', 'label' => 'Min Consecutive Red Candles'],
-        'use_post_only_entry' => ['config' => 'crypto.scalp.use_post_only_entry', 'type' => 'bool', 'label' => 'Post-Only Limit Entry (maker fee)'],
-        'limit_order_timeout_seconds' => ['config' => 'crypto.scalp.limit_order_timeout_seconds', 'type' => 'int', 'label' => 'Post-Only Fill Timeout (sec)'],
+        // Short-scalp strategy (namespaced as strategy.short_scalp.*)
+        'strategy.short_scalp.enabled' => ['config' => 'crypto.strategy.short_scalp.enabled', 'type' => 'bool', 'label' => 'Short-Scalp Strategy Enabled'],
+        'strategy.short_scalp.scan_interval' => ['config' => 'crypto.strategy.short_scalp.scan_interval', 'type' => 'int', 'label' => 'Scan Interval (seconds)'],
+        'strategy.short_scalp.pump_threshold_pct' => ['config' => 'crypto.strategy.short_scalp.pump_threshold_pct', 'type' => 'float', 'label' => 'Pump Threshold (24h %)'],
+        'strategy.short_scalp.pump_max_pct' => ['config' => 'crypto.strategy.short_scalp.pump_max_pct', 'type' => 'float', 'label' => 'Pump Upper Cap (24h %, 0=disabled)'],
+        'strategy.short_scalp.dump_threshold_pct' => ['config' => 'crypto.strategy.short_scalp.dump_threshold_pct', 'type' => 'float', 'label' => 'Dump Threshold (24h %, positive)'],
+        'strategy.short_scalp.min_volume_usdt' => ['config' => 'crypto.strategy.short_scalp.min_volume_usdt', 'type' => 'float', 'label' => 'Min 24h Volume (USDT)'],
+        'strategy.short_scalp.max_volume_usdt' => ['config' => 'crypto.strategy.short_scalp.max_volume_usdt', 'type' => 'float', 'label' => 'Max 24h Volume (USDT, 0=disabled)'],
+        'strategy.short_scalp.ema_fast' => ['config' => 'crypto.strategy.short_scalp.ema_fast', 'type' => 'int', 'label' => 'EMA Fast (15m)'],
+        'strategy.short_scalp.ema_slow' => ['config' => 'crypto.strategy.short_scalp.ema_slow', 'type' => 'int', 'label' => 'EMA Slow (15m)'],
+        'strategy.short_scalp.take_profit_pct' => ['config' => 'crypto.strategy.short_scalp.take_profit_pct', 'type' => 'float', 'label' => 'Take Profit (%)'],
+        'strategy.short_scalp.stop_loss_pct' => ['config' => 'crypto.strategy.short_scalp.stop_loss_pct', 'type' => 'float', 'label' => 'Stop Loss (%)'],
+        'strategy.short_scalp.max_hold_minutes' => ['config' => 'crypto.strategy.short_scalp.max_hold_minutes', 'type' => 'int', 'label' => 'Max Hold (minutes)'],
+        'strategy.short_scalp.cooldown_minutes' => ['config' => 'crypto.strategy.short_scalp.cooldown_minutes', 'type' => 'int', 'label' => 'Cooldown After Close (minutes)'],
+        'strategy.short_scalp.failed_entry_cooldown_minutes' => ['config' => 'crypto.strategy.short_scalp.failed_entry_cooldown_minutes', 'type' => 'int', 'label' => 'Cooldown After Failed Entry (minutes)'],
+        'strategy.short_scalp.max_candle_body_pct' => ['config' => 'crypto.strategy.short_scalp.max_candle_body_pct', 'type' => 'float', 'label' => 'Max 15m Candle Body (%)'],
+        'strategy.short_scalp.min_red_candles' => ['config' => 'crypto.strategy.short_scalp.min_red_candles', 'type' => 'int', 'label' => 'Min Consecutive Red Candles'],
+        'strategy.short_scalp.use_post_only_entry' => ['config' => 'crypto.strategy.short_scalp.use_post_only_entry', 'type' => 'bool', 'label' => 'Post-Only Limit Entry (maker fee)'],
+        'strategy.short_scalp.limit_order_timeout_seconds' => ['config' => 'crypto.strategy.short_scalp.limit_order_timeout_seconds', 'type' => 'int', 'label' => 'Post-Only Fill Timeout (sec)'],
+        'strategy.short_scalp.htf_filter_enabled' => ['config' => 'crypto.strategy.short_scalp.htf_filter_enabled', 'type' => 'bool', 'label' => 'Higher-TF Trend Filter (1h)'],
+        'strategy.short_scalp.htf_ema_period' => ['config' => 'crypto.strategy.short_scalp.htf_ema_period', 'type' => 'int', 'label' => 'HTF EMA Period (1h)'],
+        'strategy.short_scalp.atr_sl_enabled' => ['config' => 'crypto.strategy.short_scalp.atr_sl_enabled', 'type' => 'bool', 'label' => 'ATR-Based Stop Loss'],
+        'strategy.short_scalp.atr_sl_multiplier' => ['config' => 'crypto.strategy.short_scalp.atr_sl_multiplier', 'type' => 'float', 'label' => 'ATR SL Multiplier'],
+        'strategy.short_scalp.partial_tp_trigger_pct' => ['config' => 'crypto.strategy.short_scalp.partial_tp_trigger_pct', 'type' => 'float', 'label' => 'Partial TP Trigger (%, 0=off)'],
+        'strategy.short_scalp.partial_tp_size_pct' => ['config' => 'crypto.strategy.short_scalp.partial_tp_size_pct', 'type' => 'float', 'label' => 'Partial TP Size (% of position)'],
+        'strategy.short_scalp.trailing_tp_enabled' => ['config' => 'crypto.strategy.short_scalp.trailing_tp_enabled', 'type' => 'bool', 'label' => 'Trailing Take Profit'],
+        'strategy.short_scalp.trailing_tp_arm_pct' => ['config' => 'crypto.strategy.short_scalp.trailing_tp_arm_pct', 'type' => 'float', 'label' => 'Trailing TP Arm Threshold (% favorable)'],
+        'strategy.short_scalp.trailing_tp_trail_pct' => ['config' => 'crypto.strategy.short_scalp.trailing_tp_trail_pct', 'type' => 'float', 'label' => 'Trailing TP Trail Distance (%)'],
+        'strategy.short_scalp.strict_downtrend_enabled' => ['config' => 'crypto.strategy.short_scalp.strict_downtrend_enabled', 'type' => 'bool', 'label' => 'Strict 15m Downtrend Confirmation'],
 
-        'htf_filter_enabled' => ['config' => 'crypto.scalp.htf_filter_enabled', 'type' => 'bool', 'label' => 'Higher-TF Trend Filter (1h)'],
-        'htf_ema_period' => ['config' => 'crypto.scalp.htf_ema_period', 'type' => 'int', 'label' => 'HTF EMA Period (1h)'],
-
-        'atr_sl_enabled' => ['config' => 'crypto.scalp.atr_sl_enabled', 'type' => 'bool', 'label' => 'ATR-Based Stop Loss'],
-        'atr_sl_multiplier' => ['config' => 'crypto.scalp.atr_sl_multiplier', 'type' => 'float', 'label' => 'ATR SL Multiplier'],
-
-        'partial_tp_trigger_pct' => ['config' => 'crypto.scalp.partial_tp_trigger_pct', 'type' => 'float', 'label' => 'Partial TP Trigger (%, 0=off)'],
-        'partial_tp_size_pct' => ['config' => 'crypto.scalp.partial_tp_size_pct', 'type' => 'float', 'label' => 'Partial TP Size (% of position)'],
-
-        // Trailing TP: arm at trailing_tp_arm_pct favorable, then exit when price
-        // retraces trailing_tp_trail_pct from the running extreme. Replaces the
-        // fixed take-profit; SL stays in place. Disabled by default.
-        'trailing_tp_enabled' => ['config' => 'crypto.scalp.trailing_tp_enabled', 'type' => 'bool', 'label' => 'Trailing Take Profit'],
-        'trailing_tp_arm_pct' => ['config' => 'crypto.scalp.trailing_tp_arm_pct', 'type' => 'float', 'label' => 'Trailing TP Arm Threshold (% favorable)'],
-        'trailing_tp_trail_pct' => ['config' => 'crypto.scalp.trailing_tp_trail_pct', 'type' => 'float', 'label' => 'Trailing TP Trail Distance (%)'],
-
-        // Strict downtrend confirmation gates: 2 red 15m candles + EMA cross +
-        // body % filter (+ 1h HTF when htf_filter_enabled). When false, only the
-        // funding-rate guard applies. Used by the wide-SL trailing strategy to
-        // avoid entry delay past the easy reversion.
-        'strict_downtrend_enabled' => ['config' => 'crypto.scalp.strict_downtrend_enabled', 'type' => 'bool', 'label' => 'Strict 15m Downtrend Confirmation'],
+        // Long-continuation strategy (rides +50–100% 24h pumps)
+        'strategy.long_continuation.enabled' => ['config' => 'crypto.strategy.long_continuation.enabled', 'type' => 'bool', 'label' => 'Long-Continuation Strategy Enabled'],
+        'strategy.long_continuation.pump_threshold_pct' => ['config' => 'crypto.strategy.long_continuation.pump_threshold_pct', 'type' => 'float', 'label' => 'Long Pump Lower Bound (24h %)'],
+        'strategy.long_continuation.pump_max_pct' => ['config' => 'crypto.strategy.long_continuation.pump_max_pct', 'type' => 'float', 'label' => 'Long Pump Upper Bound (24h %, 0=no cap)'],
+        'strategy.long_continuation.min_volume_usdt' => ['config' => 'crypto.strategy.long_continuation.min_volume_usdt', 'type' => 'float', 'label' => 'Long Min 24h Volume (USDT)'],
+        'strategy.long_continuation.max_volume_usdt' => ['config' => 'crypto.strategy.long_continuation.max_volume_usdt', 'type' => 'float', 'label' => 'Long Max 24h Volume (USDT, 0=no cap)'],
+        'strategy.long_continuation.ema_fast' => ['config' => 'crypto.strategy.long_continuation.ema_fast', 'type' => 'int', 'label' => 'Long EMA Fast (15m)'],
+        'strategy.long_continuation.ema_slow' => ['config' => 'crypto.strategy.long_continuation.ema_slow', 'type' => 'int', 'label' => 'Long EMA Slow (15m)'],
+        'strategy.long_continuation.min_green_candles' => ['config' => 'crypto.strategy.long_continuation.min_green_candles', 'type' => 'int', 'label' => 'Long Min Consecutive Green Candles'],
+        'strategy.long_continuation.max_candle_body_pct' => ['config' => 'crypto.strategy.long_continuation.max_candle_body_pct', 'type' => 'float', 'label' => 'Long Max 15m Candle Body (%)'],
+        'strategy.long_continuation.funding_max_rate' => ['config' => 'crypto.strategy.long_continuation.funding_max_rate', 'type' => 'float', 'label' => 'Long Funding Max Rate (longs pay positive — skip if above)'],
+        'strategy.long_continuation.strict_uptrend_enabled' => ['config' => 'crypto.strategy.long_continuation.strict_uptrend_enabled', 'type' => 'bool', 'label' => 'Long Strict 15m Uptrend Confirmation'],
+        'strategy.long_continuation.htf_filter_enabled' => ['config' => 'crypto.strategy.long_continuation.htf_filter_enabled', 'type' => 'bool', 'label' => 'Long Higher-TF Trend Filter (1h)'],
+        'strategy.long_continuation.htf_ema_period' => ['config' => 'crypto.strategy.long_continuation.htf_ema_period', 'type' => 'int', 'label' => 'Long HTF EMA Period (1h)'],
+        'strategy.long_continuation.stop_loss_pct' => ['config' => 'crypto.strategy.long_continuation.stop_loss_pct', 'type' => 'float', 'label' => 'Long Stop Loss (% below entry)'],
+        'strategy.long_continuation.atr_sl_enabled' => ['config' => 'crypto.strategy.long_continuation.atr_sl_enabled', 'type' => 'bool', 'label' => 'Long ATR-Based Stop Loss'],
+        'strategy.long_continuation.atr_sl_multiplier' => ['config' => 'crypto.strategy.long_continuation.atr_sl_multiplier', 'type' => 'float', 'label' => 'Long ATR SL Multiplier'],
+        'strategy.long_continuation.take_profit_pct' => ['config' => 'crypto.strategy.long_continuation.take_profit_pct', 'type' => 'float', 'label' => 'Long Take Profit (%)'],
+        'strategy.long_continuation.partial_tp_trigger_pct' => ['config' => 'crypto.strategy.long_continuation.partial_tp_trigger_pct', 'type' => 'float', 'label' => 'Long Partial TP Trigger (%, 0=off)'],
+        'strategy.long_continuation.partial_tp_size_pct' => ['config' => 'crypto.strategy.long_continuation.partial_tp_size_pct', 'type' => 'float', 'label' => 'Long Partial TP Size (% of position)'],
+        'strategy.long_continuation.trailing_tp_enabled' => ['config' => 'crypto.strategy.long_continuation.trailing_tp_enabled', 'type' => 'bool', 'label' => 'Long Trailing Take Profit'],
+        'strategy.long_continuation.trailing_tp_arm_pct' => ['config' => 'crypto.strategy.long_continuation.trailing_tp_arm_pct', 'type' => 'float', 'label' => 'Long Trailing TP Arm Threshold (% favorable)'],
+        'strategy.long_continuation.trailing_tp_trail_pct' => ['config' => 'crypto.strategy.long_continuation.trailing_tp_trail_pct', 'type' => 'float', 'label' => 'Long Trailing TP Trail Distance (%)'],
+        'strategy.long_continuation.max_hold_minutes' => ['config' => 'crypto.strategy.long_continuation.max_hold_minutes', 'type' => 'int', 'label' => 'Long Max Hold (minutes)'],
+        'strategy.long_continuation.cooldown_minutes' => ['config' => 'crypto.strategy.long_continuation.cooldown_minutes', 'type' => 'int', 'label' => 'Long Cooldown After Close (minutes)'],
+        'strategy.long_continuation.failed_entry_cooldown_minutes' => ['config' => 'crypto.strategy.long_continuation.failed_entry_cooldown_minutes', 'type' => 'int', 'label' => 'Long Cooldown After Failed Entry (minutes)'],
+        'strategy.long_continuation.use_post_only_entry' => ['config' => 'crypto.strategy.long_continuation.use_post_only_entry', 'type' => 'bool', 'label' => 'Long Post-Only Limit Entry'],
+        'strategy.long_continuation.limit_order_timeout_seconds' => ['config' => 'crypto.strategy.long_continuation.limit_order_timeout_seconds', 'type' => 'int', 'label' => 'Long Post-Only Fill Timeout (sec)'],
+        'strategy.long_continuation.max_positions' => ['config' => 'crypto.strategy.long_continuation.max_positions', 'type' => 'int', 'label' => 'Long Max Concurrent Positions (sub-cap)'],
 
         // Risk controls — drawdown circuit breaker
         'circuit_breaker_enabled' => ['config' => 'crypto.risk.circuit_breaker_enabled', 'type' => 'bool', 'label' => 'Drawdown Circuit Breaker'],
@@ -66,17 +85,64 @@ class Settings
         'circuit_breaker_cooldown_hours' => ['config' => 'crypto.risk.circuit_breaker_cooldown_hours', 'type' => 'float', 'label' => 'Circuit Breaker Cooldown (hours)'],
     ];
 
+    /**
+     * Legacy flat-key → namespaced-key aliases. In effect through Phase 4 to
+     * keep internal callers (TradingEngine, ShortScanner, BotRun, dashboard
+     * controllers) reading the same values both before and after the
+     * settings rename migration. Drop in Phase 4 once every call site uses
+     * the namespaced keys directly.
+     */
+    public const ALIASES = [
+        'scan_interval' => 'strategy.short_scalp.scan_interval',
+        'pump_threshold_pct' => 'strategy.short_scalp.pump_threshold_pct',
+        'pump_max_pct' => 'strategy.short_scalp.pump_max_pct',
+        'dump_threshold_pct' => 'strategy.short_scalp.dump_threshold_pct',
+        'min_volume_usdt' => 'strategy.short_scalp.min_volume_usdt',
+        'max_volume_usdt' => 'strategy.short_scalp.max_volume_usdt',
+        'ema_fast' => 'strategy.short_scalp.ema_fast',
+        'ema_slow' => 'strategy.short_scalp.ema_slow',
+        'take_profit_pct' => 'strategy.short_scalp.take_profit_pct',
+        'stop_loss_pct' => 'strategy.short_scalp.stop_loss_pct',
+        'max_hold_minutes' => 'strategy.short_scalp.max_hold_minutes',
+        'cooldown_minutes' => 'strategy.short_scalp.cooldown_minutes',
+        'failed_entry_cooldown_minutes' => 'strategy.short_scalp.failed_entry_cooldown_minutes',
+        'max_candle_body_pct' => 'strategy.short_scalp.max_candle_body_pct',
+        'min_red_candles' => 'strategy.short_scalp.min_red_candles',
+        'use_post_only_entry' => 'strategy.short_scalp.use_post_only_entry',
+        'limit_order_timeout_seconds' => 'strategy.short_scalp.limit_order_timeout_seconds',
+        'htf_filter_enabled' => 'strategy.short_scalp.htf_filter_enabled',
+        'htf_ema_period' => 'strategy.short_scalp.htf_ema_period',
+        'atr_sl_enabled' => 'strategy.short_scalp.atr_sl_enabled',
+        'atr_sl_multiplier' => 'strategy.short_scalp.atr_sl_multiplier',
+        'partial_tp_trigger_pct' => 'strategy.short_scalp.partial_tp_trigger_pct',
+        'partial_tp_size_pct' => 'strategy.short_scalp.partial_tp_size_pct',
+        'trailing_tp_enabled' => 'strategy.short_scalp.trailing_tp_enabled',
+        'trailing_tp_arm_pct' => 'strategy.short_scalp.trailing_tp_arm_pct',
+        'trailing_tp_trail_pct' => 'strategy.short_scalp.trailing_tp_trail_pct',
+        'strict_downtrend_enabled' => 'strategy.short_scalp.strict_downtrend_enabled',
+    ];
+
     /** Process-local overrides that shadow the DB for the duration of a single process. */
     private static array $overrides = [];
+
+    /** Resolve a legacy flat key to its canonical namespaced key (or return as-is). */
+    private static function canonical(string $key): string
+    {
+        return self::ALIASES[$key] ?? $key;
+    }
 
     /**
      * Override a setting for this PHP process only — no DB write, no effect on
      * other containers. Used by bot:backtest to flip dry_run=true and set a
      * custom starting_balance without stomping on the live bot's shared state.
+     *
+     * Both legacy flat keys and canonical namespaced keys are accepted; the
+     * override is stored under the canonical key so subsequent get() calls
+     * via either form find it.
      */
     public static function override(string $key, mixed $value): void
     {
-        self::$overrides[$key] = $value;
+        self::$overrides[self::canonical($key)] = $value;
     }
 
     public static function clearOverrides(): void
@@ -86,6 +152,8 @@ class Settings
 
     public static function get(string $key): mixed
     {
+        $key = self::canonical($key);
+
         if (array_key_exists($key, self::$overrides)) {
             return self::$overrides[$key];
         }
@@ -164,6 +232,7 @@ class Settings
 
     public static function set(string $key, mixed $value): void
     {
+        $key = self::canonical($key);
         $meta = self::KEYS[$key] ?? null;
 
         if (! $meta) {

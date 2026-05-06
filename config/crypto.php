@@ -2,6 +2,79 @@
 
 $isTestnet = filter_var(env('BINANCE_TESTNET', true), FILTER_VALIDATE_BOOLEAN);
 
+// Short-scalp strategy defaults defined once and surfaced under both
+// `crypto.scalp.*` (deprecated alias kept through Phase 4) and
+// `crypto.strategy.short_scalp.*` (canonical, namespaced for the multi-strategy
+// architecture). Settings::KEYS points at the canonical paths; legacy aliases
+// resolve through Settings::ALIASES.
+$shortScalpDefaults = [
+    'enabled' => filter_var(env('STRATEGY_SHORT_SCALP_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+    'scan_interval' => (int) env('SCAN_INTERVAL', 30),
+    'pump_threshold_pct' => (float) env('PUMP_THRESHOLD_PCT', 25.0),
+    // Skip pumps above this. Research shows pumps >=50% have a continuation
+    // pattern, not mean-reversion (median 24h close +12.6%, not -10%).
+    // Set to 0 to disable the upper cap.
+    'pump_max_pct' => (float) env('PUMP_MAX_PCT', 50.0),
+    'dump_threshold_pct' => (float) env('DUMP_THRESHOLD_PCT', 10.0),
+    'min_volume_usdt' => (float) env('MIN_VOLUME_USDT', 10_000_000),
+    // Skip pumps with 15m bar quote volume above this. Low/mid volume
+    // (1-25M USDT) reverts more reliably than super-thin or super-thick.
+    // Set to 0 to disable the upper cap.
+    'max_volume_usdt' => (float) env('MAX_VOLUME_USDT', 25_000_000),
+    'ema_fast' => (int) env('EMA_FAST', 9),
+    'ema_slow' => (int) env('EMA_SLOW', 21),
+    'take_profit_pct' => (float) env('TAKE_PROFIT_PCT', 2.0),
+    'stop_loss_pct' => (float) env('STOP_LOSS_PCT', 1.0),
+    'max_hold_minutes' => (int) env('MAX_HOLD_MINUTES', 120),
+    'cooldown_minutes' => (int) env('COOLDOWN_MINUTES', 120),
+    // 0 disables the cooldown — same symbol can be retried immediately
+    // after a Failed entry. Matches backtest's effective behaviour
+    // (replay stubs out order rejections so Failed rows are rare).
+    'failed_entry_cooldown_minutes' => (int) env('FAILED_ENTRY_COOLDOWN_MINUTES', 0),
+    'max_candle_body_pct' => (float) env('MAX_CANDLE_BODY_PCT', 3.0),
+    'min_red_candles' => (int) env('MIN_RED_CANDLES', 2),
+    'use_post_only_entry' => filter_var(env('USE_POST_ONLY_ENTRY', true), FILTER_VALIDATE_BOOLEAN),
+    'limit_order_timeout_seconds' => (int) env('LIMIT_ORDER_TIMEOUT_SECONDS', 3),
+
+    // Higher-timeframe trend filter: reject candidates whose 1h close is
+    // still above the 1h EMA. Catches 15m-down setups that are actually
+    // pullbacks inside a larger uptrend (bounce tops).
+    'htf_filter_enabled' => filter_var(env('HTF_FILTER_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+    'htf_ema_period' => (int) env('HTF_EMA_PERIOD', 21),
+
+    // ATR-based stop-loss: SL = entry ± (multiplier × ATR14 on 15m).
+    // Gives stops a noise-proportional buffer on volatile pump/dump coins
+    // instead of a fixed %. Disabled falls back to stop_loss_pct.
+    'atr_sl_enabled' => filter_var(env('ATR_SL_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+    'atr_sl_multiplier' => (float) env('ATR_SL_MULTIPLIER', 1.5),
+
+    // Partial take-profit: when the trade moves favorably by
+    // partial_tp_trigger_pct, close partial_tp_size_pct of the position at
+    // market. The remaining portion runs to SL/TP/expiry under the existing
+    // brackets (reduceOnly=true, so they naturally close only what's left).
+    // Set trigger to 0 to disable.
+    'partial_tp_trigger_pct' => (float) env('PARTIAL_TP_TRIGGER_PCT', 1.0),
+    'partial_tp_size_pct' => (float) env('PARTIAL_TP_SIZE_PCT', 50.0),
+
+    // Trailing take-profit: arms once the position is favorable by
+    // trailing_tp_arm_pct, then exits when price retraces by
+    // trailing_tp_trail_pct from the running extreme. Replaces the fixed
+    // take_profit_pct exit; the fixed stop_loss_pct still applies until
+    // the trailing stop ratchets past it. Implemented by tightening
+    // stop_loss_price downward (for SHORT) — never widens.
+    'trailing_tp_enabled' => filter_var(env('TRAILING_TP_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
+    'trailing_tp_arm_pct' => (float) env('TRAILING_TP_ARM_PCT', 2.0),
+    'trailing_tp_trail_pct' => (float) env('TRAILING_TP_TRAIL_PCT', 1.5),
+
+    // Strict downtrend confirmation: when true, requires 2 red 15m candles
+    // + EMA fast<slow on current and prior + price below fast EMA + body
+    // size cap (+ 1h HTF EMA when htf_filter_enabled). Set false to enter
+    // immediately at the pump/dump threshold cross (only the funding-rate
+    // guard applies). Research showed the strict gate delays entry past
+    // the easy reversion.
+    'strict_downtrend_enabled' => filter_var(env('STRICT_DOWNTREND_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+];
+
 return [
     /*
     |--------------------------------------------------------------------------
@@ -24,7 +97,7 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Trading Configuration
+    | Trading Configuration (shared across strategies)
     |--------------------------------------------------------------------------
     */
     'trading' => [
@@ -41,77 +114,63 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Short-Scalp Strategy Configuration
+    | Strategy Configurations (per-strategy keys)
     |--------------------------------------------------------------------------
-    | Shorts pumped (>=25% 24h) or dumping (<=-10% 24h) coins on confirmed
-    | 15m downtrend with high leverage for quick 2% profit exits.
+    | Canonical home for strategy-owned settings under the multi-strategy
+    | architecture. Settings::KEYS points here. The legacy `scalp.*` block
+    | below mirrors the same defaults for any code path that has not yet
+    | migrated to the namespaced key.
     */
-    'scalp' => [
-        'scan_interval' => (int) env('SCAN_INTERVAL', 30),
-        'pump_threshold_pct' => (float) env('PUMP_THRESHOLD_PCT', 25.0),
-        // Skip pumps above this. Research shows pumps >=50% have a continuation
-        // pattern, not mean-reversion (median 24h close +12.6%, not -10%).
-        // Set to 0 to disable the upper cap.
-        'pump_max_pct' => (float) env('PUMP_MAX_PCT', 50.0),
-        'dump_threshold_pct' => (float) env('DUMP_THRESHOLD_PCT', 10.0),
-        'min_volume_usdt' => (float) env('MIN_VOLUME_USDT', 10_000_000),
-        // Skip pumps with 15m bar quote volume above this. Low/mid volume
-        // (1-25M USDT) reverts more reliably than super-thin or super-thick.
-        // Set to 0 to disable the upper cap.
-        'max_volume_usdt' => (float) env('MAX_VOLUME_USDT', 25_000_000),
-        'ema_fast' => (int) env('EMA_FAST', 9),
-        'ema_slow' => (int) env('EMA_SLOW', 21),
-        'take_profit_pct' => (float) env('TAKE_PROFIT_PCT', 2.0),
-        'stop_loss_pct' => (float) env('STOP_LOSS_PCT', 1.0),
-        'max_hold_minutes' => (int) env('MAX_HOLD_MINUTES', 120),
-        'cooldown_minutes' => (int) env('COOLDOWN_MINUTES', 120),
-        // 0 disables the cooldown — same symbol can be retried immediately
-        // after a Failed entry. Matches backtest's effective behaviour
-        // (replay stubs out order rejections so Failed rows are rare).
-        'failed_entry_cooldown_minutes' => (int) env('FAILED_ENTRY_COOLDOWN_MINUTES', 0),
-        'max_candle_body_pct' => (float) env('MAX_CANDLE_BODY_PCT', 3.0),
-        'min_red_candles' => (int) env('MIN_RED_CANDLES', 2),
-        'use_post_only_entry' => filter_var(env('USE_POST_ONLY_ENTRY', true), FILTER_VALIDATE_BOOLEAN),
-        'limit_order_timeout_seconds' => (int) env('LIMIT_ORDER_TIMEOUT_SECONDS', 3),
+    'strategy' => [
+        'short_scalp' => $shortScalpDefaults,
 
-        // Higher-timeframe trend filter: reject candidates whose 1h close is
-        // still above the 1h EMA. Catches 15m-down setups that are actually
-        // pullbacks inside a larger uptrend (bounce tops).
-        'htf_filter_enabled' => filter_var(env('HTF_FILTER_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
-        'htf_ema_period' => (int) env('HTF_EMA_PERIOD', 21),
-
-        // ATR-based stop-loss: SL = entry ± (multiplier × ATR14 on 15m).
-        // Gives stops a noise-proportional buffer on volatile pump/dump coins
-        // instead of a fixed %. Disabled falls back to stop_loss_pct.
-        'atr_sl_enabled' => filter_var(env('ATR_SL_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
-        'atr_sl_multiplier' => (float) env('ATR_SL_MULTIPLIER', 1.5),
-
-        // Partial take-profit: when the trade moves favorably by
-        // partial_tp_trigger_pct, close partial_tp_size_pct of the position at
-        // market. The remaining portion runs to SL/TP/expiry under the existing
-        // brackets (reduceOnly=true, so they naturally close only what's left).
-        // Set trigger to 0 to disable.
-        'partial_tp_trigger_pct' => (float) env('PARTIAL_TP_TRIGGER_PCT', 1.0),
-        'partial_tp_size_pct' => (float) env('PARTIAL_TP_SIZE_PCT', 50.0),
-
-        // Trailing take-profit: arms once the position is favorable by
-        // trailing_tp_arm_pct, then exits when price retraces by
-        // trailing_tp_trail_pct from the running extreme. Replaces the fixed
-        // take_profit_pct exit; the fixed stop_loss_pct still applies until
-        // the trailing stop ratchets past it. Implemented by tightening
-        // stop_loss_price downward (for SHORT) — never widens.
-        'trailing_tp_enabled' => filter_var(env('TRAILING_TP_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
-        'trailing_tp_arm_pct' => (float) env('TRAILING_TP_ARM_PCT', 2.0),
-        'trailing_tp_trail_pct' => (float) env('TRAILING_TP_TRAIL_PCT', 1.5),
-
-        // Strict downtrend confirmation: when true, requires 2 red 15m candles
-        // + EMA fast<slow on current and prior + price below fast EMA + body
-        // size cap (+ 1h HTF EMA when htf_filter_enabled). Set false to enter
-        // immediately at the pump/dump threshold cross (only the funding-rate
-        // guard applies). Research showed the strict gate delays entry past
-        // the easy reversion.
-        'strict_downtrend_enabled' => filter_var(env('STRICT_DOWNTREND_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+        // Long-continuation strategy: rides the +50–100% 24h pumps that the
+        // short strategy explicitly avoids (research showed pumps ≥50% have
+        // a continuation pattern, +12.6% median over the next 24h). Off by
+        // default; enable after the L1-L7 backtest matrix passes acceptance.
+        'long_continuation' => [
+            'enabled' => filter_var(env('STRATEGY_LONG_CONTINUATION_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
+            'pump_threshold_pct' => (float) env('LONG_PUMP_THRESHOLD_PCT', 50.0),
+            'pump_max_pct' => (float) env('LONG_PUMP_MAX_PCT', 100.0),
+            'min_volume_usdt' => (float) env('LONG_MIN_VOLUME_USDT', 5_000_000),
+            'max_volume_usdt' => (float) env('LONG_MAX_VOLUME_USDT', 100_000_000),
+            'ema_fast' => (int) env('LONG_EMA_FAST', 9),
+            'ema_slow' => (int) env('LONG_EMA_SLOW', 21),
+            'min_green_candles' => (int) env('LONG_MIN_GREEN_CANDLES', 2),
+            'max_candle_body_pct' => (float) env('LONG_MAX_CANDLE_BODY_PCT', 5.0),
+            // LONGs PAY funding when positive — skip rates above this cap to
+            // avoid joining a crowded squeeze. Inverse of short's guard,
+            // which avoids paying when rate is too NEGATIVE.
+            'funding_max_rate' => (float) env('LONG_FUNDING_MAX_RATE', 0.001),
+            'strict_uptrend_enabled' => filter_var(env('LONG_STRICT_UPTREND_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+            'htf_filter_enabled' => filter_var(env('LONG_HTF_FILTER_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+            'htf_ema_period' => (int) env('LONG_HTF_EMA_PERIOD', 21),
+            'stop_loss_pct' => (float) env('LONG_STOP_LOSS_PCT', 3.0),
+            'atr_sl_enabled' => filter_var(env('LONG_ATR_SL_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
+            'atr_sl_multiplier' => (float) env('LONG_ATR_SL_MULTIPLIER', 1.5),
+            'take_profit_pct' => (float) env('LONG_TAKE_PROFIT_PCT', 3.0),
+            'partial_tp_trigger_pct' => (float) env('LONG_PARTIAL_TP_TRIGGER_PCT', 0.0),
+            'partial_tp_size_pct' => (float) env('LONG_PARTIAL_TP_SIZE_PCT', 50.0),
+            'trailing_tp_enabled' => filter_var(env('LONG_TRAILING_TP_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+            'trailing_tp_arm_pct' => (float) env('LONG_TRAILING_TP_ARM_PCT', 1.5),
+            'trailing_tp_trail_pct' => (float) env('LONG_TRAILING_TP_TRAIL_PCT', 1.0),
+            'max_hold_minutes' => (int) env('LONG_MAX_HOLD_MINUTES', 720),
+            'cooldown_minutes' => (int) env('LONG_COOLDOWN_MINUTES', 240),
+            'failed_entry_cooldown_minutes' => (int) env('LONG_FAILED_ENTRY_COOLDOWN_MINUTES', 0),
+            'use_post_only_entry' => filter_var(env('LONG_USE_POST_ONLY_ENTRY', false), FILTER_VALIDATE_BOOLEAN),
+            'limit_order_timeout_seconds' => (int) env('LONG_LIMIT_ORDER_TIMEOUT_SECONDS', 3),
+            'max_positions' => (int) env('LONG_MAX_POSITIONS', 3),
+        ],
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Short-Scalp Strategy Configuration (legacy alias — DEPRECATED)
+    |--------------------------------------------------------------------------
+    | Kept through Phase 4 so any non-migrated config('crypto.scalp.x') call
+    | still resolves. Same defaults as `strategy.short_scalp.*` above.
+    */
+    'scalp' => $shortScalpDefaults,
 
     /*
     |--------------------------------------------------------------------------

@@ -12,6 +12,7 @@ class Trade extends Model
         'position_id',
         'symbol',
         'side',
+        'strategy_key',
         'type',
         'entry_price',
         'exit_price',
