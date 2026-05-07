@@ -514,6 +514,7 @@ class DashboardController extends Controller
         \Illuminate\Support\Facades\DB::statement('SET FOREIGN_KEY_CHECKS=0');
         Trade::truncate();
         Position::truncate();
+        BalanceSnapshot::truncate();
         \Illuminate\Support\Facades\DB::statement('SET FOREIGN_KEY_CHECKS=1');
 
         // Any circuit-breaker cooldown was tied to the now-wiped trade
