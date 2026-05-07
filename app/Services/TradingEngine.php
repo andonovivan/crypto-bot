@@ -1603,6 +1603,12 @@ class TradingEngine
             $newPosition = Position::create([
                 'symbol' => $symbol,
                 'side' => $newDirection,
+                // Preserve the original strategy attribution so the reversed
+                // position still shows up under that strategy in dashboard
+                // by_strategy stats and per-(symbol, strategy_key) cooldowns.
+                // Falls back to 'short_scalp' for legacy rows that pre-date
+                // the multi-strategy migration.
+                'strategy_key' => $position->strategy_key ?: 'short_scalp',
                 'entry_price' => $entryPrice,
                 'quantity' => $order['quantity'],
                 'position_size_usdt' => $positionSizeUsdt,
@@ -1655,11 +1661,13 @@ class TradingEngine
         $trailRate = (float) Settings::get('trailing_tp_trail_pct');
         $useTrailing = $trailingEnabled && $trailArm > 0 && $trailRate > 0;
 
-        $activationPrice = $useTrailing
-            ? ($side === 'SHORT'
-                ? $entryPrice * (1 - $trailArm / 100)
-                : $entryPrice * (1 + $trailArm / 100))
-            : 0.0;
+        // Trailing stop arms when price moves favorable_side by trailArm%.
+        // SHORT: arm BELOW entry  |  LONG: arm ABOVE entry  |  not in use: 0.0.
+        $activationPrice = match (true) {
+            ! $useTrailing => 0.0,
+            $side === 'SHORT' => $entryPrice * (1 - $trailArm / 100),
+            default => $entryPrice * (1 + $trailArm / 100),
+        };
 
         for ($attempt = 1; $attempt <= 2; $attempt++) {
             try {
