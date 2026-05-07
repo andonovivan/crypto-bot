@@ -5,14 +5,14 @@
 Laravel 13 (PHP 8.4) **multi-strategy trading bot** for Binance Futures, built around a plug-in strategy architecture. Two strategies ship today, both registered in `config/strategies.php`:
 
 - **`short_scalp`** (default ON) — shorts pump/dump candidates in the +25% to +50% / ≤-10% 24h band when the 15m chart confirms a downtrend. The historical workhorse; T8 settings (trailing TP arm 1.0% / trail 0.5%, fixed 2.5% SL, 8h hold) backtested ~65-70% win rate at R:R 0.85.
-- **`long_continuation`** — longs the +50–100% 24h pump band that `short_scalp` explicitly avoids (research showed pumps ≥50% have a continuation pattern, median +12.6% further over 24h). Currently enabled in dry-run after L1 baseline showed +$1.68/trade edge on March 2026; awaiting full L2-L7 + walk-forward validation before live.
+- **`long_continuation`** — longs the +50–100% 24h pump band that `short_scalp` explicitly avoids (research showed pumps ≥50% have a continuation pattern, median +12.6% further over 24h). Currently enabled in dry-run after L1 baseline showed +$1.68/trade edge on March 2026 (29 trades, WR 58.6%, R:R 1.81). The 2-month dual-strategy backtest (Mar-Apr 2026, both strategies on, fixed-sizing $100) confirmed the strategies don't interfere: short_scalp + long_continuation summed to +$2,245 total (short ~78%, long ~22% of P&L); long_continuation kept R:R ≈ 2.34 vs short's 0.84. **Still awaiting full L2-L7 backtest matrix + Sep'25→Apr'26 walk-forward before live deployment** — disable via `Settings::set('strategy.long_continuation.enabled', false)` if regime-shift detector trips.
 
 Both strategies coexist behind one global `max_positions` cap with optional per-strategy sub-caps, share the same wallet, and run in lockstep on the same scanner gate (one scan per closed 1m candle). Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
 
 ## Architecture
 
 ### Docker Services (docker-compose.yml)
-- **db** — MariaDB 11 (persistent volume `dbdata`, healthcheck)
+- **db** — MariaDB 11 (persistent volume `dbdata`, healthcheck). Started with `--innodb-buffer-pool-size=2147483648` (2 GiB). The default 128 MB pool's lock table overflows during 1m-mode backtests when `cursor()` streams ~50M kline rows while transactions commit (error 1206 "lock table size"). 2 GiB gives plenty of headroom for current dataset sizes — bump if `kline_history` ever exceeds ~150M rows.
 - **app** — Dashboard web server (port 8090, runs migrations on startup)
 - **bot** — Continuous scan loop (`bot:run`, configurable scan interval, default 30s)
 - **scheduler** — Laravel scheduler (`schedule:run` loop). Currently drives `bot:snapshot-balance` every 5 minutes for the equity-curve widget.
@@ -46,6 +46,8 @@ Both strategies coexist behind one global `max_positions` cap with optional per-
      - foreach candidate: apply cross-strategy invariant (one open position per symbol globally), per-`(symbol, strategy_key)` cooldown + failed-entry cooldown, per-strategy `max_positions` sub-cap if set, then `$strategy->analyze($symbol)` and `$strategy->buildSignal($candidate, $analysis)` if `analysis->ok`. Open via `$engine->open($signal)`.
      - **Cross-cycle dedupe**: a symbol opened by strategy A this cycle is skipped by strategy B in the same cycle (first-in-`order` wins). The bands of the two shipped strategies don't overlap, so this rarely fires.
 3. **Cycle summary** logged per strategy + total: `strategy=short_scalp candidates=4 analyzed=2 opened=0` then `Cycle: total candidates=4 analyzed=2 opened=0 openPositions=2`.
+
+**Boundary-aligned wake-up**: BotRun's sleep math targets `ceil(now / scan_interval) * scan_interval` so cycles wake at predictable boundaries — e.g. with `scan_interval=30`, the loop fires at `:00` and `:30` of each minute (epoch-aligned). Combined with the 1m candle gate above, the scanner block runs within milliseconds of each `:00` boundary instead of drifting with cycle duration. This makes live entry timing deterministic and matches the backtest's exact-boundary tick.
 4. **Idempotency**: `TradingEngine::checkPosition`, `closePosition`, `reconcileFillFromStream`, and `reconcileMissingPosition` all refresh the row and bail if `status !== Open`. Multiple paths (ws-prices ticks, ws-user-data fills, BotRun cycle, manual dashboard actions) can race without double-counting.
 
 ### Plug-in Strategy Architecture
@@ -106,7 +108,41 @@ All strategies implement [`StrategyInterface`](app/Services/Strategy/StrategyInt
 - Practical concurrent cap: ~9-10 positions at 10% margin each exhausts available balance; `max_positions=10` is effectively the ceiling
 - The engine's `availableBalance >= margin` guard prevents over-commit
 
-**Cooldown:** `cooldown_minutes` (default 120 = 2h) after any close on same symbol. `failed_entry_cooldown_minutes` (default 360 = 6h) after any `status=Failed` row on same symbol.
+**Cooldown:** `cooldown_minutes` (default 120 = 2h) after any close on same symbol. `failed_entry_cooldown_minutes` (default 0 = disabled) after any `status=Failed` row on same `(symbol, short_scalp)`.
+
+### Long-Continuation Strategy
+
+The complement to short-scalp: longs the +50–100% 24h pump band that short_scalp explicitly avoids. Research showed pumps in this band have a continuation pattern (median 24h close +12.6% further), so this strategy rides the move instead of fighting it. Off by default (`strategy.long_continuation.enabled=false`) until full L2-L7 + walk-forward validation.
+
+**Entry criteria (all must pass):**
+1. **24h mover (strict-greater on lower bound)**: `priceChangePct > pump_threshold_pct` (default +50%) AND `priceChangePct <= pump_max_pct` (default +100%, `pump_max_pct=0` disables the upper cap). The strict-greater on the lower bound means the +50% boundary belongs to short_scalp (`pump_max_pct=50` inclusive there) — bands therefore never overlap by construction.
+2. **Liquidity window**: `min_volume_usdt <= 24h quote volume <= max_volume_usdt` (defaults 5M / 100M USDT, `max_volume_usdt=0` disables the upper cap). Wider than short's 10M-25M because pump-continuation coins tend to be heavier.
+3. **15m uptrend (Strict rule)** — only when `strict_uptrend_enabled=true` (default true). When false, this entire block is skipped and only the funding-rate guard below applies.
+   - EMA fast (default 9) > EMA slow (default 21) on BOTH current and prior 15m candle
+   - Current price (close of last closed candle) > EMA fast
+   - **Last N CLOSED 15m candles are green** (close > open) — where N = `min_green_candles` (default 2). Checks `candles[last-1]` and `candles[last-2]`. Mirror of short's red-candle gate.
+   - Candle body of last closed candle <= `max_candle_body_pct` (default 5% — wider than short's 3% because pump-continuation candles are inherently fat)
+4. **Higher-timeframe confirmation** (conditional, `htf_filter_enabled=true` by default, only checked when strict gate is on): 1h close > 1h EMA (period `htf_ema_period`, default 21). Fetches `htf_ema_period + 5` 1h klines via `checkHigherTfUptrend()`. **Fails open** — if the 1h fetch errors or returns too few bars, the filter passes.
+5. **Funding guard (INVERTED vs short)**: current funding rate `<= funding_max_rate` (default +0.10% per 8h). LONGs *pay* funding when positive — skipping rates above the cap avoids joining a crowded squeeze (positive funding means longs are paying shorts; very high rates indicate over-crowded long side).
+6. **Capacity gates**: trading not paused, global `max_positions` not hit, per-strategy `max_positions` sub-cap not hit (default `strategy.long_continuation.max_positions=3` — pump events are rare; >3 simultaneous setups is likely noise), no open position on this symbol globally (cross-strategy invariant), post-close cooldown cleared (`cooldown_minutes`, default 240 = 4h), post-failure cooldown cleared (`failed_entry_cooldown_minutes`, default 0 = disabled).
+7. **Circuit breaker**: same shared breaker as short_scalp.
+
+**Exit criteria:**
+- **Fixed TP** (when `trailing_tp_enabled=false`): `entry × (1 + take_profit_pct / 100)` — for LONG, TP is ABOVE entry (default 3% above). Placed at entry as a `TAKE_PROFIT_MARKET` algo bracket.
+- **Trailing TP** (when `trailing_tp_enabled=true`, **default**): native `TRAILING_STOP_MARKET` algo. `activationPrice = entry × (1 + trailing_tp_arm_pct / 100)` (default arm 1.5% favorable — tighter than short's 2.0% because continuations exhaust faster); `callbackRate = trailing_tp_trail_pct` (default 1.0% — wider than short's 0.7% because pump-noise has more give). Binance arms when highest price reaches activationPrice and fires when latest ≤ highest × (1 - callbackRate/100). Mirror of short's logic with the side flipped.
+- SL hit: `entry × (1 - stop_loss_pct / 100)` — for LONG, SL is BELOW entry (default 3% below). `atr_sl_enabled=false` by default for v1 — deterministic for backtesting; flip true to use `atr_sl_multiplier × ATR14` instead. SL stays in place when trailing TP is on.
+- **Partial TP**: disabled by default (`partial_tp_trigger_pct=0`) — competes with trailing TP for the favorable-side exit. Leave at 0 unless you've explicitly disabled trailing.
+- Expiry: `max_hold_minutes` (default 720 = 12h — half of short's recommended 1440, since the continuation tail mostly lands in the first 12h after signal).
+
+**Risk sizing (current dry-run config: 10x leverage, $1000 wallet):**
+- Margin per trade = `position_size_pct` (default 10%) × wallet balance = $100
+- Notional = margin × leverage = $1000 per trade (100% wallet)
+- SL 3% adverse = 30% margin loss = 3% wallet loss per bad trade
+- Backtest-validated edge (L1 baseline, March 2026 fixed-sizing $100): 29 trades, WR 58.6%, R:R 1.81, +$48.82 net (per-trade edge $1.68 — about 3× short's $0.65/trade on the same window). April 2026 was pumpier: 122 trades, WR 58.2%, R:R 2.34, +$299.
+
+**Cooldown:** `cooldown_minutes` (default 240 = 4h) after any close on same `(symbol, long_continuation)`. Longer than short's 120m because pump events are once-per-pump — re-entering the same symbol within 4h of a previous close means the second pump is unrelated.
+
+**Why this strategy exists** (research justification): the original short-scalp design discovered that pumps ≥50% had a *continuation* pattern (median +12.6% further over the next 24h, p25 of -1.77% drawdown), unlike mild pumps which mean-revert (-10% trough). Short avoids this band via `pump_max_pct=50`; long_continuation rides it. The two strategies are complementary by construction — they share the same wallet and `max_positions` ceiling but never compete for the same symbol within a single scan.
 
 ### Risk Controls
 
@@ -404,7 +440,10 @@ Replays historical 15m + 1h (+ optional 1m) klines through the **actual** strate
 
 3. **`bot:backtest-rolling`** chunks long runs by month to fit 1m-mode memory.
    - Adds `--from=YYYY-MM` / `--to=YYYY-MM` (exclusive), `--download-on-demand` (per-chunk fetch), `--cleanup-prior` (delete kline_history rows ≥2 chunks behind to keep disk bounded), `--strategies=` pass-through, `--summary-log=PATH` (per-month CSV).
+   - **Pipelined downloads** (when `--download-on-demand` is on): chunk N+1's download starts in a background `Process::start()` while chunk N's backtest runs synchronously in the foreground. Saves ~`backtest_time` per chunk on the wall-clock total — the foreground backtest's progress bar stays visible; the background download's output is suppressed and only the final 3 lines are dumped on `wait()`. Chunk 0's downloads (lead-in + own month) are synchronous since there's no prior backtest to overlap with.
    - State carries across chunks via DB-resident Trade rows + cache; per-chunk subprocesses provide hard memory isolation.
+
+**Memory limits**: `BotBacktest::handle()` and `BotDownloadHistory::handle()` both call `ini_set('memory_limit', '-1')` at the top. The default 128 MB CLI limit OOMs early during a `--use-1m` run (`HistoricalReplayExchange` loads ~1.5–2 GB of kline arrays for one month × 500+ symbols) or a multi-month download (transient buffers from unzip + bulk insert). Other long-running processes (bot, ws-worker) keep their tight default for safety; only the backtest/download paths override.
 
 ### Replay loop
 
@@ -484,3 +523,5 @@ Component-driven Blade + Tailwind v4 + Alpine.js + ECharts (code-split). Sidebar
 - **Funding guard semantics differ by side**: the short-scalp scanner skips a candidate when the funding rate is **too negative** (default `< -0.05%`) — shorts pay heavy funding when rates flip negative. The long-continuation scanner does the inverse: skips when the rate is **too positive** (default `> +0.10%`) — longs pay heavy funding when rates run hot. Don't apply one rule to the other strategy's setting key.
 - **Per-strategy code deployment**: source isn't bind-mounted into the worker containers (only `storage/logs` is). After editing PHP files, deploy with `docker cp app/ crypto-bot-bot-1:/app/ && docker cp app/ crypto-bot-app-1:/app/ && docker compose restart bot ws-worker ws-user-data scheduler` — every container that reads from `/app/app/` needs the copy. After editing JS in `resources/js/dashboard/`, run `npm run build` and `docker cp public/build crypto-bot-app-1:/app/public/`.
 - **Strategy `enabled` flag is per-process state**: BotRun reads it once at startup to print the "Enabled strategies" header, and once per cycle inside the entry loop. Toggling `strategy.<key>.enabled` from the dashboard takes effect on the next cycle (≤30s) without a worker restart, but the startup header won't refresh until the worker reboots.
+- **Position TRUNCATE needs FK_CHECKS=0**: `trades.position_id` has a FK to `positions.id`, so naively `TRUNCATE TABLE positions` errors with 1701. The wipe pattern is `SET FOREIGN_KEY_CHECKS=0; TRUNCATE trades; TRUNCATE positions; TRUNCATE balance_snapshots; SET FOREIGN_KEY_CHECKS=1;` — gets all three tables back to auto-increment 1 in one go. Plain DELETE works without the FK trick but doesn't reset the sequence.
+- **Backups before destructive operations**: `mariadb-dump bot_settings positions trades balance_snapshots > storage/backups/pre-wipe-{ts}.sql` before any wipe / settings-rename migration. The settings rename migration (Phase 1) is one-way (`down()` is intentionally a no-op), so a backup is the only rollback path.
