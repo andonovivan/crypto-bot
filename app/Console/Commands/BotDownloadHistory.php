@@ -17,15 +17,18 @@ use Illuminate\Support\Facades\Http;
 class BotDownloadHistory extends Command
 {
     protected $signature = 'bot:download-history
-        {--months=1 : Number of most recent completed calendar months to fetch}
+        {--months=1 : Number of most recent completed calendar months to fetch (monthly mode)}
         {--end-month= : Anchor month YYYY-MM walking backwards (default: last completed month). e.g. --end-month=2026-03 --months=2 fetches Feb+Mar 2026.}
+        {--days= : Number of most recent completed days to fetch (daily mode — overrides --months/--end-month)}
+        {--end-day= : Anchor day YYYY-MM-DD walking backwards (default: yesterday). Triggers daily mode.}
         {--symbols= : Comma-separated list of symbols (default: all current USDT perps)}
         {--intervals=15m,1h : Comma-separated kline intervals to fetch (e.g. 1m,15m,1h)}
-        {--skip-existing : Skip (symbol,interval,month) combos that already have rows in kline_history}';
+        {--skip-existing : Skip (symbol,interval,period) combos that already have rows in kline_history}';
 
     protected $description = 'Download historical klines from data.binance.vision for backtesting';
 
     private const BASE_URL = 'https://data.binance.vision/data/futures/um/monthly/klines';
+    private const BASE_URL_DAILY = 'https://data.binance.vision/data/futures/um/daily/klines';
     private const TMP_DIR = '/tmp/kline-dl';
 
     public function handle(ExchangeInterface $exchange): int
@@ -35,8 +38,13 @@ class BotDownloadHistory extends Command
         // symbol when 1m + 15m + 1h are all pulled in one run.
         ini_set('memory_limit', '-1');
 
+        $daysOpt = $this->option('days');
+        $endDayOpt = $this->option('end-day');
+        $dailyMode = $daysOpt !== null || $endDayOpt !== null;
+
         $months = max(1, (int) $this->option('months'));
         $endMonth = $this->option('end-month');
+        $days = max(1, (int) ($daysOpt ?? 1));
         $symbolsOpt = $this->option('symbols');
         $skipExisting = (bool) $this->option('skip-existing');
         $intervals = array_values(array_filter(array_map('trim', explode(',', (string) $this->option('intervals')))));
@@ -51,38 +59,48 @@ class BotDownloadHistory extends Command
             ? array_filter(array_map('trim', explode(',', $symbolsOpt)))
             : $this->getUsdtPerps($exchange);
 
-        $this->info(sprintf('Downloading %d month(s) of data for %d symbols × %d intervals (%s)',
-            $months, count($symbols), count($intervals), implode(',', $intervals)));
-
         try {
-            $ym = $this->monthsToFetch($months, $endMonth);
+            $periods = $dailyMode
+                ? $this->daysToFetch($days, $endDayOpt)
+                : $this->monthsToFetch($months, $endMonth);
         } catch (\InvalidArgumentException $e) {
             $this->error($e->getMessage());
             return self::FAILURE;
         }
-        $totalJobs = count($symbols) * count($intervals) * count($ym);
+
+        $unit = $dailyMode ? 'day' : 'month';
+        $unitCount = $dailyMode ? $days : $months;
+        $this->info(sprintf('Downloading %d %s(s) of data for %d symbols × %d intervals (%s)',
+            $unitCount, $unit, count($symbols), count($intervals), implode(',', $intervals)));
+
+        $totalJobs = count($symbols) * count($intervals) * count($periods);
 
         $bar = $this->output->createProgressBar($totalJobs);
-        $bar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %elapsed:6s% %symbol% %interval% %month% %status%');
+        $bar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %elapsed:6s% %symbol% %interval% %period% %status%');
         $bar->start();
 
         $stats = ['downloaded' => 0, 'skipped' => 0, 'missing' => 0, 'rows' => 0, 'errors' => 0];
 
         foreach ($symbols as $symbol) {
             foreach ($intervals as $interval) {
-                foreach ($ym as $m) {
+                foreach ($periods as $p) {
                     $bar->setMessage($symbol, 'symbol');
                     $bar->setMessage($interval, 'interval');
-                    $bar->setMessage($m, 'month');
+                    $bar->setMessage($p, 'period');
 
-                    if ($skipExisting && $this->alreadyHave($symbol, $interval, $m)) {
+                    $haveIt = $dailyMode
+                        ? $this->alreadyHaveDay($symbol, $interval, $p)
+                        : $this->alreadyHave($symbol, $interval, $p);
+                    if ($skipExisting && $haveIt) {
                         $bar->setMessage('skip-existing', 'status');
                         $stats['skipped']++;
                         $bar->advance();
                         continue;
                     }
 
-                    $result = $this->fetchMonth($symbol, $interval, $m);
+                    $result = $dailyMode
+                        ? $this->fetchDay($symbol, $interval, $p)
+                        : $this->fetchMonth($symbol, $interval, $p);
                     $bar->setMessage($result['status'], 'status');
                     $stats[$result['status']] = ($stats[$result['status']] ?? 0) + 1;
                     if (isset($result['rows'])) {
@@ -132,6 +150,29 @@ class BotDownloadHistory extends Command
     }
 
     /**
+     * @return string[] YYYY-MM-DD strings, most recent completed day first.
+     */
+    private function daysToFetch(int $count, ?string $endDay = null): array
+    {
+        if ($endDay) {
+            $cursor = \Carbon\Carbon::createFromFormat('!Y-m-d', $endDay);
+            if (! $cursor) {
+                throw new \InvalidArgumentException("Invalid --end-day '{$endDay}', expected YYYY-MM-DD");
+            }
+            $cursor = $cursor->startOfDay();
+        } else {
+            $cursor = now()->startOfDay()->subDay();
+        }
+
+        $out = [];
+        for ($i = 0; $i < $count; $i++) {
+            $out[] = $cursor->format('Y-m-d');
+            $cursor = $cursor->subDay();
+        }
+        return $out;
+    }
+
+    /**
      * @return string[]
      */
     private function getUsdtPerps(ExchangeInterface $exchange): array
@@ -165,13 +206,41 @@ class BotDownloadHistory extends Command
             ->exists();
     }
 
+    private function alreadyHaveDay(string $symbol, string $interval, string $ymd): bool
+    {
+        $startMs = (new \DateTimeImmutable("{$ymd}T00:00:00Z"))->getTimestamp() * 1000;
+        $endMs = (new \DateTimeImmutable("{$ymd}T00:00:00Z"))->modify('+1 day')->getTimestamp() * 1000;
+        return DB::table('kline_history')
+            ->where('symbol', $symbol)
+            ->where('interval', $interval)
+            ->whereBetween('open_time', [$startMs, $endMs - 1])
+            ->exists();
+    }
+
     /**
      * @return array{status: string, rows?: int}
      */
     private function fetchMonth(string $symbol, string $interval, string $ym): array
     {
         $url = sprintf('%s/%s/%s/%s-%s-%s.zip', self::BASE_URL, $symbol, $interval, $symbol, $interval, $ym);
-        $zipPath = self::TMP_DIR . "/{$symbol}-{$interval}-{$ym}.zip";
+        return $this->fetchAndIngestZip($url, $symbol, $interval, $ym);
+    }
+
+    /**
+     * @return array{status: string, rows?: int}
+     */
+    private function fetchDay(string $symbol, string $interval, string $ymd): array
+    {
+        $url = sprintf('%s/%s/%s/%s-%s-%s.zip', self::BASE_URL_DAILY, $symbol, $interval, $symbol, $interval, $ymd);
+        return $this->fetchAndIngestZip($url, $symbol, $interval, $ymd);
+    }
+
+    /**
+     * @return array{status: string, rows?: int}
+     */
+    private function fetchAndIngestZip(string $url, string $symbol, string $interval, string $period): array
+    {
+        $zipPath = self::TMP_DIR . "/{$symbol}-{$interval}-{$period}.zip";
 
         try {
             $resp = Http::timeout(60)->get($url);
@@ -187,7 +256,7 @@ class BotDownloadHistory extends Command
 
         file_put_contents($zipPath, $resp->body());
 
-        $extractDir = self::TMP_DIR . "/extract-{$symbol}-{$interval}-{$ym}";
+        $extractDir = self::TMP_DIR . "/extract-{$symbol}-{$interval}-{$period}";
         @mkdir($extractDir, 0755, true);
 
         $r = 0;

@@ -242,7 +242,7 @@ Both scanners share:
 | `app/Console/Commands/BotSnapshotBalance.php` | One-shot command that writes a `BalanceSnapshot` row from `getAccountData()`. Scheduled every 5 min for the equity-curve widget. |
 | `app/Console/Commands/BotStatus.php` | CLI status overview |
 | `app/Console/Commands/BotBacktest.php` | Replays `kline_history` rows through the live multi-strategy stack (`StrategyRegistry` → each strategy's scanner → `TradingEngine::open()`) using `Carbon::setTestNow` + `HistoricalReplayExchange`. Same code path as live, so backtest results track live behavior. Supports `--strategies=KEY1,KEY2` to filter. |
-| `app/Console/Commands/BotDownloadHistory.php` | Downloads monthly 15m + 1h kline zips from `data.binance.vision`, upserts into `kline_history`. Prerequisite for `bot:backtest`. |
+| `app/Console/Commands/BotDownloadHistory.php` | Downloads monthly **or daily** 15m + 1h (+ optional 1m) kline zips from `data.binance.vision`, upserts into `kline_history`. Prerequisite for `bot:backtest`. Daily mode (`--days` / `--end-day`) is for backtesting recent windows that the monthly archive hasn't published yet. |
 | `app/Models/BalanceSnapshot.php` | Equity-curve sample rows: `wallet_balance`, `available_balance`, `margin_balance`, `position_margin`, `open_positions`, `is_dry_run`, `created_at`. `$timestamps=false` (explicit `created_at` only). |
 | `bootstrap/app.php` | CSRF exemption for `api/*` routes |
 | `config/crypto.php` | Default config values |
@@ -387,10 +387,11 @@ Both scanners share:
 Backtest workflow (see the Backtest Harness section for details):
 
 ```bash
-# 1. Populate kline_history (monthly zips from data.binance.vision)
+# 1. Populate kline_history (monthly OR daily zips from data.binance.vision)
 ./develop art bot:download-history --months=6                    # all USDT perps, last 6 completed months
 ./develop art bot:download-history --months=1 --symbols=BTCUSDT  # single symbol
 ./develop art bot:download-history --months=6 --skip-existing    # resume without re-downloading
+./develop art bot:download-history --days=8 --intervals=15m,1h,1m  # daily mode for the last 8 completed days
 
 # 2. Run a backtest
 ./develop art bot:backtest --from=2026-01-01 --to=2026-04-01 --truncate
@@ -428,10 +429,12 @@ Replays historical 15m + 1h (+ optional 1m) klines through the **actual** strate
 
 ### Pipeline
 
-1. **`bot:download-history`** populates `kline_history` from `data.binance.vision` monthly zips.
-   - Flags: `--months=N` (default 1, fetches most recent N completed calendar months), `--end-month=YYYY-MM` (anchor walking backwards; default = last completed month), `--symbols=BTCUSDT,ETHUSDT` (default: all USDT perps from current exchangeInfo), `--intervals=15m,1h` (default; add `1m` for `--use-1m` runs), `--skip-existing` (skip `(symbol, interval, month)` combos that already have rows).
+1. **`bot:download-history`** populates `kline_history` from `data.binance.vision` monthly **or** daily zips.
+   - **Monthly mode** (default): `--months=N` (default 1, fetches most recent N completed calendar months), `--end-month=YYYY-MM` (anchor walking backwards; default = last completed month).
+   - **Daily mode**: `--days=N` (most recent N completed days, default anchor = yesterday) or `--end-day=YYYY-MM-DD` (anchor walking backwards). Either flag triggers daily mode and overrides `--months`/`--end-month`. URL switches from `…/monthly/klines/` to `…/daily/klines/`; CSV format is identical so `ingestCsv()` is unchanged. Use this for backtesting recent windows when the monthly archive hasn't published yet (Binance posts monthly zips a few days after month-end).
+   - Shared flags: `--symbols=BTCUSDT,ETHUSDT` (default: all USDT perps from current exchangeInfo), `--intervals=15m,1h` (default; add `1m` for `--use-1m` runs), `--skip-existing` (skip `(symbol, interval, period)` combos that already have rows).
    - `15m` drives entry/exit decisions; `1h` drives the HTF filter; `1m` synthesises the 24h ticker for `--use-1m` runs.
-   - Uses `unzip` shell-out on the downloaded zip, then batched (1000-row) DB upsert on `(symbol, interval, open_time)`. 404s on a `(symbol, month)` combo (symbol didn't exist yet) are counted as `missing` and don't error out.
+   - Uses `unzip` shell-out on the downloaded zip, then batched (1000-row) DB upsert on `(symbol, interval, open_time)`. 404s on a `(symbol, period)` combo (symbol didn't exist yet, or daily zip not yet published) are counted as `missing` and don't error out.
 
 2. **`bot:backtest`** runs the replay.
    - Flags: `--from=YYYY-MM-DD` (required), `--to=YYYY-MM-DD` (default from+30d, exclusive), `--symbols=...` (default: all loaded), `--starting-balance=10000`, `--fixed-sizing`, `--use-1m`, `--truncate`, `--no-force-close`, `--strategies=KEY1,KEY2` (default: all enabled), `--override=key=value` (repeatable; accepts any `Settings::KEYS` entry — including legacy aliases — with automatic type coercion).
@@ -520,6 +523,9 @@ Component-driven Blade + Tailwind v4 + Alpine.js + ECharts (code-split). Sidebar
 - **Trailing TP and partial TP are mutually exclusive in spirit**: both target the favorable side. Leaving `partial_tp_trigger_pct > 0` while `trailing_tp_enabled=true` will scale out half at the partial trigger and leave the remainder under the trailing stop, which mostly defeats the trailing TP's job of riding the move. The recommended trailing config sets `partial_tp_trigger_pct=0`.
 - **`callbackRate` clamping**: Binance accepts 0.1–5.0%; values outside that band are rejected with `-2021/-1102` and would orphan the position with no favorable-side bracket. `BinanceExchange::openTrailingStop()` clamps before submission so a config typo can't kill an entry mid-flight. Backtest harness has no clamp (uses arbitrary `trailing_tp_trail_pct`), but live placement always respects the band.
 - **Trailing-armed SL labelling**: in dry-run, when the trailing stop ratchets into the favorable side of entry and then fires, `trailingExitReason()` returns `CloseReason::TakeProfit` (not `StopLoss`), even though the close went through the slHit branch. The Trade row reflects "TakeProfit" so the close-reason mix and dashboard summaries treat trailed exits as wins, matching how live `TRAILING_STOP_MARKET` fills are reconciled (also as TakeProfit, via `tp_order_id` match in `ws-user-data`).
+- **Dry-run trailing TP fires earlier than backtest predicts** (observed 2026-05): the May 7-9 live dry-run window matched the May 1-8 backtest on win rate (~56%) and on `stop_loss` exit prices (both clamp at -2.5%) — but live's average winning exit was ~1.36% favorable while the same-window backtest captured ~2.9% per win (R:R 0.59 live vs 1.20 backtest, normalized to the same notional). The gap is structural: live `maybeTrailStop()` reads from the `binance:prices` cache (~1s WebSocket cadence) and fires on the *first* price that retraces by `trailing_tp_trail_pct` from the running extreme; the backtest probe heuristic walks each 15m bar in 3 idealized steps (color-keyed high/low/close) so the trailing extreme ratchets to the deepest probe before any retrace check, capturing the full favorable range of the bar. Real markets wiggle more than 3 probes and the live trail consequently exits earlier on small bounces. Practical compensations:
+    - Widen `trailing_tp_trail_pct` (0.5 → 1.0) and/or `trailing_tp_arm_pct` (1.0 → 1.5) to absorb sub-1s wiggle. May 1-8 backtest with arm 1.5 / trail 1.0 was ~equivalent net P&L (+156% vs +153%) but with R:R 1.14 vs 0.96 — slightly fewer trades and wins, materially bigger avg win, ~4 pp more breakeven safety margin.
+    - Trust backtest WR more than backtest avg-win when forecasting live performance; the SL side ports faithfully but the favorable side is over-optimistic by roughly 2× on win size in the trailing-TP regime.
 - **Funding guard semantics differ by side**: the short-scalp scanner skips a candidate when the funding rate is **too negative** (default `< -0.05%`) — shorts pay heavy funding when rates flip negative. The long-continuation scanner does the inverse: skips when the rate is **too positive** (default `> +0.10%`) — longs pay heavy funding when rates run hot. Don't apply one rule to the other strategy's setting key.
 - **Per-strategy code deployment**: source isn't bind-mounted into the worker containers (only `storage/logs` is). After editing PHP files, deploy with `docker cp app/ crypto-bot-bot-1:/app/ && docker cp app/ crypto-bot-app-1:/app/ && docker compose restart bot ws-worker ws-user-data scheduler` — every container that reads from `/app/app/` needs the copy. After editing JS in `resources/js/dashboard/`, run `npm run build` and `docker cp public/build crypto-bot-app-1:/app/public/`.
 - **Strategy `enabled` flag is per-process state**: BotRun reads it once at startup to print the "Enabled strategies" header, and once per cycle inside the entry loop. Toggling `strategy.<key>.enabled` from the dashboard takes effect on the next cycle (≤30s) without a worker restart, but the startup header won't refresh until the worker reboots.
