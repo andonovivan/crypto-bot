@@ -440,7 +440,7 @@ class HistoricalReplayExchange implements ExchangeInterface
 
     public function openShort(string $symbol, float $quantity): array
     {
-        $price = $this->getPrice($symbol);
+        $price = $this->applyMarketSlippage($this->getPrice($symbol), 'SELL');
         return [
             'orderId' => 'bt_' . uniqid('', true),
             'price' => $price,
@@ -450,7 +450,7 @@ class HistoricalReplayExchange implements ExchangeInterface
 
     public function closeShort(string $symbol, float $quantity): array
     {
-        $price = $this->getPrice($symbol);
+        $price = $this->applyMarketSlippage($this->getPrice($symbol), 'BUY');
         return [
             'orderId' => 'bt_' . uniqid('', true),
             'price' => $price,
@@ -460,7 +460,7 @@ class HistoricalReplayExchange implements ExchangeInterface
 
     public function openLong(string $symbol, float $quantity): array
     {
-        $price = $this->getPrice($symbol);
+        $price = $this->applyMarketSlippage($this->getPrice($symbol), 'BUY');
         return [
             'orderId' => 'bt_' . uniqid('', true),
             'price' => $price,
@@ -470,12 +470,38 @@ class HistoricalReplayExchange implements ExchangeInterface
 
     public function closeLong(string $symbol, float $quantity): array
     {
-        $price = $this->getPrice($symbol);
+        $price = $this->applyMarketSlippage($this->getPrice($symbol), 'SELL');
         return [
             'orderId' => 'bt_' . uniqid('', true),
             'price' => $price,
             'quantity' => $quantity,
         ];
+    }
+
+    /**
+     * Apply adverse market-order slippage to the replay price. Mirrors the
+     * dry-run implementation in DryRunExchange::applyMarketSlippage. SELL
+     * fills below mark, BUY fills above. When called from the SL/TP probe
+     * path (setProbePrice → checkPosition → closeShort/closeLong) the
+     * slippage stacks on top of the probe trigger, modeling the typical
+     * 1-5 bp slip past the trigger that live STOP_MARKET fills exhibit.
+     * Configured via `dry_run_market_slippage_bps` (same setting as dry-run).
+     */
+    private function applyMarketSlippage(float $mark, string $direction): float
+    {
+        $bps = (float) Settings::get('dry_run_market_slippage_bps');
+        if ($bps <= 0 || $mark <= 0) {
+            return $mark;
+        }
+
+        $adjust = $bps / 10000.0;
+        if ($direction === 'SELL') {
+            return $mark * (1 - $adjust);
+        }
+        if ($direction === 'BUY') {
+            return $mark * (1 + $adjust);
+        }
+        return $mark;
     }
 
     public function setStopLoss(string $symbol, float $stopPrice, float $quantity, string $side = 'SHORT'): array
@@ -580,7 +606,28 @@ class HistoricalReplayExchange implements ExchangeInterface
         // Generic 6-decimal rounding — LOT_SIZE isn't known offline. The scanner
         // wouldn't have accepted a symbol in live that can't hit this precision,
         // so this is close enough for backtest realism.
-        return round($qty, 6);
+        $qty = round($qty, 6);
+
+        // Simulate Binance's MIN_NOTIONAL filter when a real exchange is wired
+        // up (the bot:backtest command always calls setRealExchange). Mirrors
+        // the dry-run check in DryRunExchange::calculateQuantity — returning 0
+        // routes through TradingEngine's quantity<=0 path and records a Failed
+        // position, just like a live -4164 rejection. This is essential for
+        // backtest realism on low-priced alt perps where the scanner can pick
+        // a symbol whose minNotional exceeds the bot's configured notional.
+        if ($qty > 0 && $this->realExchange !== null) {
+            try {
+                $info = $this->realExchange->getExchangeInfo();
+                $minNotional = (float) ($info[$symbol]['minNotional'] ?? 0);
+                if ($minNotional > 0 && ($qty * $price) < $minNotional) {
+                    return 0.0;
+                }
+            } catch (\Throwable $e) {
+                // exchangeInfo unavailable — fall through, behave as before
+            }
+        }
+
+        return $qty;
     }
 
     public function getFundingRates(?string $symbol = null): array

@@ -1004,15 +1004,25 @@ class TradingEngine
             throw $e;
         }
 
-        // In dry-run, honor the caller's trigger-price hint over DryRunExchange's
-        // current-mark return. On a bar that gaps through SL/TP, the mark refetch
-        // lands mid-gap and overstates slippage. Live Binance fires STOP_MARKET /
-        // TAKE_PROFIT_MARKET at the trigger and market-fills within a few ticks —
-        // using the trigger here gets dry-run numbers closer to that reality.
-        // Callers that pass $exitPrice=null (manual close, reverse, expiry) still
-        // fall through to $order['price'] (the fresh mark), unchanged.
+        // In dry-run, honor the caller's trigger-price hint as the *base* of the
+        // close fill instead of trusting the current mark. Backtest probes and
+        // live-dry-run ws-triggered closes pass the SL/TP trigger explicitly;
+        // using $order['price'] would inject the current mark which can be far
+        // past the trigger on a gap, over-stating losses. Apply the configured
+        // market slippage on top of the trigger so the fill models real
+        // STOP_MARKET / TAKE_PROFIT_MARKET behavior — a few bps adverse of the
+        // trigger, matching what live Binance actually delivers.
+        // Callers that pass $exitPrice=null (manual close, reverse) fall through
+        // to $order['price'] (which already has slippage applied in
+        // DryRunExchange / HistoricalReplayExchange).
         if ($position->is_dry_run && $callerProvidedExit) {
-            $actualExitPrice = $exitPrice;
+            $bps = (float) Settings::get('dry_run_market_slippage_bps');
+            $adjust = $bps > 0 ? $bps / 10000.0 : 0.0;
+            $actualExitPrice = match (true) {
+                $adjust <= 0 => $exitPrice,
+                $position->side === 'SHORT' => $exitPrice * (1 + $adjust),
+                default => $exitPrice * (1 - $adjust),
+            };
         } else {
             $actualExitPrice = $order['price'] > 0 ? $order['price'] : $exitPrice;
         }
