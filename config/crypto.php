@@ -107,6 +107,13 @@ return [
         'dry_run' => filter_var(env('DRY_RUN', true), FILTER_VALIDATE_BOOLEAN),
         'starting_balance' => (float) env('TRADE_STARTING_BALANCE', 10000),
         'dry_run_fee_rate' => (float) env('DRY_RUN_FEE_RATE', 0.0005),
+        // Dry-run execution realism: adverse slippage on market fills (basis points
+        // per side, default 3 bps), maker fill probability for post-only LIMITs
+        // (default 0.6 — 40% fall back to MARKET via the timeout path), and per-bracket
+        // placement failure rate (default 0.01 — exercises the placeBrackets fail-safe).
+        'dry_run_market_slippage_bps' => (float) env('DRY_RUN_MARKET_SLIPPAGE_BPS', 3.0),
+        'dry_run_maker_fill_rate' => (float) env('DRY_RUN_MAKER_FILL_RATE', 0.6),
+        'dry_run_bracket_fail_rate' => (float) env('DRY_RUN_BRACKET_FAIL_RATE', 0.01),
         'trading_paused' => filter_var(env('TRADING_PAUSED', false), FILTER_VALIDATE_BOOLEAN),
         'funding_tracking_enabled' => filter_var(env('FUNDING_TRACKING_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
         'ws_prices_enabled' => filter_var(env('WS_PRICES_ENABLED', true), FILTER_VALIDATE_BOOLEAN),

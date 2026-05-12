@@ -61,12 +61,14 @@ class DryRunExchange implements ExchangeInterface
 
     public function openShort(string $symbol, float $quantity): array
     {
-        $price = $this->getPrice($symbol);
+        $mark = $this->getPrice($symbol);
+        $price = $this->applyMarketSlippage($mark, 'SELL');
         $orderId = 'dry_' . uniqid('', true);
 
         Log::info("[DRY RUN] Open short", [
             'symbol' => $symbol,
             'quantity' => $quantity,
+            'mark' => $mark,
             'price' => $price,
             'orderId' => $orderId,
         ]);
@@ -80,12 +82,14 @@ class DryRunExchange implements ExchangeInterface
 
     public function closeShort(string $symbol, float $quantity): array
     {
-        $price = $this->getPrice($symbol);
+        $mark = $this->getPrice($symbol);
+        $price = $this->applyMarketSlippage($mark, 'BUY');
         $orderId = 'dry_' . uniqid('', true);
 
         Log::info("[DRY RUN] Close short", [
             'symbol' => $symbol,
             'quantity' => $quantity,
+            'mark' => $mark,
             'price' => $price,
             'orderId' => $orderId,
         ]);
@@ -99,12 +103,14 @@ class DryRunExchange implements ExchangeInterface
 
     public function openLong(string $symbol, float $quantity): array
     {
-        $price = $this->getPrice($symbol);
+        $mark = $this->getPrice($symbol);
+        $price = $this->applyMarketSlippage($mark, 'BUY');
         $orderId = 'dry_' . uniqid('', true);
 
         Log::info("[DRY RUN] Open long", [
             'symbol' => $symbol,
             'quantity' => $quantity,
+            'mark' => $mark,
             'price' => $price,
             'orderId' => $orderId,
         ]);
@@ -118,12 +124,14 @@ class DryRunExchange implements ExchangeInterface
 
     public function closeLong(string $symbol, float $quantity): array
     {
-        $price = $this->getPrice($symbol);
+        $mark = $this->getPrice($symbol);
+        $price = $this->applyMarketSlippage($mark, 'SELL');
         $orderId = 'dry_' . uniqid('', true);
 
         Log::info("[DRY RUN] Close long", [
             'symbol' => $symbol,
             'quantity' => $quantity,
+            'mark' => $mark,
             'price' => $price,
             'orderId' => $orderId,
         ]);
@@ -135,8 +143,32 @@ class DryRunExchange implements ExchangeInterface
         ];
     }
 
+    /**
+     * Apply an adverse market-order slippage to the mark price.
+     * SELL gets a worse (lower) fill, BUY gets a worse (higher) fill.
+     * Configured via the `dry_run_market_slippage_bps` setting (basis points).
+     */
+    private function applyMarketSlippage(float $mark, string $direction): float
+    {
+        $bps = (float) Settings::get('dry_run_market_slippage_bps');
+        if ($bps <= 0 || $mark <= 0) {
+            return $mark;
+        }
+
+        $adjust = $bps / 10000.0;
+        if ($direction === 'SELL') {
+            return $mark * (1 - $adjust);
+        }
+        if ($direction === 'BUY') {
+            return $mark * (1 + $adjust);
+        }
+        return $mark;
+    }
+
     public function setStopLoss(string $symbol, float $stopPrice, float $quantity, string $side = 'SHORT'): array
     {
+        $this->maybeFailBracket('stop_loss', $symbol);
+
         Log::info("[DRY RUN] Set stop-loss", [
             'symbol' => $symbol,
             'stopPrice' => $stopPrice,
@@ -149,6 +181,8 @@ class DryRunExchange implements ExchangeInterface
 
     public function setTakeProfit(string $symbol, float $takeProfitPrice, float $quantity, string $side = 'SHORT'): array
     {
+        $this->maybeFailBracket('take_profit', $symbol);
+
         Log::info("[DRY RUN] Set take-profit", [
             'symbol' => $symbol,
             'takeProfitPrice' => $takeProfitPrice,
@@ -161,6 +195,8 @@ class DryRunExchange implements ExchangeInterface
 
     public function openTrailingStop(string $symbol, string $side, float $quantity, float $activationPrice, float $callbackRate): array
     {
+        $this->maybeFailBracket('trailing_stop', $symbol);
+
         // No real Binance order in dry-run. The bot's TradingEngine::maybeTrailStop
         // re-implements the trigger semantics against the cached price stream and
         // closes the DB position when the trail fires. We just hand back a fake
@@ -174,6 +210,32 @@ class DryRunExchange implements ExchangeInterface
         ]);
 
         return ['orderId' => 'dry_trail_' . uniqid('', true)];
+    }
+
+    /**
+     * Randomly simulate a bracket-order placement failure (rate-limit blip,
+     * lev-tier mismatch, position-mode quirk). On failure throws — the
+     * TradingEngine::placeBrackets fail-safe catches this, cancels sibling
+     * brackets, and force-closes the position. Exercises the same path live
+     * money will hit ~1-3% of the time per bracket.
+     */
+    private function maybeFailBracket(string $kind, string $symbol): void
+    {
+        $rate = (float) Settings::get('dry_run_bracket_fail_rate');
+        if ($rate <= 0) {
+            return;
+        }
+        if ($rate > 1) $rate = 1;
+
+        $roll = mt_rand() / mt_getrandmax();
+        if ($roll < $rate) {
+            Log::warning('[DRY RUN] Bracket placement failed (simulated)', [
+                'kind' => $kind,
+                'symbol' => $symbol,
+                'rate' => $rate,
+            ]);
+            throw new \RuntimeException("Simulated {$kind} placement failure (dry-run)");
+        }
     }
 
     public function getBalance(): float
@@ -259,7 +321,31 @@ class DryRunExchange implements ExchangeInterface
 
     public function calculateQuantity(string $symbol, float $usdtAmount, float $price): float
     {
-        return $this->realExchange->calculateQuantity($symbol, $usdtAmount, $price);
+        $quantity = $this->realExchange->calculateQuantity($symbol, $usdtAmount, $price);
+
+        // Simulate Binance's MIN_NOTIONAL filter: reject orders below the per-symbol
+        // minimum notional. The real exchange already enforces minQty via roundStepSize
+        // (returns 0); this adds the orthogonal minNotional check that live Binance
+        // applies. Returning 0 routes through TradingEngine's quantity<=0 path and
+        // records a Failed position, exactly as a live -4164 rejection would.
+        if ($quantity > 0 && $price > 0 && method_exists($this->realExchange, 'getExchangeInfo')) {
+            try {
+                $info = $this->realExchange->getExchangeInfo();
+                $minNotional = (float) ($info[$symbol]['minNotional'] ?? 0);
+                if ($minNotional > 0 && ($quantity * $price) < $minNotional) {
+                    Log::info('[DRY RUN] Below minNotional, returning quantity=0', [
+                        'symbol' => $symbol,
+                        'notional' => $quantity * $price,
+                        'minNotional' => $minNotional,
+                    ]);
+                    return 0.0;
+                }
+            } catch (\Throwable $e) {
+                // exchangeInfo unavailable — fall through, behave as before
+            }
+        }
+
+        return $quantity;
     }
 
     public function getFundingRates(?string $symbol = null): array
@@ -294,14 +380,36 @@ class DryRunExchange implements ExchangeInterface
 
         $orderId = 'dry_lim_' . uniqid('', true);
 
-        // Valid maker SELL at or above mark: simulate immediate fill at limit price.
-        $status = 'FILLED';
-        $avgPrice = $price;
+        // Simulate the real-world post-only fill rate. In live, a non-crossing
+        // maker order has a probability of getting filled before its timeout —
+        // it depends on queue position, price movement, and liquidity. Default
+        // 0.6 (60%) approximates the empirical fill rate observed on Binance
+        // Futures for tight post-only limits.
+        $fillRate = (float) Settings::get('dry_run_maker_fill_rate');
+        if ($fillRate < 0) $fillRate = 0;
+        if ($fillRate > 1) $fillRate = 1;
+
+        $roll = mt_rand() / mt_getrandmax();
+        $willFill = $roll < $fillRate;
+
+        if ($willFill) {
+            // Maker SELL fills at the limit price.
+            $status = 'FILLED';
+            $avgPrice = $price;
+            $executedQty = $quantity;
+        } else {
+            // Order rests on the book without filling — the bot's polling loop
+            // will see NEW for `limit_order_timeout_seconds`, then cancel and
+            // fall back to MARKET via TradingEngine::placeEntryOrder.
+            $status = 'NEW';
+            $avgPrice = 0.0;
+            $executedQty = 0.0;
+        }
 
         Cache::put("dry:order:{$orderId}", [
             'symbol' => $symbol,
             'status' => $status,
-            'executedQty' => $quantity,
+            'executedQty' => $executedQty,
             'avgPrice' => $avgPrice,
             'origQty' => $quantity,
         ], 300);
@@ -312,13 +420,14 @@ class DryRunExchange implements ExchangeInterface
             'price' => $price,
             'postOnly' => $postOnly,
             'status' => $status,
+            'fill_rate' => $fillRate,
             'orderId' => $orderId,
         ]);
 
         return [
             'orderId' => $orderId,
             'price' => $avgPrice,
-            'quantity' => $quantity,
+            'quantity' => $executedQty,
             'status' => $status,
         ];
     }
