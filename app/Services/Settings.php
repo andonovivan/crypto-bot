@@ -211,7 +211,7 @@ class Settings
                 $group['keys'] ?? [],
                 fn (string $k) => array_key_exists($k, self::KEYS)
             ));
-            $assigned = array_merge($assigned, $keys);
+            array_push($assigned, ...$keys);
             $out[] = [
                 'id' => $group['id'],
                 'title' => $group['title'],
