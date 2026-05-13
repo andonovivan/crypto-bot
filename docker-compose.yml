@@ -7,11 +7,13 @@ services:
       MARIADB_DATABASE: crypto_bot
       MARIADB_USER: crypto
       MARIADB_PASSWORD: secret
-    # Backtest streams ~50M+ kline_history rows with cursor() and holds
-    # row-level read locks across the whole iteration; the default 128M
-    # InnoDB buffer pool overflows the lock table (error 1206). 2G gives
-    # plenty of headroom for current dataset sizes.
-    command: --innodb-buffer-pool-size=2147483648
+    # InnoDB buffer pool size in bytes. Defaults to 2 GiB so local
+    # backtests don't blow the lock table (error 1206) when cursor()
+    # streams ~50M kline_history rows. On a production host that doesn't
+    # run backtests, set MARIADB_BUFFER_POOL_SIZE=268435456 (256 MiB) in
+    # .env — production tables (bot_settings/positions/trades/snapshots)
+    # are small and don't need the headroom.
+    command: --innodb-buffer-pool-size=${MARIADB_BUFFER_POOL_SIZE:-2147483648}
     volumes:
       - dbdata:/var/lib/mysql
     healthcheck:
