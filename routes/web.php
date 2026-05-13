@@ -14,6 +14,7 @@ Route::get('/failed', [DashboardController::class, 'index'])->defaults('page', '
 Route::get('/risk', [DashboardController::class, 'index'])->defaults('page', 'risk')->name('dashboard.risk');
 Route::get('/settings', [DashboardController::class, 'index'])->defaults('page', 'settings')->name('dashboard.settings');
 
+Route::get('/api/health', [DashboardController::class, 'health']);
 Route::get('/api/data', [DashboardController::class, 'data']);
 Route::get('/api/stats', [DashboardController::class, 'stats']);
 Route::get('/api/trades', [DashboardController::class, 'trades']);

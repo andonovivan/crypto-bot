@@ -23,6 +23,67 @@ class DashboardController extends Controller
         return view('dashboard', ['page' => $page]);
     }
 
+    /**
+     * Liveness + freshness probe for external monitoring (Uptimerobot,
+     * Healthchecks.io, etc.) and operator sanity checks.
+     *
+     * Returns 200 when:
+     *  - the DB is reachable
+     *  - the bot loop is updating any open position within the last 90s
+     *    (skipped when no positions are open)
+     *  - the scheduler has written a balance_snapshot within the last 10 min
+     *    (skipped when no snapshots exist yet, e.g. fresh install)
+     *
+     * Returns 503 if any of the above fails. Payload is always JSON with
+     * structured fields so monitors can also alert on specific dimensions
+     * (e.g. "live mode flipped to dry_run unexpectedly").
+     */
+    public function health(): JsonResponse
+    {
+        try {
+            $tradeCount = Trade::count();
+            $openCount = Position::open()->count();
+            $latestSnap = BalanceSnapshot::latest('created_at')->first();
+            $latestOpen = Position::open()->latest('updated_at')->first();
+        } catch (\Throwable $e) {
+            return response()->json([
+                'status' => 'error',
+                'db' => 'error',
+                'error' => $e->getMessage(),
+            ], 503);
+        }
+
+        $now = now();
+        // abs() because Carbon v3's diffInX returns signed values (negative
+        // when the argument is in the past). We always want a positive "ago".
+        $snapAgeMin = $latestSnap ? (int) abs($now->diffInMinutes($latestSnap->created_at)) : null;
+        $posAgeSec = $latestOpen ? (int) abs($now->diffInSeconds($latestOpen->updated_at)) : null;
+
+        // Bot loop should update open positions on every checkPosition tick
+        // (~1s via ws-prices, fallback 30s via BotRun). If there are no open
+        // positions the loop is still running but doesn't write — skip check.
+        $botFresh = $openCount === 0 || ($posAgeSec !== null && $posAgeSec < 90);
+
+        // Scheduler writes balance_snapshots every 5 min. A first install may
+        // have none yet; treat null as fresh to avoid alerting on fresh setup.
+        $schedulerFresh = $snapAgeMin === null || $snapAgeMin < 10;
+
+        $statusOk = $botFresh && $schedulerFresh;
+
+        return response()->json([
+            'status' => $statusOk ? 'ok' : 'degraded',
+            'mode' => Settings::get('dry_run') ? 'dry_run' : 'live',
+            'db' => 'ok',
+            'bot_fresh' => $botFresh,
+            'bot_last_position_update_seconds_ago' => $posAgeSec,
+            'scheduler_fresh' => $schedulerFresh,
+            'scheduler_last_snapshot_minutes_ago' => $snapAgeMin,
+            'open_positions' => $openCount,
+            'trade_count' => $tradeCount,
+            'timestamp' => $now->toIso8601String(),
+        ], $statusOk ? 200 : 503);
+    }
+
     public function data(ExchangeInterface $exchange): JsonResponse
     {
         // All trade-history aggregates filter on the current dry_run mode so

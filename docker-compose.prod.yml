@@ -1,0 +1,25 @@
+# Production overlay for cloud deployment (Lightsail, Vultr, etc.).
+#
+# Apply with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Or set COMPOSE_FILE in your shell so plain `docker compose ...` works:
+#   export COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
+#
+# Differences from the base config:
+#  1. Dashboard (port 8090) bound to 127.0.0.1 only — never public.
+#     Access via Tailscale or `ssh -L 8090:localhost:8090 user@host`.
+#  2. ws-worker / ws-user-data drop the hardcoded `extra_hosts` ISP-DNS
+#     workaround — cloud DNS resolves fstream.binance.com correctly and
+#     the hardcoded IP could go stale if Binance changes load balancers.
+
+services:
+  app:
+    ports: !override
+      - "127.0.0.1:8090:8090"
+
+  ws-worker:
+    extra_hosts: !override []
+
+  ws-user-data:
+    extra_hosts: !override []
