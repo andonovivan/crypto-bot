@@ -137,7 +137,13 @@ class TradingEngine
 
             $quantity = $exchange->calculateQuantity($signal->symbol, $positionSizeUsdt, $price);
             if ($quantity <= 0) {
-                Log::warning('Calculated quantity is zero', ['symbol' => $signal->symbol]);
+                $msg = sprintf(
+                    'Calculated quantity is zero (notional=$%.2f, price=%g) — below symbol LOT_SIZE/MIN_NOTIONAL',
+                    $positionSizeUsdt,
+                    $price
+                );
+                Log::warning($msg, ['symbol' => $signal->symbol]);
+                $this->recordFailedEntry($signal, $leverage, $positionSizeUsdt, $price, $isDryRun, $msg);
                 return null;
             }
 
@@ -332,7 +338,13 @@ class TradingEngine
 
             $quantity = $exchange->calculateQuantity($signal->symbol, $positionSizeUsdt, $price);
             if ($quantity <= 0) {
-                Log::warning('Calculated quantity is zero', ['symbol' => $signal->symbol]);
+                $msg = sprintf(
+                    'Calculated quantity is zero (notional=$%.2f, price=%g) — below symbol LOT_SIZE/MIN_NOTIONAL',
+                    $positionSizeUsdt,
+                    $price
+                );
+                Log::warning($msg, ['symbol' => $signal->symbol]);
+                $this->recordFailedEntry($signal, $leverage, $positionSizeUsdt, $price, $isDryRun, $msg);
                 return null;
             }
 
