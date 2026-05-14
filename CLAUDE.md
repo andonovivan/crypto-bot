@@ -520,6 +520,123 @@ Component-driven Blade + Tailwind v4 + Alpine.js + ECharts (code-split). Sidebar
 
 **Visual conventions**: Dark Tailwind palette (`zinc-950` surface, `zinc-900` elevated, sky-400 accent, emerald/rose for P&L, amber for warnings); Inter UI font; tabular-numbers monospace for all P&L/price columns; subscript-zero notation for micro-prices (`$0.0₅1234`); side/leverage/DRY-RUN badges on every position row; toast notifications via Alpine bus; cursor-pointer restored on `button:not(:disabled)` (Tailwind v4 reset removes the default).
 
+## Production Deployment
+
+The bot runs **on a Vultr Tokyo VPS** (2 GB RAM / 1 vCPU / 50 GB NVMe Intel High Performance, $12/mo). The laptop is the development/backtest environment; the server is the live (dry-run for now) trading environment. **They have separate databases** — independent Docker volumes, independent trade histories, independent settings overrides. When someone asks "how is the bot performing?", default to checking the **server** unless they specifically mean the laptop.
+
+### What runs where
+
+| Concern                       | Laptop                                | Server                                |
+|-------------------------------|---------------------------------------|---------------------------------------|
+| Live (or dry-run live) trading | Optional, usually off                 | **Yes — the canonical environment**   |
+| Backtests (`bot:backtest`)    | **Yes — `kline_history` is here**     | Never (intentionally — would compete with live trades, no kline data) |
+| Code development              | **Yes**                               | Read-only — `deploy.sh` pushes here  |
+| Dashboard access              | `localhost:8090` when up              | `http://<tailscale-ip>:8090` via Tailscale |
+| Database contents             | Local trade history + ~10M kline rows | Live trade history only, no klines    |
+| `MARIADB_BUFFER_POOL_SIZE`    | 2 GiB (default, for backtests)        | 256 MiB (set in server's `.env`)     |
+
+### Files that drive deployment
+
+- [`deploy.sh`](deploy.sh) — laptop-side script: rsync source → server, rebuild images, run migrations, restart services with `docker-compose.prod.yml` overlay, verify `/api/health` returns 200. Reads config from `.deploy.env` (gitignored).
+- [`docker-compose.prod.yml`](docker-compose.prod.yml) — production overlay applied on top of [`docker-compose.yml`](docker-compose.yml). Clears the hardcoded `extra_hosts` ISP-DNS workaround (cloud DNS resolves Binance cleanly). Dashboard binds to `0.0.0.0:8090` from the base config — **Vultr's firewall (only port 22 open inbound) is the security boundary**, not the bind address.
+- [`.env.example`](.env.example) — production-defaulted template (`APP_ENV=production`, `APP_DEBUG=false`, `MARIADB_BUFFER_POOL_SIZE=268435456`, `DRY_RUN=true`, blank Binance API keys). Copied to `.env` per machine.
+- `.deploy.env` on the laptop — gitignored. Holds `DEPLOY_HOST=root@<vultr-ip>`, `DEPLOY_KEY=~/.ssh/crypto-bot-vultr`, `DEPLOY_PATH=/root/crypto-bot`.
+
+### Standard workflow — pushing a code change
+
+From the laptop, in the repo:
+
+```bash
+./deploy.sh
+```
+
+This does the full cycle: rsync → rebuild → migrate → restart → health check. ~20-60 seconds depending on what changed. No need to SSH for routine code pushes.
+
+If anything fails, the script tells you which step and gives the diagnostic command (usually `ssh ... docker compose logs --tail=50 app bot`).
+
+### Manual server operations
+
+Every `docker compose` invocation on the server must specify **both** compose files. Convenient pattern:
+
+```bash
+# On the server (root@<vultr-ip>:/root/crypto-bot)
+COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
+
+"${COMPOSE[@]}" ps                          # status
+"${COMPOSE[@]}" logs -f bot                 # tail bot logs
+"${COMPOSE[@]}" restart bot ws-worker       # restart a subset
+"${COMPOSE[@]}" exec app php artisan tinker # one-shot tinker
+"${COMPOSE[@]}" down                        # stop everything (volumes preserved)
+"${COMPOSE[@]}" up -d                       # start everything
+```
+
+Or `export COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml` in `~/.bashrc` to drop the `-f` flags entirely.
+
+### Health endpoint
+
+`GET /api/health` ([DashboardController::health](app/Http/Controllers/DashboardController.php)) — returns JSON with `status`, `mode` (`dry_run`/`live`), `db`, `bot_fresh` (open positions updated within 90 s), `scheduler_fresh` (balance snapshot within 10 min), open-position count, trade count. Returns **503** when degraded (DB error, stale bot loop, stale scheduler). Suitable for Uptimerobot / Healthchecks.io polling once the server has external monitoring.
+
+Default reachable from any Tailscale device: `curl http://<tailscale-ip>:8090/api/health`.
+
+### Going live with real money
+
+When ready to flip from dry-run to live trading:
+
+1. **Binance API Management** → create a new API key
+   - Name it for the server (e.g. `vultr-tokyo-bot`)
+   - **Enable Futures Trading**
+   - **NEVER enable Withdrawals**
+   - **IP access restriction**: paste the server's static IP (Vultr's public IP, not the Tailscale one)
+2. SSH to the server, edit `/root/crypto-bot/.env`:
+   ```
+   BINANCE_API_KEY=...
+   BINANCE_API_SECRET=...
+   ```
+3. **Close any open dry-run positions** before flipping (per the `dry_run` toggle caveat in Known Issues)
+4. Flip `DRY_RUN=false` in `.env`, or via the dashboard Settings page
+5. Restart workers so they pick up the new keys:
+   ```bash
+   "${COMPOSE[@]}" restart bot ws-worker ws-user-data
+   ```
+6. Watch the first few trades closely on the dashboard
+
+### Performance-checking the server
+
+The user typically wants this in monitoring conversations. From any Tailscale-connected device:
+
+```bash
+# Quick health snapshot
+curl http://<tailscale-ip>:8090/api/health
+
+# Full performance dump via SSH
+ssh root@<vultr-ip> "cd /root/crypto-bot && docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T app php artisan tinker --execute='
+use App\Models\Trade; use App\Models\Position; use App\Services\Settings;
+\$start = (float) Settings::get(\"starting_balance\");
+\$realized = (float) Trade::sum(\"pnl\");
+\$open_pnl = (float) Position::open()->sum(\"unrealized_pnl\");
+\$wins = Trade::where(\"pnl\",\">\",0)->count();
+\$losses = Trade::where(\"pnl\",\"<\",0)->count();
+\$total = Trade::count();
+\$gw = Trade::where(\"pnl\",\">\",0)->sum(\"pnl\");
+\$gl = abs(Trade::where(\"pnl\",\"<\",0)->sum(\"pnl\"));
+echo \"Trades=\$total WR=\".round(100*\$wins/max(1,\$total),1).\"% PF=\".round(\$gw/max(0.01,\$gl),2).\" Realized=\\\$\".round(\$realized,2).\" Equity=\\\$\".round(\$start+\$realized+\$open_pnl,2).\"\n\";
+'"
+```
+
+When the user asks "how is the bot doing?", lead with **server numbers** (which represent the real production environment with realistic friction), and note when laptop data is being referenced separately.
+
+### Deployment gotchas
+
+- **DB password is set on first MariaDB init** — `MARIADB_PASSWORD` (now read from `${DB_PASSWORD}` via env-var substitution in `docker-compose.yml`) only applies when the `dbdata` volume is created. Changing `.env`'s `DB_PASSWORD` later does **not** update the existing DB user. To rotate: either `ALTER USER 'crypto'@'%' IDENTIFIED BY '<new>';` via SQL, or `docker volume rm crypto-bot_dbdata` and let it reinitialize (destroys all data).
+- **Production DB is intentionally weak (`secret` by default)** — MariaDB's port 3306 is not mapped to the host; only the Docker network can reach it. The security boundary is the cloud firewall (SSH 22 only) + the lack of port exposure, not the DB password.
+- **Server has no `kline_history`** — backtests can't run on the server, by design. If you need to backtest, do it on the laptop (the laptop's `dbdata` volume has the kline rows). The server's `bot:backtest` invocation would either fail or produce empty results.
+- **Don't run `docker compose down -v` on the server** — the `-v` flag deletes the dbdata volume, wiping all production trade history. Plain `down` (no `-v`) is safe; volumes persist.
+- **Don't run `bot` on the laptop while the server is live** — both would compete for the same Binance API rate-limit budget if API keys are shared (they shouldn't be, post-live), and the laptop's dry-run trades would diverge from the server's. Default state: laptop containers are `down` once the server is the production environment.
+- **Dashboard binding is `0.0.0.0:8090` in prod** — accessible via Tailscale (100.x.x.x) and also via the public IP if the cloud firewall slips. Always verify the firewall blocks port 8090 from public internet after any cloud-side reconfiguration: `curl --max-time 5 http://<public-ip>:8090/api/health` from a non-Tailscale network should hang/fail.
+- **Tailscale requires both ends connected** — the laptop must be signed into the same Tailscale account as the server, and the Tailscale app must show "Connected." `tailscale status` on either end should list both devices. A common failure mode after a laptop reboot is Tailscale silently disconnecting; reconnect via the menu bar app.
+- **First-time setup requires bootstrapping `.env` on the server before `deploy.sh` works** — the script's pre-flight check refuses to run if `<DEPLOY_PATH>/.env` doesn't exist. The bootstrap sequence is: `mkdir -p /root/crypto-bot`, `scp .env.example` to the server as `.env`, edit values, generate `APP_KEY` locally with `php artisan key:generate --show`, paste into server's `.env`. Then `./deploy.sh` works.
+- **The `extra_hosts: fstream.binance.com:18.178.11.87`** in `docker-compose.yml` is the laptop's ISP-DNS-hijacking workaround. `docker-compose.prod.yml` clears it via `!override []`. If you ever copy `docker-compose.yml` to a new environment, audit whether `extra_hosts` is needed locally.
+
 ## Known Issues & Gotchas
 
 - **CSRF**: POST routes under `/api/*` are excluded from CSRF verification in `bootstrap/app.php`

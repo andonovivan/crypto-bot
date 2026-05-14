@@ -7,17 +7,16 @@
 #   export COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
 #
 # Differences from the base config:
-#  1. Dashboard (port 8090) bound to 127.0.0.1 only — never public.
-#     Access via Tailscale or `ssh -L 8090:localhost:8090 user@host`.
+#  1. Dashboard (port 8090) inherits the base 0.0.0.0:8090 binding so it's
+#     reachable via Tailscale (100.x.x.x) and loopback. **Public access is
+#     blocked at the cloud firewall** (Vultr Firewall Group, Lightsail Networking
+#     tab, etc.) — only SSH (22) should be open from the internet. Don't
+#     deploy without that firewall in place.
 #  2. ws-worker / ws-user-data drop the hardcoded `extra_hosts` ISP-DNS
 #     workaround — cloud DNS resolves fstream.binance.com correctly and
 #     the hardcoded IP could go stale if Binance changes load balancers.
 
 services:
-  app:
-    ports: !override
-      - "127.0.0.1:8090:8090"
-
   ws-worker:
     extra_hosts: !override []
 
