@@ -3,10 +3,15 @@ services:
     image: mariadb:11
     restart: unless-stopped
     environment:
-      MARIADB_ROOT_PASSWORD: secret
-      MARIADB_DATABASE: crypto_bot
-      MARIADB_USER: crypto
-      MARIADB_PASSWORD: secret
+      # Passwords come from .env so production can use a strong value without
+      # editing docker-compose. Default `secret` keeps existing local setups
+      # working unchanged. NOTE: MariaDB only reads these on FIRST init of the
+      # dbdata volume — changing them later requires either ALTER USER via SQL
+      # or `docker volume rm crypto-bot_dbdata` to reset.
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-secret}
+      MARIADB_DATABASE: ${DB_DATABASE:-crypto_bot}
+      MARIADB_USER: ${DB_USERNAME:-crypto}
+      MARIADB_PASSWORD: ${DB_PASSWORD:-secret}
     # InnoDB buffer pool size in bytes. Defaults to 2 GiB so local
     # backtests don't blow the lock table (error 1206) when cursor()
     # streams ~50M kline_history rows. On a production host that doesn't
