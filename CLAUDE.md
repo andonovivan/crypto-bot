@@ -639,6 +639,92 @@ When the user asks "how is the bot doing?", lead with **server numbers** (which 
 - **`DryRunExchange::getMaxLeverage()` requires real Binance API keys** — it delegates to `BinanceExchange::getMaxLeverage()` which calls the signed `/fapi/v1/leverageBracket` endpoint. `TradingEngine::open()` calls this at line ~103 of every entry attempt to clamp leverage to the symbol's tier-1 cap. Without valid keys, the call throws -2014 and `open()` bails before writing any DB row — the bot looks like it's scanning normally (`candidates=N analyzed=N`) but `opened=0` always. A **read-only** key is sufficient (Reading permission only; no Futures Trading needed for the leverage-bracket call) and keeps dry-run safe.
 - **The `extra_hosts: fstream.binance.com:18.178.11.87`** in `docker-compose.yml` is the laptop's ISP-DNS-hijacking workaround. `docker-compose.prod.yml` clears it via `!override []`. If you ever copy `docker-compose.yml` to a new environment, audit whether `extra_hosts` is needed locally.
 
+## Performance analysis on demand
+
+When the user asks anything in the family of *"how is the bot doing?"*, *"performance check"*, *"analyze server logs"*, *"what has it done today/this week?"*, *"is the strategy working?"* — the standard workflow is to run [`scripts/perf-snapshot.sh`](scripts/perf-snapshot.sh) and synthesize the resulting bundle.
+
+The script SSHs to the production server (creds via `.deploy.env`, same as `deploy.sh`), captures a self-contained snapshot into `storage/perf-snapshots/<UTC-ts>/`, **and by default truncates the server-side `laravel.log` after a successful capture** so each snapshot represents the natural window since the previous check. Zero-truncate is used (not `rm`), so the file handles inside the running app/bot/scheduler/ws-worker/ws-user-data containers stay valid and they keep writing without a restart.
+
+### Running it
+
+```bash
+./scripts/perf-snapshot.sh                 # default — full log + JSON + market context; truncates server log
+./scripts/perf-snapshot.sh --lines=500     # last 500 log lines only; implies --no-clear
+./scripts/perf-snapshot.sh --no-clear      # full capture but don't truncate (useful for re-runs)
+./scripts/perf-snapshot.sh --quick         # JSON + market + process state only; no log; no truncate
+./scripts/perf-snapshot.sh --keep=10       # also rotate local snapshots, keep last 10 (default 30)
+```
+
+The last line of stdout is the snapshot directory path. Each snapshot contains:
+
+| File | Source | What it holds |
+|------|--------|---------------|
+| `laravel.log` | server `cat $DEPLOY_PATH/storage/logs/laravel.log` | Application `Log::*()` calls (entries, closes, warnings, errors). Truncated post-capture by default. |
+| `containers-stdout.log` | server `docker compose logs --tail=2000 --timestamps` | Container stdout from all 5 services. **This is where `Cycle: total candidates=…` lines and bot entry-prints live — not in laravel.log.** Docker manages its own retention; this file is NOT truncated. |
+| `health.json` | `/api/health` | Liveness, mode, bot/scheduler freshness, open positions count |
+| `stats.json` | `/api/stats` | Equity, drawdown, profit factor, rolling WR, by-strategy breakdown |
+| `data.json` | `/api/data` | Current open positions with per-position unrealized P&L + summary |
+| `aggregates.json` | `/api/trades/aggregates` | Rollups: by-symbol P&L, close-reason mix, trades per day (30d) |
+| `settings.json` | `/api/settings` | Every runtime-configurable setting and its current value |
+| `trades.json` | `/api/trades?per_page=200…` | Last 200 closed trades with entry/exit/P&L/reason/strategy |
+| `balance-24h.json`, `balance-7d.json` | `/api/balance-history?range=…` | Equity-curve samples for the chart range |
+| `scanner.json` | `/api/scanner` | What the bot's scanner sees right now — candidates per strategy, gates passed/blocked |
+| `market-tickers.json` | Binance `/fapi/v1/ticker/24hr` | All ~500 USDT perpetuals' 24h stats (priceChangePercent, quoteVolume, etc.) |
+| `market-btc-1h.json`, `market-btc-4h.json` | Binance `/fapi/v1/klines?…BTCUSDT` | 3-day 1h and 1-week 4h BTC kline trail for regime context |
+| `market-funding.json` | Binance `/fapi/v1/premiumIndex` | Current funding rate per symbol (sentiment proxy) |
+| `bot-status.txt` | `artisan bot:status` on server | Human-readable status overview |
+| `docker-ps.txt` | `docker compose ps` on server | Container health (Up / Restarting / Exited) |
+| `meta.json` | laptop-side | Capture timestamp, git SHA/branch, flags, log byte count, whether truncate fired |
+
+### Analyzing it
+
+Read each file in the snapshot dir, then produce a structured response in this shape:
+
+1. **TL;DR** (2-3 sentences): mode (dry-run / live), P&L direction, market regime label, anything alarming.
+2. **Headline numbers**: equity, today P&L, win rate, profit factor, open positions, current drawdown.
+3. **By-strategy comparison**: `short_scalp` vs `long_continuation` — trade count, WR, R:R, net P&L over the window.
+4. **Market context**: BTC direction & magnitude over the last 24h / 7d (from `market-btc-*.json`), breadth from `market-tickers.json` (count of perps with priceChangePercent in buckets: >0, >5, >10, >25, >50 and mirror for dumps), median 24h move, median funding rate from `market-funding.json` (crowded longs vs shorts), top 3 pumpers and dumpers.
+5. **Strategy-vs-market fit**: explicit reasoning from "How market context maps to strategy" below. Did the bot get the expected number of candidates given the breadth? Are the close-reason mixes (`aggregates.json`) consistent with the regime?
+6. **Interesting findings**: scan `laravel.log` for the patterns in the checklist below.
+7. **Suggested tweaks** (only when a finding warrants it): name the specific `Settings::KEYS` entry and the proposed change, citing evidence from the snapshot AND market context. Label each tweak as *"tune for the current regime"* (revert when regime shifts) vs *"permanent improvement"*.
+
+### Log-scan checklist
+
+In **`laravel.log`** (application `Log::*()` calls):
+
+- `[ERROR]` / `[WARNING]` clusters — group by message; flag any repeated pattern.
+- `Position closed` (TradingEngine `Log::info('Position closed', …)`) — collect symbol, P&L, reason; spot patterns (one symbol dominating losses, a stretch of StopLoss-only exits).
+- `SHORT opened` / `LONG opened` — entry events; cross-reference with the close events to compute hold times.
+- `user-data:` lines — confirm the ws-user-data stream isn't reconnect-looping.
+- `UNPROTECTED` — should never appear; escalate hard if it does.
+- `Circuit breaker active` trip events.
+- Repeated `recordFailedEntry` traces for the same `(symbol, strategy_key)` — usually `MIN_NOTIONAL` or quantity-zero rejections worth flagging.
+
+In **`containers-stdout.log`** (Docker stdout from all 5 services):
+
+- `Cycle: total candidates=X analyzed=Y opened=Z openPositions=N` lines — note opens-per-hour, persistent zeros. Cross-check against breadth: if 0 candidates while breadth shows 30 coins pumping >25%, a gate is misconfigured; if 0 candidates while breadth shows 2 coins pumping, the market is just quiet.
+- Per-strategy lines `  strategy=short_scalp candidates=N analyzed=M opened=K` — surfaces per-strategy contribution to the totals.
+- `[SYMBOL] SHORT ENTRY @ price (24h: …, reason: …, strategy: …)` and the LONG mirror — bot's stdout summary of every entry.
+- `ws-worker` / `ws-user-data` reconnect noise — repeated reconnect chains within minutes flag a network or auth issue.
+- `bot:snapshot-balance` lines from the scheduler — every 5 min, confirms scheduler health.
+
+### How market context maps to strategy
+
+The reasoning model for interpreting `market-*.json`:
+
+- **Breadth high & pumpy** (many >25% movers, BTC up): `short_scalp`'s mean-reversion edge has plenty of setups but avg win may shrink because pumpers keep running. Expect higher trade count, lower per-trade R:R than the backtest baseline (~0.85 R:R).
+- **Breadth high & dumpy** (many <-10% movers): `short_scalp`'s dump path picks up candidates; `long_continuation` is starved.
+- **Breadth low, BTC sideways**: both strategies idle. Low candidate count is *expected*, not a bug — don't conclude "the gate is broken" without checking breadth first.
+- **BTC crashing hard** (>-3% 24h): `long_continuation` entries here often fail because continuation patterns break down in a falling tide. If long entries are open and BTC is dumping, flag as regime-misfit rather than strategy failure.
+- **High positive median funding** (>0.05%): longs are crowded. `long_continuation` entries face higher cascade-liquidation risk; confirm `funding_max_rate` (default 0.001 = 0.10%) is actually gating, not just passing them through.
+- **Negative median funding**: shorts are crowded. `short_scalp` entries here may bleed funding — the strategy's `>= -0.05%` guard rejects only the worst.
+
+### When NOT to use this
+
+- Backtest-only questions — those run on the laptop and produce their own output via [`bot:backtest`](app/Console/Commands/BotBacktest.php).
+- Strategy-design questions that don't need fresh server data (e.g., "should we add a new filter?" — that's a backtest task).
+- Questions about laptop dry-run trades — those are different DB rows; the snapshot pulls from the server only.
+
 ## Known Issues & Gotchas
 
 - **CSRF**: POST routes under `/api/*` are excluded from CSRF verification in `bootstrap/app.php`
