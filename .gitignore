@@ -20,6 +20,7 @@
 /storage/*.key
 /storage/pail
 /storage/perf-snapshots
+/storage/backtest-runs
 /vendor
 Homestead.json
 Homestead.yaml

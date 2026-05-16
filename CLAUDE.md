@@ -4,7 +4,7 @@
 
 Laravel 13 (PHP 8.4) **multi-strategy trading bot** for Binance Futures, built around a plug-in strategy architecture. Two strategies ship today, both registered in `config/strategies.php`:
 
-- **`short_scalp`** (default ON) — shorts pump/dump candidates in the +25% to +50% / ≤-10% 24h band when the 15m chart confirms a downtrend. The historical workhorse; T8 settings (trailing TP arm 1.0% / trail 0.5%, fixed 2.5% SL, 8h hold) backtested ~65-70% win rate at R:R 0.85.
+- **`short_scalp`** (default ON) — shorts pump/dump candidates in the +25% to +50% / ≤-10% 24h band. The historical workhorse. Current production config (May 2026): trailing TP arm 1.5% / trail 1.0%, fixed 2.5% SL, 8h hold, strict 15m downtrend gate **disabled** (wide-entry mode), drawdown circuit breaker enabled at 20% threshold / 4h cooldown. Cross-window backtest over Sept-Oct 2025, Feb-Apr 2026, and May 1-15 2026 shows breaker at 20%/4h adds ~+23% net P&L vs no breaker (validated 3 regimes); R:R lands around 0.74-0.85 in backtest with live realizing ~0.63-0.70 due to the documented early-trail-fire gap.
 - **`long_continuation`** — longs the +50–100% 24h pump band that `short_scalp` explicitly avoids (research showed pumps ≥50% have a continuation pattern, median +12.6% further over 24h). Currently enabled in dry-run after L1 baseline showed +$1.68/trade edge on March 2026 (29 trades, WR 58.6%, R:R 1.81). The 2-month dual-strategy backtest (Mar-Apr 2026, both strategies on, fixed-sizing $100) confirmed the strategies don't interfere: short_scalp + long_continuation summed to +$2,245 total (short ~78%, long ~22% of P&L); long_continuation kept R:R ≈ 2.34 vs short's 0.84. **Still awaiting full L2-L7 backtest matrix + Sep'25→Apr'26 walk-forward before live deployment** — disable via `Settings::set('strategy.long_continuation.enabled', false)` if regime-shift detector trips.
 
 Both strategies coexist behind one global `max_positions` cap with optional per-strategy sub-caps, share the same wallet, and run in lockstep on the same scanner gate (one scan per closed 1m candle). Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
@@ -88,7 +88,7 @@ All strategies implement [`StrategyInterface`](app/Services/Strategy/StrategyInt
 **Entry criteria (all must pass):**
 1. **24h mover**: `pump_threshold_pct <= priceChangePct <= pump_max_pct` (default +25% to +50%, `pump_max_pct=0` disables the upper cap) OR `priceChangePct <= -dump_threshold_pct` (default -10%). The pump upper cap exists because research showed pumps ≥50% have a continuation pattern (median 24h close +12.6%), not the mean-reversion edge that mild pumps offer.
 2. **Liquidity window**: `min_volume_usdt <= 24h quote volume <= max_volume_usdt` (defaults 10M / 25M USDT, `max_volume_usdt=0` disables the upper cap). Mid-volume coins mean-revert more reliably than super-thin (small float keeps running) or super-thick (high-liquidity continuation moves) ones.
-3. **15m downtrend (Strict rule)** — only when `strict_downtrend_enabled=true` (default true). When false, this entire block is skipped and only the funding-rate guard below applies. Dropping the strict gate is the wide-SL trailing strategy's entry mode (research showed the strict confirmation delays entry past the easy reversion).
+3. **15m downtrend (Strict rule)** — only when `strict_downtrend_enabled=true` (default true). When false, this entire block is skipped and only the funding-rate guard below applies. Dropping the strict gate is the wide-entry trailing-TP mode (research showed the strict confirmation delays entry past the easy reversion). **Production currently runs `strict_downtrend_enabled=false`.**
    - EMA fast (default 9) < EMA slow (default 21) on BOTH current and prior 15m candle
    - Current price (close of last closed candle) < EMA fast
    - **Last N CLOSED 15m candles are red** (close < open) — where N = `min_red_candles` (default 2). Checks `candles[last-1]` and `candles[last-2]`, not the in-progress candle. Filters dead-cat-bounce setups.
@@ -151,7 +151,7 @@ The complement to short-scalp: longs the +50–100% 24h pump band that short_sca
 
 ### Risk Controls
 
-**Drawdown circuit breaker** (`circuit_breaker_enabled`, default `false`):
+**Drawdown circuit breaker** (`circuit_breaker_enabled`, default `false`; **production override: `true` with 20% threshold / 4h cooldown** as of 2026-05-16 after cross-window backtest validation):
 
 Evaluated at every `TradingEngine::open()` call (both SHORT and LONG paths) — gates entries only, already-open positions continue to be managed normally.
 
@@ -290,7 +290,7 @@ Both scanners share:
 | `failed_entry_cooldown_minutes` | 0 | Post-failure cooldown — `0` disables |
 | `max_candle_body_pct` | 3.0 | Reject if last 15m candle body exceeds this |
 | `min_red_candles` | 2 | Minimum consecutive closed 15m red candles required |
-| `strict_downtrend_enabled` | true | When false, skip the entire 15m confirmation block; only funding-rate guard remains. Used by the wide-SL trailing strategy (T8). |
+| `strict_downtrend_enabled` | true | When false, skip the entire 15m confirmation block; only funding-rate guard remains. **Production override: false** (wide-entry trailing-TP mode). |
 | `use_post_only_entry` | true | LIMIT maker entry first, MARKET fallback |
 | `limit_order_timeout_seconds` | 3 | Poll window for post-only fill before MARKET fallback |
 | `htf_filter_enabled` | true | Require 1h close below 1h EMA |
@@ -335,9 +335,9 @@ Both scanners share:
 ### Risk Controls (shared)
 | Key | Default | Description |
 |-----|---------|-------------|
-| `circuit_breaker_enabled` | false | Gate new entries when realized+unrealized drawdown breaches the threshold |
-| `circuit_breaker_drawdown_pct` | 25.0 | Peak-to-trough drawdown % that trips the breaker |
-| `circuit_breaker_cooldown_hours` | 24 | How long to block new entries after a trip |
+| `circuit_breaker_enabled` | false | Gate new entries when realized+unrealized drawdown breaches the threshold. **Production override: true.** |
+| `circuit_breaker_drawdown_pct` | 25.0 | Peak-to-trough drawdown % that trips the breaker. **Production override: 20.** |
+| `circuit_breaker_cooldown_hours` | 24 | How long to block new entries after a trip. **Production override: 4.** |
 | `circuit_breaker_window_hours` | 24 | Legacy v1 setting — present in `Settings::KEYS` for backwards compat, not read by the current detector |
 
 ## API Endpoints
