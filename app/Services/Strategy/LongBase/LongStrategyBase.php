@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Services\Strategy\LongContinuation;
+namespace App\Services\Strategy\LongBase;
 
 use App\Services\Strategy\AbstractStrategy;
 use App\Services\Strategy\Analysis;
@@ -8,32 +8,30 @@ use App\Services\Strategy\Candidate;
 use App\Services\Strategy\Signal;
 
 /**
- * Long-continuation strategy. Rides the +50–100% 24h pump band that the
- * short strategy explicitly avoids (research showed pumps ≥50% have a
- * continuation pattern with median 24h close +12.6% further). Uses the
- * standard pump_continuation reason on Signal so the engine logs a clear
- * attribution trail.
+ * Transient shared adapter base for the 20 long-strategy variants. Wraps a
+ * variant-specific LongScannerBase implementation behind StrategyInterface.
+ *
+ * Phase 5 flatten plan: when the winning variant is promoted, inline this
+ * adapter's methods into the winner's Strategy class and remove this base.
+ *
+ * Each concrete variant subclass declares:
+ *   • the scanner type via the constructor (it gets DI'd)
+ *   • key(): the registry/Settings/cache namespace
+ *   • label(): human-readable name for the dashboard
  */
-class LongContinuationStrategy extends AbstractStrategy
+abstract class LongStrategyBase extends AbstractStrategy
 {
-    public function __construct(private readonly LongContinuationScanner $scanner) {}
+    public function __construct(protected readonly LongScannerBase $scanner) {}
 
-    public function key(): string
-    {
-        return 'long_continuation';
-    }
+    abstract public function key(): string;
 
-    public function label(): string
-    {
-        return 'Long-Continuation (rides +50–100% 24h pumps)';
-    }
+    abstract public function label(): string;
 
     public function side(): string
     {
         return 'LONG';
     }
 
-    /** @return Candidate[] */
     public function getCandidates(): array
     {
         return $this->scanner->getCandidates();

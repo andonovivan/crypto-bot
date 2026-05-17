@@ -6,24 +6,11 @@
     <x-kpi-tile label="Open Exposure" value-id="kpi-exposure" sub-id="kpi-exposure-sub" />
 </div>
 
-<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-    <x-card title="Circuit Breaker">
-        <div class="space-y-3">
-            <div class="flex items-center justify-between">
-                <span class="text-xs text-[var(--color-text-muted)]">State</span>
-                <span id="risk-cb-state" class="text-sm">—</span>
-            </div>
-            <div class="flex items-center justify-between">
-                <span class="text-xs text-[var(--color-text-muted)]">Peak equity</span>
-                <span id="risk-cb-peak" class="text-sm font-mono">—</span>
-            </div>
-            <div class="flex items-center justify-between">
-                <span class="text-xs text-[var(--color-text-muted)]">Cooldown</span>
-                <span id="risk-cb-cooldown" class="text-sm font-mono">—</span>
-            </div>
-        </div>
-    </x-card>
+<div id="risk-cb-container" class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+    <div class="text-xs text-[var(--color-text-muted)] p-4">Loading circuit breaker state…</div>
+</div>
 
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
     <x-card title="Recent Performance">
         <div class="space-y-3">
             <div class="flex items-center justify-between">

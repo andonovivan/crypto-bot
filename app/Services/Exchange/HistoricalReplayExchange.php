@@ -25,6 +25,12 @@ class HistoricalReplayExchange implements ExchangeInterface
     /** @var array<string, array<int, array{o: float, h: float, l: float, c: float, v: float, qv: float}>> */
     private array $bars1h = [];
 
+    /** 4h bars — only loaded if any kline_history row with interval=4h exists.
+     * Used by cross-symbol regime gates (e.g. long_btc_aligned which reads
+     * BTCUSDT 4h EMA). Memory cost is tiny since 4h has 6 bars/day.
+     * @var array<string, array<int, array{o: float, h: float, l: float, c: float, v: float, qv: float}>> */
+    private array $bars4h = [];
+
     /** Slim 1m storage. Full bar fields (o/h/l/v) aren't needed — only close
      *  and quote_volume drive the synthesized ticker. Storing closes + a
      *  pre-summed cumulative-qv array lets getFuturesTickers1m do an O(1)
@@ -43,6 +49,9 @@ class HistoricalReplayExchange implements ExchangeInterface
 
     /** @var array<string, int[]> */
     private array $openTimes1h = [];
+
+    /** @var array<string, int[]> */
+    private array $openTimes4h = [];
 
     /** @var array<string, int[]> */
     private array $openTimes1m = [];
@@ -200,6 +209,32 @@ class HistoricalReplayExchange implements ExchangeInterface
             $this->openTimes1h[$s][] = (int) $row->open_time;
         }
 
+        // 4h lead-in: 50 × 4h = 200h ≈ 8 days. Just enough for an EMA(21) on
+        // 4h to be warm at the first replay tick. Only loads symbols whose
+        // 4h data has been downloaded (e.g. BTCUSDT for regime gates) —
+        // missing symbols result in getKlines(..., '4h', ...) returning [].
+        $leadIn4h = 50 * 4 * 60 * 60 * 1000;
+        $q4h = DB::table('kline_history')
+            ->select(['symbol', 'open_time', 'open', 'high', 'low', 'close', 'volume', 'quote_volume'])
+            ->where('interval', '4h')
+            ->whereBetween('open_time', [$this->fromMs - $leadIn4h, $this->toMs]);
+        if ($symbolFilter) {
+            $q4h->whereIn('symbol', $symbolFilter);
+        }
+
+        foreach ($q4h->orderBy('symbol')->orderBy('open_time')->cursor() as $row) {
+            $s = $row->symbol;
+            $this->bars4h[$s][$row->open_time] = [
+                'o' => (float) $row->open,
+                'h' => (float) $row->high,
+                'l' => (float) $row->low,
+                'c' => (float) $row->close,
+                'v' => (float) $row->volume,
+                'qv' => (float) $row->quote_volume,
+            ];
+            $this->openTimes4h[$s][] = (int) $row->open_time;
+        }
+
         if ($this->use1m) {
             $q1m = DB::table('kline_history')
                 ->select(['symbol', 'open_time', 'close', 'quote_volume'])
@@ -235,6 +270,7 @@ class HistoricalReplayExchange implements ExchangeInterface
             '1m' => $this->openTimes1m[$symbol] ?? null,
             '15m' => $this->openTimes15m[$symbol] ?? null,
             '1h' => $this->openTimes1h[$symbol] ?? null,
+            '4h' => $this->openTimes4h[$symbol] ?? null,
             default => null,
         };
         if (! $times) {
@@ -401,10 +437,16 @@ class HistoricalReplayExchange implements ExchangeInterface
         if ($idx === null) {
             return [];
         }
-        $times = $interval === '15m'
-            ? $this->openTimes15m[$symbol]
-            : $this->openTimes1h[$symbol];
-        $bars = $interval === '15m' ? $this->bars15m[$symbol] : $this->bars1h[$symbol];
+        $times = match ($interval) {
+            '15m' => $this->openTimes15m[$symbol],
+            '4h'  => $this->openTimes4h[$symbol],
+            default => $this->openTimes1h[$symbol],
+        };
+        $bars = match ($interval) {
+            '15m' => $this->bars15m[$symbol],
+            '4h'  => $this->bars4h[$symbol],
+            default => $this->bars1h[$symbol],
+        };
 
         $start = max(0, $idx - $limit + 1);
         $out = [];

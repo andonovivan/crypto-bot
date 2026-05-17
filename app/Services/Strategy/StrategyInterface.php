@@ -15,7 +15,7 @@ namespace App\Services\Strategy;
  */
 interface StrategyInterface
 {
-    /** Stable machine-readable identifier (e.g. 'short_scalp', 'long_continuation'). */
+    /** Stable machine-readable identifier (e.g. 'short_scalp', 'long_bounce'). */
     public function key(): string;
 
     /** Human-readable label for the dashboard. */

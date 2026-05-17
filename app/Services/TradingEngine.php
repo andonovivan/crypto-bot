@@ -78,15 +78,14 @@ class TradingEngine
             return null;
         }
 
-        // Drawdown circuit breaker — halt new opens when realized P&L over a
-        // rolling window represents >= threshold % of the wallet at window
-        // start. Existing positions continue to be managed normally; only new
-        // entries are blocked until the cooldown elapses.
-        if ((bool) Settings::get('circuit_breaker_enabled')) {
-            $breaker = $this->checkCircuitBreaker();
+        // Per-strategy drawdown circuit breaker — halt new entries when this
+        // strategy's own P&L drawdown breaches its threshold. Existing positions
+        // continue to be managed normally; other strategies are unaffected.
+        if ((bool) Settings::get("strategy.{$signal->strategyKey}.circuit_breaker.enabled")) {
+            $breaker = $this->checkCircuitBreaker($signal->strategyKey);
             if ($breaker !== null) {
                 Log::info('Circuit breaker active — skipping entry', array_merge(
-                    ['symbol' => $signal->symbol],
+                    ['symbol' => $signal->symbol, 'strategy' => $signal->strategyKey],
                     $breaker,
                 ));
                 return null;
@@ -288,11 +287,11 @@ class TradingEngine
             return null;
         }
 
-        if ((bool) Settings::get('circuit_breaker_enabled')) {
-            $breaker = $this->checkCircuitBreaker();
+        if ((bool) Settings::get("strategy.{$signal->strategyKey}.circuit_breaker.enabled")) {
+            $breaker = $this->checkCircuitBreaker($signal->strategyKey);
             if ($breaker !== null) {
                 Log::info('Circuit breaker active — skipping entry', array_merge(
-                    ['symbol' => $signal->symbol],
+                    ['symbol' => $signal->symbol, 'strategy' => $signal->strategyKey],
                     $breaker,
                 ));
                 return null;
@@ -1985,51 +1984,35 @@ class TradingEngine
     }
 
     /**
-     * Drawdown circuit breaker (v2: equity-peak drawdown).
+     * Per-strategy drawdown circuit breaker.
      *
-     * Signal: current equity (wallet + unrealized on opens) vs trailing peak
-     * equity since the last trip. Trip when drawdown ≥ threshold; on trip,
-     * anchor the peak at current equity so we don't perpetually re-trip on
-     * the same drawdown event. Cooldown blocks new entries for
-     * `circuit_breaker_cooldown_hours`.
+     * Equity is this strategy's own P&L: realized from Trade rows filtered by
+     * strategy_key (pnl + funding_fee), plus unrealized from open Position rows
+     * filtered by strategy_key. A separate detector runs for each strategy so a
+     * short losing streak doesn't gate long entries (and vice versa).
      *
-     * Why "v2": the original version measured realized P&L over a rolling
-     * window. Backtests across the Feb 2026 correlated-pump regime showed
-     * that by the time enough losses realized, the damage was already done
-     * and cooldown blocked the mean-reversion entries that would have
-     * recovered some of it. Equity-peak drawdown fires earlier (open-position
-     * losses count), doesn't re-trip on the same event, and removes the
-     * rolling-window bookkeeping.
+     * `window_hours` controls the lookback semantics:
+     *   • window_hours = 0 — all-time peak since the last trip. Equivalent to
+     *     the pre-Phase-1 global detector's math (just scoped per-strategy).
+     *     short_scalp's validated 20%/4h production config defaults to this so
+     *     its behaviour is preserved exactly.
+     *   • window_hours > 0 — sliding window. Samples older than the cutoff are
+     *     pruned each tick; the peak is max(equity) within the window. This is
+     *     what the "20% over last 24h" framing maps to and what new long
+     *     strategies default to.
      *
-     * `circuit_breaker_window_hours` is now ignored but kept in Settings::KEYS
-     * for backwards compatibility.
+     * On trip: the samples array is collapsed to a single anchor at current
+     * equity (the trough) so a re-trip post-cooldown requires fresh drawdown
+     * from the trough, not the same drawdown that already fired.
      *
-     * Cache keys:
-     *   circuit_breaker:cooldown_until  — ISO timestamp; trip gate
-     *   circuit_breaker:equity_peak     — float; trailing peak equity
+     * Cache keys (per strategy):
+     *   circuit_breaker:<key>:cooldown_until  — ISO timestamp; trip gate
+     *   circuit_breaker:<key>:equity_samples  — array<{ts:int, equity:float}>
      */
-    private function checkCircuitBreaker(): ?array
+    private function checkCircuitBreaker(string $strategyKey): ?array
     {
-        // Current equity = wallet + unrealized P&L on open positions.
-        $account = $this->exchange->getAccountData();
-        $equity = (float) ($account['walletBalance'] ?? 0)
-                + (float) ($account['unrealizedProfit'] ?? 0);
-
-        // Update the trailing peak. Peak tracks the highest equity observed
-        // since the last trip; it rises with gains and is reset to the trough
-        // on trip (see TRIP block below).
-        $peakStr = Cache::get('circuit_breaker:equity_peak');
-        if ($peakStr === null || $equity > (float) $peakStr) {
-            Cache::forever('circuit_breaker:equity_peak', (string) $equity);
-            $peak = $equity;
-        } else {
-            $peak = (float) $peakStr;
-        }
-
-        // Cooldown short-circuit. We still wanted to update the peak above so
-        // that a recovery during cooldown anchors the post-cooldown window at
-        // a sensible high-water mark.
-        $cooldownUntilStr = Cache::get('circuit_breaker:cooldown_until');
+        $cooldownKey = "circuit_breaker:{$strategyKey}:cooldown_until";
+        $cooldownUntilStr = Cache::get($cooldownKey);
         if ($cooldownUntilStr) {
             $cooldownUntil = Carbon::parse($cooldownUntilStr);
             if ($cooldownUntil->gt(now())) {
@@ -2038,33 +2021,76 @@ class TradingEngine
                     'until' => $cooldownUntilStr,
                 ];
             }
-            Cache::forget('circuit_breaker:cooldown_until');
+            Cache::forget($cooldownKey);
         }
 
+        $equity = $this->strategyEquity($strategyKey);
+
+        $windowHours = (float) (Settings::get("strategy.{$strategyKey}.circuit_breaker.window_hours") ?? 0);
+        $samplesKey = "circuit_breaker:{$strategyKey}:equity_samples";
+        $samples = Cache::get($samplesKey, []);
+        if (! is_array($samples)) {
+            $samples = [];
+        }
+
+        if ($windowHours > 0) {
+            $cutoffTs = now()->subHours($windowHours)->getTimestamp();
+            $samples = array_values(array_filter(
+                $samples,
+                fn ($s) => is_array($s) && (int) ($s['ts'] ?? 0) >= $cutoffTs,
+            ));
+        }
+
+        $samples[] = ['ts' => now()->getTimestamp(), 'equity' => $equity];
+
+        // Bound array growth in the window_hours=0 case. Keep the running max
+        // and the latest sample — that's all the math needs. The legacy
+        // semantics ("peak since last trip") are preserved because the max is
+        // unchanged by pruning interior samples.
+        if ($windowHours <= 0 && count($samples) > 1000) {
+            $maxSample = null;
+            foreach ($samples as $s) {
+                if ($maxSample === null || (float) $s['equity'] > (float) $maxSample['equity']) {
+                    $maxSample = $s;
+                }
+            }
+            $samples = [$maxSample, end($samples)];
+        }
+
+        // TTL: at least a week so the window=0 case doesn't lose state on
+        // routine cache eviction; for window>0 it's window_hours + a little.
+        $ttlHours = max($windowHours, 168) + 1;
+        Cache::put($samplesKey, $samples, now()->addHours((int) $ttlHours));
+
+        $peak = max(array_column($samples, 'equity'));
         if ($peak <= 0) {
             return null;
         }
 
-        $thresholdPct = (float) (Settings::get('circuit_breaker_drawdown_pct') ?: 25.0);
+        $thresholdPct = (float) (Settings::get("strategy.{$strategyKey}.circuit_breaker.drawdown_pct") ?? 25.0);
         $drawdownPct = ($peak - $equity) / $peak * 100;
         if ($drawdownPct < $thresholdPct) {
             return null;
         }
 
-        // TRIP: set cooldown and anchor the peak at current equity (trough) so
-        // post-cooldown re-trip requires *new* drawdown, not the same one.
-        $cooldownHours = (float) (Settings::get('circuit_breaker_cooldown_hours') ?: 24);
+        $cooldownHours = (float) (Settings::get("strategy.{$strategyKey}.circuit_breaker.cooldown_hours") ?? 24);
         $until = now()->addHours($cooldownHours);
-        Cache::forever('circuit_breaker:cooldown_until', $until->toIso8601String());
-        Cache::forever('circuit_breaker:equity_peak', (string) $equity);
+        Cache::put($cooldownKey, $until->toIso8601String(), now()->addHours((int) ($cooldownHours + 1)));
 
-        Log::warning('Circuit breaker TRIPPED (v2: equity drawdown)', [
+        // Anchor samples at the trough so post-cooldown re-trip needs fresh drawdown.
+        Cache::put(
+            $samplesKey,
+            [['ts' => now()->getTimestamp(), 'equity' => $equity]],
+            now()->addHours((int) $ttlHours),
+        );
+
+        Log::warning('Circuit breaker TRIPPED', [
+            'strategy' => $strategyKey,
+            'window_hours' => $windowHours,
             'peak' => round($peak, 4),
             'current_equity' => round($equity, 4),
             'drawdown_pct' => round($drawdownPct, 2),
             'threshold_pct' => $thresholdPct,
-            'wallet' => round((float) ($account['walletBalance'] ?? 0), 4),
-            'unrealized' => round((float) ($account['unrealizedProfit'] ?? 0), 4),
             'cooldown_until' => $until->toIso8601String(),
         ]);
 
@@ -2072,6 +2098,67 @@ class TradingEngine
             'reason' => 'tripped',
             'drawdown_pct' => round($drawdownPct, 2),
             'until' => $until->toIso8601String(),
+        ];
+    }
+
+    /**
+     * Per-strategy P&L: realized (Trade) + unrealized (open Position), scoped
+     * to the current dry_run mode. Used by the breaker and by the dashboard's
+     * risk panel.
+     *
+     * The is_dry_run filter mirrors the convention used by DashboardController
+     * and DryRunExchange — it ensures the breaker doesn't mix backtest /
+     * dry-run history with live history when the operator flips DRY_RUN.
+     */
+    public function strategyEquity(string $strategyKey): float
+    {
+        $isDryRun = (bool) Settings::get('dry_run');
+
+        $realized = (float) Trade::where('strategy_key', $strategyKey)
+            ->where('is_dry_run', $isDryRun)
+            ->sum('pnl');
+        $funding = (float) Trade::where('strategy_key', $strategyKey)
+            ->where('is_dry_run', $isDryRun)
+            ->sum('funding_fee');
+        $unrealized = (float) Position::open()
+            ->where('strategy_key', $strategyKey)
+            ->where('is_dry_run', $isDryRun)
+            ->sum('unrealized_pnl');
+
+        return $realized + $funding + $unrealized;
+    }
+
+    /**
+     * Read-only snapshot of a strategy's breaker state for the dashboard.
+     * Does NOT touch cache (no side effects); reads only.
+     */
+    public function circuitBreakerState(string $strategyKey): array
+    {
+        $cooldownUntilStr = Cache::get("circuit_breaker:{$strategyKey}:cooldown_until");
+        $isActive = false;
+        if ($cooldownUntilStr) {
+            try {
+                $isActive = Carbon::parse($cooldownUntilStr)->gt(now());
+            } catch (\Throwable) {
+                $isActive = false;
+            }
+        }
+
+        $samples = Cache::get("circuit_breaker:{$strategyKey}:equity_samples", []);
+        $peak = is_array($samples) && $samples ? max(array_column($samples, 'equity')) : 0.0;
+        $currentEquity = $this->strategyEquity($strategyKey);
+        $drawdownPct = $peak > 0 ? max(0.0, ($peak - $currentEquity) / $peak * 100) : 0.0;
+
+        return [
+            'enabled' => (bool) Settings::get("strategy.{$strategyKey}.circuit_breaker.enabled"),
+            'is_active' => $isActive,
+            'cooldown_until' => $isActive ? $cooldownUntilStr : null,
+            'peak_equity' => round((float) $peak, 4),
+            'current_equity' => round($currentEquity, 4),
+            'drawdown_pct' => round($drawdownPct, 2),
+            'window_hours' => (float) (Settings::get("strategy.{$strategyKey}.circuit_breaker.window_hours") ?? 0),
+            'drawdown_threshold_pct' => (float) (Settings::get("strategy.{$strategyKey}.circuit_breaker.drawdown_pct") ?? 25.0),
+            'cooldown_hours' => (float) (Settings::get("strategy.{$strategyKey}.circuit_breaker.cooldown_hours") ?? 24),
         ];
     }
 }

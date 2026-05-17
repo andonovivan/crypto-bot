@@ -73,6 +73,25 @@ $shortScalpDefaults = [
     // guard applies). Research showed the strict gate delays entry past
     // the easy reversion.
     'strict_downtrend_enabled' => filter_var(env('STRICT_DOWNTREND_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+
+    // Per-strategy drawdown circuit breaker. Tracks this strategy's P&L
+    // (Trade::sum('pnl' + 'funding_fee') + Position::open()->sum('unrealized_pnl'),
+    // both filtered by strategy_key) and halts new entries when drawdown from
+    // the peak in the window breaches the threshold.
+    //
+    // window_hours = 0 preserves the legacy "all-time peak since last trip"
+    // semantics that short_scalp's validated 20%/4h config was tested against.
+    // window_hours > 0 turns it into a true rolling-window detector.
+    //
+    // CLAUDE.md's production override is enabled=true / drawdown_pct=20 /
+    // cooldown_hours=4 — those values are typically set in the DB via the
+    // dashboard, not via env, so the config-default stays conservative.
+    'circuit_breaker' => [
+        'enabled' => filter_var(env('CIRCUIT_BREAKER_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
+        'drawdown_pct' => (float) env('CIRCUIT_BREAKER_DRAWDOWN_PCT', 25.0),
+        'window_hours' => (float) env('CIRCUIT_BREAKER_WINDOW_HOURS', 0),
+        'cooldown_hours' => (float) env('CIRCUIT_BREAKER_COOLDOWN_HOURS', 24),
+    ],
 ];
 
 return [
@@ -131,43 +150,30 @@ return [
     'strategy' => [
         'short_scalp' => $shortScalpDefaults,
 
-        // Long-continuation strategy: rides the +50–100% 24h pumps that the
-        // short strategy explicitly avoids (research showed pumps ≥50% have
-        // a continuation pattern, +12.6% median over the next 24h). Off by
-        // default; enable after the L1-L7 backtest matrix passes acceptance.
-        'long_continuation' => [
-            'enabled' => filter_var(env('STRATEGY_LONG_CONTINUATION_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
-            'pump_threshold_pct' => (float) env('LONG_PUMP_THRESHOLD_PCT', 50.0),
-            'pump_max_pct' => (float) env('LONG_PUMP_MAX_PCT', 100.0),
-            'min_volume_usdt' => (float) env('LONG_MIN_VOLUME_USDT', 5_000_000),
-            'max_volume_usdt' => (float) env('LONG_MAX_VOLUME_USDT', 100_000_000),
-            'ema_fast' => (int) env('LONG_EMA_FAST', 9),
-            'ema_slow' => (int) env('LONG_EMA_SLOW', 21),
-            'min_green_candles' => (int) env('LONG_MIN_GREEN_CANDLES', 2),
-            'max_candle_body_pct' => (float) env('LONG_MAX_CANDLE_BODY_PCT', 5.0),
-            // LONGs PAY funding when positive — skip rates above this cap to
-            // avoid joining a crowded squeeze. Inverse of short's guard,
-            // which avoids paying when rate is too NEGATIVE.
-            'funding_max_rate' => (float) env('LONG_FUNDING_MAX_RATE', 0.001),
-            'strict_uptrend_enabled' => filter_var(env('LONG_STRICT_UPTREND_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
-            'htf_filter_enabled' => filter_var(env('LONG_HTF_FILTER_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
-            'htf_ema_period' => (int) env('LONG_HTF_EMA_PERIOD', 21),
-            'stop_loss_pct' => (float) env('LONG_STOP_LOSS_PCT', 3.0),
-            'atr_sl_enabled' => filter_var(env('LONG_ATR_SL_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
-            'atr_sl_multiplier' => (float) env('LONG_ATR_SL_MULTIPLIER', 1.5),
-            'take_profit_pct' => (float) env('LONG_TAKE_PROFIT_PCT', 3.0),
-            'partial_tp_trigger_pct' => (float) env('LONG_PARTIAL_TP_TRIGGER_PCT', 0.0),
-            'partial_tp_size_pct' => (float) env('LONG_PARTIAL_TP_SIZE_PCT', 50.0),
-            'trailing_tp_enabled' => filter_var(env('LONG_TRAILING_TP_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
-            'trailing_tp_arm_pct' => (float) env('LONG_TRAILING_TP_ARM_PCT', 1.5),
-            'trailing_tp_trail_pct' => (float) env('LONG_TRAILING_TP_TRAIL_PCT', 1.0),
-            'max_hold_minutes' => (int) env('LONG_MAX_HOLD_MINUTES', 720),
-            'cooldown_minutes' => (int) env('LONG_COOLDOWN_MINUTES', 240),
-            'failed_entry_cooldown_minutes' => (int) env('LONG_FAILED_ENTRY_COOLDOWN_MINUTES', 0),
-            'use_post_only_entry' => filter_var(env('LONG_USE_POST_ONLY_ENTRY', false), FILTER_VALIDATE_BOOLEAN),
-            'limit_order_timeout_seconds' => (int) env('LONG_LIMIT_ORDER_TIMEOUT_SECONDS', 3),
-            'max_positions' => (int) env('LONG_MAX_POSITIONS', 3),
-        ],
+        // Long variants under test (Phase 4 sweep). Each only ships its
+        // master `enabled` toggle as a config-default — individual gate
+        // parameters live as hardcoded fallbacks inside each variant's
+        // scanner. The winner of Phase 4 gets a full settings block during
+        // Phase 5 promotion; the 19 losers and their entries here are
+        // deleted alongside their scanner directories.
+        'long_microdump' => ['enabled' => false],
+        'long_milddump' => ['enabled' => false],
+        'long_bigdump' => ['enabled' => false],
+        'long_extremedump' => ['enabled' => false],
+        'long_oversold_strict' => ['enabled' => false],
+        'long_shallowpull' => ['enabled' => false],
+        'long_deeppull' => ['enabled' => false],
+        'long_consolidation_break' => ['enabled' => false],
+        'long_breakout_new_high' => ['enabled' => false],
+        'long_range_reclaim' => ['enabled' => false],
+        'long_lowpump' => ['enabled' => false],
+        'long_midpump' => ['enabled' => false],
+        'long_highpump' => ['enabled' => false],
+        'long_extremepump' => ['enabled' => false],
+        'long_thinvol_pump' => ['enabled' => false],
+        'long_thickvol_pump' => ['enabled' => false],
+        'long_btc_aligned' => ['enabled' => false],
+        'long_btc_inverted' => ['enabled' => false],
     ],
 
     /*
@@ -179,20 +185,4 @@ return [
     */
     'scalp' => $shortScalpDefaults,
 
-    /*
-    |--------------------------------------------------------------------------
-    | Risk Controls
-    |--------------------------------------------------------------------------
-    | Drawdown circuit breaker: halt new entries when realized P&L over a
-    | rolling window represents >= threshold % of the wallet at window start.
-    | Existing positions continue to be managed (SL/TP/expiry); only new
-    | entries are blocked, for cooldown_hours. Defaults are a conservative
-    | "25% in 24h, pause 24h" — matches a typical trader's risk-off reflex.
-    */
-    'risk' => [
-        'circuit_breaker_enabled' => filter_var(env('CIRCUIT_BREAKER_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
-        'circuit_breaker_drawdown_pct' => (float) env('CIRCUIT_BREAKER_DRAWDOWN_PCT', 25.0),
-        'circuit_breaker_window_hours' => (float) env('CIRCUIT_BREAKER_WINDOW_HOURS', 24),
-        'circuit_breaker_cooldown_hours' => (float) env('CIRCUIT_BREAKER_COOLDOWN_HOURS', 24),
-    ],
 ];

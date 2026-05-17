@@ -50,43 +50,81 @@ class Settings
         'strategy.short_scalp.trailing_tp_arm_pct' => ['config' => 'crypto.strategy.short_scalp.trailing_tp_arm_pct', 'type' => 'float', 'label' => 'Trailing TP Arm Threshold (% favorable)'],
         'strategy.short_scalp.trailing_tp_trail_pct' => ['config' => 'crypto.strategy.short_scalp.trailing_tp_trail_pct', 'type' => 'float', 'label' => 'Trailing TP Trail Distance (%)'],
         'strategy.short_scalp.strict_downtrend_enabled' => ['config' => 'crypto.strategy.short_scalp.strict_downtrend_enabled', 'type' => 'bool', 'label' => 'Strict 15m Downtrend Confirmation'],
+        'strategy.short_scalp.circuit_breaker.enabled' => ['config' => 'crypto.strategy.short_scalp.circuit_breaker.enabled', 'type' => 'bool', 'label' => 'Short Circuit Breaker Enabled'],
+        'strategy.short_scalp.circuit_breaker.drawdown_pct' => ['config' => 'crypto.strategy.short_scalp.circuit_breaker.drawdown_pct', 'type' => 'float', 'label' => 'Short Breaker Drawdown Threshold (%)'],
+        'strategy.short_scalp.circuit_breaker.window_hours' => ['config' => 'crypto.strategy.short_scalp.circuit_breaker.window_hours', 'type' => 'float', 'label' => 'Short Breaker Window (hours, 0=all-time peak)'],
+        'strategy.short_scalp.circuit_breaker.cooldown_hours' => ['config' => 'crypto.strategy.short_scalp.circuit_breaker.cooldown_hours', 'type' => 'float', 'label' => 'Short Breaker Cooldown (hours)'],
 
-        // Long-continuation strategy (rides +50–100% 24h pumps)
-        'strategy.long_continuation.enabled' => ['config' => 'crypto.strategy.long_continuation.enabled', 'type' => 'bool', 'label' => 'Long-Continuation Strategy Enabled'],
-        'strategy.long_continuation.pump_threshold_pct' => ['config' => 'crypto.strategy.long_continuation.pump_threshold_pct', 'type' => 'float', 'label' => 'Long Pump Lower Bound (24h %)'],
-        'strategy.long_continuation.pump_max_pct' => ['config' => 'crypto.strategy.long_continuation.pump_max_pct', 'type' => 'float', 'label' => 'Long Pump Upper Bound (24h %, 0=no cap)'],
-        'strategy.long_continuation.min_volume_usdt' => ['config' => 'crypto.strategy.long_continuation.min_volume_usdt', 'type' => 'float', 'label' => 'Long Min 24h Volume (USDT)'],
-        'strategy.long_continuation.max_volume_usdt' => ['config' => 'crypto.strategy.long_continuation.max_volume_usdt', 'type' => 'float', 'label' => 'Long Max 24h Volume (USDT, 0=no cap)'],
-        'strategy.long_continuation.ema_fast' => ['config' => 'crypto.strategy.long_continuation.ema_fast', 'type' => 'int', 'label' => 'Long EMA Fast (15m)'],
-        'strategy.long_continuation.ema_slow' => ['config' => 'crypto.strategy.long_continuation.ema_slow', 'type' => 'int', 'label' => 'Long EMA Slow (15m)'],
-        'strategy.long_continuation.min_green_candles' => ['config' => 'crypto.strategy.long_continuation.min_green_candles', 'type' => 'int', 'label' => 'Long Min Consecutive Green Candles'],
-        'strategy.long_continuation.max_candle_body_pct' => ['config' => 'crypto.strategy.long_continuation.max_candle_body_pct', 'type' => 'float', 'label' => 'Long Max 15m Candle Body (%)'],
-        'strategy.long_continuation.funding_max_rate' => ['config' => 'crypto.strategy.long_continuation.funding_max_rate', 'type' => 'float', 'label' => 'Long Funding Max Rate (longs pay positive — skip if above)'],
-        'strategy.long_continuation.strict_uptrend_enabled' => ['config' => 'crypto.strategy.long_continuation.strict_uptrend_enabled', 'type' => 'bool', 'label' => 'Long Strict 15m Uptrend Confirmation'],
-        'strategy.long_continuation.htf_filter_enabled' => ['config' => 'crypto.strategy.long_continuation.htf_filter_enabled', 'type' => 'bool', 'label' => 'Long Higher-TF Trend Filter (1h)'],
-        'strategy.long_continuation.htf_ema_period' => ['config' => 'crypto.strategy.long_continuation.htf_ema_period', 'type' => 'int', 'label' => 'Long HTF EMA Period (1h)'],
-        'strategy.long_continuation.stop_loss_pct' => ['config' => 'crypto.strategy.long_continuation.stop_loss_pct', 'type' => 'float', 'label' => 'Long Stop Loss (% below entry)'],
-        'strategy.long_continuation.atr_sl_enabled' => ['config' => 'crypto.strategy.long_continuation.atr_sl_enabled', 'type' => 'bool', 'label' => 'Long ATR-Based Stop Loss'],
-        'strategy.long_continuation.atr_sl_multiplier' => ['config' => 'crypto.strategy.long_continuation.atr_sl_multiplier', 'type' => 'float', 'label' => 'Long ATR SL Multiplier'],
-        'strategy.long_continuation.take_profit_pct' => ['config' => 'crypto.strategy.long_continuation.take_profit_pct', 'type' => 'float', 'label' => 'Long Take Profit (%)'],
-        'strategy.long_continuation.partial_tp_trigger_pct' => ['config' => 'crypto.strategy.long_continuation.partial_tp_trigger_pct', 'type' => 'float', 'label' => 'Long Partial TP Trigger (%, 0=off)'],
-        'strategy.long_continuation.partial_tp_size_pct' => ['config' => 'crypto.strategy.long_continuation.partial_tp_size_pct', 'type' => 'float', 'label' => 'Long Partial TP Size (% of position)'],
-        'strategy.long_continuation.trailing_tp_enabled' => ['config' => 'crypto.strategy.long_continuation.trailing_tp_enabled', 'type' => 'bool', 'label' => 'Long Trailing Take Profit'],
-        'strategy.long_continuation.trailing_tp_arm_pct' => ['config' => 'crypto.strategy.long_continuation.trailing_tp_arm_pct', 'type' => 'float', 'label' => 'Long Trailing TP Arm Threshold (% favorable)'],
-        'strategy.long_continuation.trailing_tp_trail_pct' => ['config' => 'crypto.strategy.long_continuation.trailing_tp_trail_pct', 'type' => 'float', 'label' => 'Long Trailing TP Trail Distance (%)'],
-        'strategy.long_continuation.max_hold_minutes' => ['config' => 'crypto.strategy.long_continuation.max_hold_minutes', 'type' => 'int', 'label' => 'Long Max Hold (minutes)'],
-        'strategy.long_continuation.cooldown_minutes' => ['config' => 'crypto.strategy.long_continuation.cooldown_minutes', 'type' => 'int', 'label' => 'Long Cooldown After Close (minutes)'],
-        'strategy.long_continuation.failed_entry_cooldown_minutes' => ['config' => 'crypto.strategy.long_continuation.failed_entry_cooldown_minutes', 'type' => 'int', 'label' => 'Long Cooldown After Failed Entry (minutes)'],
-        'strategy.long_continuation.use_post_only_entry' => ['config' => 'crypto.strategy.long_continuation.use_post_only_entry', 'type' => 'bool', 'label' => 'Long Post-Only Limit Entry'],
-        'strategy.long_continuation.limit_order_timeout_seconds' => ['config' => 'crypto.strategy.long_continuation.limit_order_timeout_seconds', 'type' => 'int', 'label' => 'Long Post-Only Fill Timeout (sec)'],
-        'strategy.long_continuation.max_positions' => ['config' => 'crypto.strategy.long_continuation.max_positions', 'type' => 'int', 'label' => 'Long Max Concurrent Positions (sub-cap)'],
-
-        // Risk controls — drawdown circuit breaker
-        'circuit_breaker_enabled' => ['config' => 'crypto.risk.circuit_breaker_enabled', 'type' => 'bool', 'label' => 'Drawdown Circuit Breaker'],
-        'circuit_breaker_drawdown_pct' => ['config' => 'crypto.risk.circuit_breaker_drawdown_pct', 'type' => 'float', 'label' => 'Circuit Breaker Drawdown Threshold (%)'],
-        'circuit_breaker_window_hours' => ['config' => 'crypto.risk.circuit_breaker_window_hours', 'type' => 'float', 'label' => 'Circuit Breaker Window (hours)'],
-        'circuit_breaker_cooldown_hours' => ['config' => 'crypto.risk.circuit_breaker_cooldown_hours', 'type' => 'float', 'label' => 'Circuit Breaker Cooldown (hours)'],
+        // Long-strategy variants under Phase-4 sweep. Each variant only
+        // exposes its master `enabled` toggle so `--override=strategy.<key>.enabled=true`
+        // works. All other gate parameters fall back to hardcoded defaults
+        // inside the variant's scanner.
+        'strategy.long_microdump.enabled' => ['config' => 'crypto.strategy.long_microdump.enabled', 'type' => 'bool', 'label' => 'Long Microdump Enabled'],
+        'strategy.long_milddump.enabled' => ['config' => 'crypto.strategy.long_milddump.enabled', 'type' => 'bool', 'label' => 'Long Milddump Enabled'],
+        'strategy.long_bigdump.enabled' => ['config' => 'crypto.strategy.long_bigdump.enabled', 'type' => 'bool', 'label' => 'Long Bigdump Enabled'],
+        'strategy.long_extremedump.enabled' => ['config' => 'crypto.strategy.long_extremedump.enabled', 'type' => 'bool', 'label' => 'Long Extremedump Enabled'],
+        'strategy.long_oversold_strict.enabled' => ['config' => 'crypto.strategy.long_oversold_strict.enabled', 'type' => 'bool', 'label' => 'Long Oversold-Strict Enabled'],
+        'strategy.long_shallowpull.enabled' => ['config' => 'crypto.strategy.long_shallowpull.enabled', 'type' => 'bool', 'label' => 'Long Shallowpull Enabled'],
+        'strategy.long_deeppull.enabled' => ['config' => 'crypto.strategy.long_deeppull.enabled', 'type' => 'bool', 'label' => 'Long Deeppull Enabled'],
+        'strategy.long_consolidation_break.enabled' => ['config' => 'crypto.strategy.long_consolidation_break.enabled', 'type' => 'bool', 'label' => 'Long Consolidation-Break Enabled'],
+        'strategy.long_breakout_new_high.enabled' => ['config' => 'crypto.strategy.long_breakout_new_high.enabled', 'type' => 'bool', 'label' => 'Long Breakout-New-High Enabled'],
+        'strategy.long_range_reclaim.enabled' => ['config' => 'crypto.strategy.long_range_reclaim.enabled', 'type' => 'bool', 'label' => 'Long Range-Reclaim Enabled'],
+        'strategy.long_lowpump.enabled' => ['config' => 'crypto.strategy.long_lowpump.enabled', 'type' => 'bool', 'label' => 'Long Lowpump Enabled'],
+        'strategy.long_midpump.enabled' => ['config' => 'crypto.strategy.long_midpump.enabled', 'type' => 'bool', 'label' => 'Long Midpump Enabled'],
+        'strategy.long_highpump.enabled' => ['config' => 'crypto.strategy.long_highpump.enabled', 'type' => 'bool', 'label' => 'Long Highpump Enabled'],
+        'strategy.long_extremepump.enabled' => ['config' => 'crypto.strategy.long_extremepump.enabled', 'type' => 'bool', 'label' => 'Long Extremepump Enabled'],
+        'strategy.long_thinvol_pump.enabled' => ['config' => 'crypto.strategy.long_thinvol_pump.enabled', 'type' => 'bool', 'label' => 'Long Thinvol-Pump Enabled'],
+        'strategy.long_thickvol_pump.enabled' => ['config' => 'crypto.strategy.long_thickvol_pump.enabled', 'type' => 'bool', 'label' => 'Long Thickvol-Pump Enabled'],
+        'strategy.long_btc_aligned.enabled' => ['config' => 'crypto.strategy.long_btc_aligned.enabled', 'type' => 'bool', 'label' => 'Long BTC-Aligned Enabled'],
+        'strategy.long_btc_inverted.enabled' => ['config' => 'crypto.strategy.long_btc_inverted.enabled', 'type' => 'bool', 'label' => 'Long BTC-Inverted Enabled'],
     ];
+
+    /**
+     * Lazily-built dynamic keys (e.g. per-variant breaker tuning). Returned by
+     * the public keys() method alongside the static KEYS const. Kept out of
+     * KEYS because PHP doesn't allow method calls in const initializers; this
+     * is the workaround for adding 20 × 4 = 80 per-variant breaker keys
+     * without inlining every entry.
+     *
+     * The variant list is the source of truth — adding a variant adds its
+     * breaker keys here automatically. The 19 losing variants drop out
+     * when their entries are removed in Phase 5 cleanup.
+     */
+    private static ?array $dynamicKeys = null;
+
+    private static function dynamicKeys(): array
+    {
+        if (self::$dynamicKeys !== null) {
+            return self::$dynamicKeys;
+        }
+        $variants = [
+            'long_microdump', 'long_milddump', 'long_bigdump', 'long_extremedump',
+            'long_oversold_strict', 'long_shallowpull', 'long_deeppull',
+            'long_consolidation_break',
+            'long_breakout_new_high', 'long_range_reclaim', 'long_lowpump',
+            'long_midpump', 'long_highpump', 'long_extremepump',
+            'long_thinvol_pump', 'long_thickvol_pump',
+            'long_btc_aligned', 'long_btc_inverted',
+        ];
+        $out = [];
+        foreach ($variants as $v) {
+            $out["strategy.{$v}.circuit_breaker.enabled"] = ['config' => "crypto.strategy.{$v}.circuit_breaker.enabled", 'type' => 'bool', 'label' => "$v Breaker Enabled"];
+            $out["strategy.{$v}.circuit_breaker.drawdown_pct"] = ['config' => "crypto.strategy.{$v}.circuit_breaker.drawdown_pct", 'type' => 'float', 'label' => "$v Breaker Drawdown %"];
+            $out["strategy.{$v}.circuit_breaker.window_hours"] = ['config' => "crypto.strategy.{$v}.circuit_breaker.window_hours", 'type' => 'float', 'label' => "$v Breaker Window (hours)"];
+            $out["strategy.{$v}.circuit_breaker.cooldown_hours"] = ['config' => "crypto.strategy.{$v}.circuit_breaker.cooldown_hours", 'type' => 'float', 'label' => "$v Breaker Cooldown (hours)"];
+        }
+        return self::$dynamicKeys = $out;
+    }
+
+    /**
+     * Full key registry: static KEYS const ∪ dynamic per-variant entries.
+     * Callers should prefer this over reading KEYS directly when the lookup
+     * may target a dynamically-registered variant key.
+     */
+    public static function keys(): array
+    {
+        return self::KEYS + self::dynamicKeys();
+    }
 
     /**
      * Legacy flat-key → namespaced-key aliases. In effect through Phase 4 to
@@ -123,6 +161,13 @@ class Settings
         'trailing_tp_arm_pct' => 'strategy.short_scalp.trailing_tp_arm_pct',
         'trailing_tp_trail_pct' => 'strategy.short_scalp.trailing_tp_trail_pct',
         'strict_downtrend_enabled' => 'strategy.short_scalp.strict_downtrend_enabled',
+        // Pre-Phase-1 risk controls — flat keys land on short_scalp's breaker so
+        // dashboard rows and CLAUDE.md's documented "20% / 4h" production override
+        // continue to resolve after the per-strategy breaker rewrite.
+        'circuit_breaker_enabled' => 'strategy.short_scalp.circuit_breaker.enabled',
+        'circuit_breaker_drawdown_pct' => 'strategy.short_scalp.circuit_breaker.drawdown_pct',
+        'circuit_breaker_window_hours' => 'strategy.short_scalp.circuit_breaker.window_hours',
+        'circuit_breaker_cooldown_hours' => 'strategy.short_scalp.circuit_breaker.cooldown_hours',
     ];
 
     /** Process-local overrides that shadow the DB for the duration of a single process. */
@@ -161,7 +206,8 @@ class Settings
             return self::$overrides[$key];
         }
 
-        $meta = self::KEYS[$key] ?? null;
+        $registry = self::keys();
+        $meta = $registry[$key] ?? null;
 
         if (! $meta) {
             return null;
@@ -182,7 +228,7 @@ class Settings
         $constraints = config('settings_meta.constraints', []);
         $settings = [];
 
-        foreach (self::KEYS as $key => $meta) {
+        foreach (self::keys() as $key => $meta) {
             $settings[$key] = [
                 'value' => self::get($key),
                 'type' => $meta['type'],
@@ -203,13 +249,14 @@ class Settings
     public static function groups(): array
     {
         $groups = config('settings_meta.groups', []);
+        $registry = self::keys();
         $assigned = [];
         $out = [];
 
         foreach ($groups as $group) {
             $keys = array_values(array_filter(
                 $group['keys'] ?? [],
-                fn (string $k) => array_key_exists($k, self::KEYS)
+                fn (string $k) => array_key_exists($k, $registry)
             ));
             array_push($assigned, ...$keys);
             $out[] = [
@@ -220,7 +267,7 @@ class Settings
             ];
         }
 
-        $other = array_values(array_diff(array_keys(self::KEYS), $assigned));
+        $other = array_values(array_diff(array_keys($registry), $assigned));
         if ($other) {
             $out[] = [
                 'id' => 'other',
@@ -236,7 +283,8 @@ class Settings
     public static function set(string $key, mixed $value): void
     {
         $key = self::canonical($key);
-        $meta = self::KEYS[$key] ?? null;
+        $registry = self::keys();
+        $meta = $registry[$key] ?? null;
 
         if (! $meta) {
             return;

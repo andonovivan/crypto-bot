@@ -72,7 +72,12 @@ async function fetchData() {
         polling.state.paused = s.trading_paused;
         polling.state.wallet = s.wallet_balance;
         polling.state.todayPnl = s.today_pnl ?? 0;
-        polling.state.circuitBreakerActive = s.circuit_breaker_active ?? false;
+        // /api/data returns `circuit_breaker_active` as { <strategy_key>: bool }.
+        // Topbar indicator lights up when ANY strategy has its breaker tripped.
+        polling.state.circuitBreakerActive = s.circuit_breaker_active
+            && typeof s.circuit_breaker_active === 'object'
+            ? Object.values(s.circuit_breaker_active).some(Boolean)
+            : !!s.circuit_breaker_active;
         polling.state.lastUpdate = data.ts;
         emit();
 
@@ -133,19 +138,28 @@ async function fetchStats() {
             }
         }
 
+        // Per-strategy breaker map: { <key>: { is_active, cooldown_until_ts, peak_equity, label, ... } }
+        const breakerMap = data.circuit_breaker && typeof data.circuit_breaker === 'object' ? data.circuit_breaker : {};
+        const breakerEntries = Object.entries(breakerMap);
+        const activeBreaker = breakerEntries
+            .map(([k, v]) => ({ key: k, ...v }))
+            .filter((b) => b.is_active)
+            .sort((a, b) => (a.cooldown_until_ts ?? 0) - (b.cooldown_until_ts ?? 0))[0] || null;
+
         const ddEl = document.getElementById('kpi-current-dd');
         if (ddEl) {
             const dd = data.current_drawdown_pct;
             ddEl.textContent = '−' + dd.toFixed(2) + '%';
             setColor('kpi-current-dd', dd > 5 ? 'text-[var(--color-danger)]' : dd > 1 ? 'text-[var(--color-warning)]' : 'text-[var(--color-text)]');
             const sub = document.getElementById('kpi-current-dd-sub');
-            if (sub && data.circuit_breaker?.is_active) {
-                const left = Math.max(0, (data.circuit_breaker.cooldown_until ?? 0) - Math.floor(Date.now() / 1000));
+            if (sub && activeBreaker) {
+                const left = Math.max(0, (activeBreaker.cooldown_until_ts ?? 0) - Math.floor(Date.now() / 1000));
                 const h = Math.floor(left / 3600);
                 const m = Math.floor((left % 3600) / 60);
-                sub.innerHTML = `<span class="text-[var(--color-danger)]">Breaker tripped — ${h}h ${m}m left</span>`;
+                sub.innerHTML = `<span class="text-[var(--color-danger)]">${activeBreaker.label || activeBreaker.key} breaker tripped — ${h}h ${m}m left</span>`;
             } else if (sub) {
-                sub.textContent = data.circuit_breaker?.peak_equity ? 'Peak: ' + fmtMoney(data.circuit_breaker.peak_equity) : '';
+                const peakSum = breakerEntries.reduce((acc, [, v]) => acc + (v?.peak_equity || 0), 0);
+                sub.textContent = peakSum > 0 ? 'Combined peak: ' + fmtMoney(peakSum) : '';
             }
         }
 
@@ -219,25 +233,70 @@ async function fetchStats() {
             fundEl.innerHTML = `<span class="text-[var(--color-success)]">${fmtPnl(data.funding_30d.received)}</span> received · <span class="text-[var(--color-danger)]">${fmtPnl(data.funding_30d.paid)}</span> paid`;
         }
 
-        const cbCard = document.getElementById('risk-cb-state');
-        if (cbCard) {
-            const enabled = data.circuit_breaker?.enabled;
-            const active = data.circuit_breaker?.is_active;
-            const stateText = !enabled ? 'Disabled' : active ? 'Tripped' : 'Armed';
-            const cls = !enabled ? 'text-[var(--color-text-muted)]' : active ? 'text-[var(--color-danger)]' : 'text-[var(--color-success)]';
-            cbCard.innerHTML = `<span class="${cls} font-semibold">${stateText}</span>`;
-            const peakEl = document.getElementById('risk-cb-peak');
-            if (peakEl) peakEl.textContent = data.circuit_breaker?.peak_equity ? fmtMoney(data.circuit_breaker.peak_equity) : '—';
-            const cooldownEl = document.getElementById('risk-cb-cooldown');
-            if (cooldownEl) {
-                if (active && data.circuit_breaker.cooldown_until) {
-                    const left = Math.max(0, data.circuit_breaker.cooldown_until - Math.floor(Date.now() / 1000));
-                    const h = Math.floor(left / 3600);
-                    const m = Math.floor((left % 3600) / 60);
-                    cooldownEl.textContent = `${h}h ${m}m left`;
-                } else {
-                    cooldownEl.textContent = '—';
-                }
+        // Per-strategy circuit breaker cards — render one card per registered
+        // strategy into #risk-cb-container. The template ships an empty
+        // container; everything below is dynamic so adding/removing strategies
+        // doesn't require touching the blade file.
+        const cbContainer = document.getElementById('risk-cb-container');
+        if (cbContainer) {
+            if (breakerEntries.length === 0) {
+                cbContainer.innerHTML = '<div class="text-xs text-[var(--color-text-muted)] p-4">No strategies registered.</div>';
+            } else {
+                cbContainer.innerHTML = breakerEntries.map(([key, b]) => {
+                    const enabled = !!b?.enabled;
+                    const active = !!b?.is_active;
+                    const stateText = !enabled ? 'Disabled' : active ? 'Tripped' : 'Armed';
+                    const cls = !enabled ? 'text-[var(--color-text-muted)]'
+                        : active ? 'text-[var(--color-danger)]'
+                        : 'text-[var(--color-success)]';
+                    const peakStr = b?.peak_equity ? fmtMoney(b.peak_equity) : '—';
+                    const equityStr = b?.current_equity != null ? fmtMoney(b.current_equity) : '—';
+                    const ddStr = (b?.drawdown_pct ?? 0).toFixed(2) + '%';
+                    const ddThr = b?.drawdown_threshold_pct ?? 0;
+                    const ddCls = (b?.drawdown_pct ?? 0) >= ddThr * 0.75
+                        ? 'text-[var(--color-warning)]'
+                        : 'text-[var(--color-text)]';
+                    let cooldownStr = '—';
+                    if (active && b?.cooldown_until_ts) {
+                        const left = Math.max(0, b.cooldown_until_ts - Math.floor(Date.now() / 1000));
+                        const h = Math.floor(left / 3600);
+                        const m = Math.floor((left % 3600) / 60);
+                        cooldownStr = `${h}h ${m}m left`;
+                    }
+                    const windowStr = (b?.window_hours ?? 0) > 0
+                        ? `${b.window_hours}h sliding`
+                        : 'all-time peak';
+                    const title = b?.label || key;
+                    return `
+<div class="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-4">
+  <div class="flex items-center justify-between mb-3">
+    <h3 class="text-sm font-semibold">${title}</h3>
+    <span class="text-[10px] uppercase tracking-wider text-[var(--color-text-subtle)]">${windowStr}</span>
+  </div>
+  <div class="space-y-2">
+    <div class="flex items-center justify-between">
+      <span class="text-xs text-[var(--color-text-muted)]">State</span>
+      <span class="text-sm"><span class="${cls} font-semibold">${stateText}</span></span>
+    </div>
+    <div class="flex items-center justify-between">
+      <span class="text-xs text-[var(--color-text-muted)]">Current equity</span>
+      <span class="text-sm font-mono">${equityStr}</span>
+    </div>
+    <div class="flex items-center justify-between">
+      <span class="text-xs text-[var(--color-text-muted)]">Peak equity</span>
+      <span class="text-sm font-mono">${peakStr}</span>
+    </div>
+    <div class="flex items-center justify-between">
+      <span class="text-xs text-[var(--color-text-muted)]">Drawdown</span>
+      <span class="text-sm font-mono ${ddCls}">${ddStr} / ${ddThr}%</span>
+    </div>
+    <div class="flex items-center justify-between">
+      <span class="text-xs text-[var(--color-text-muted)]">Cooldown</span>
+      <span class="text-sm font-mono">${cooldownStr}</span>
+    </div>
+  </div>
+</div>`;
+                }).join('');
             }
         }
     } catch (e) {

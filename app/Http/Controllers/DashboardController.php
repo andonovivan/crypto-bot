@@ -84,7 +84,7 @@ class DashboardController extends Controller
         ], $statusOk ? 200 : 503);
     }
 
-    public function data(ExchangeInterface $exchange): JsonResponse
+    public function data(ExchangeInterface $exchange, TradingEngine $engine): JsonResponse
     {
         // All trade-history aggregates filter on the current dry_run mode so
         // the summary reflects "this mode's" performance, not a mix of past
@@ -202,8 +202,14 @@ class DashboardController extends Controller
             ->selectRaw('COALESCE(SUM(pnl), 0) + COALESCE(SUM(funding_fee), 0) AS total')
             ->value('total');
 
-        $cbCooldownUntil = Cache::get('circuit_breaker:cooldown_until');
-        $circuitBreakerActive = $cbCooldownUntil !== null && $cbCooldownUntil > now()->timestamp;
+        // Per-strategy breaker active map: { <strategy_key>: bool }. Frontend
+        // shows a topbar indicator when ANY strategy's breaker is active.
+        $registryForCb = app(\App\Services\Strategy\StrategyRegistry::class);
+        $circuitBreakerActive = [];
+        foreach ($registryForCb->all() as $stratForCb) {
+            $state = $engine->circuitBreakerState($stratForCb->key());
+            $circuitBreakerActive[$stratForCb->key()] = $state['is_active'];
+        }
 
         return response()->json([
             'positions' => $positionsData,
@@ -578,8 +584,13 @@ class DashboardController extends Controller
         BalanceSnapshot::truncate();
         \Illuminate\Support\Facades\DB::statement('SET FOREIGN_KEY_CHECKS=1');
 
-        // Any circuit-breaker cooldown was tied to the now-wiped trade
-        // history; clearing it keeps the risk-control state consistent.
+        // Any per-strategy circuit-breaker state was tied to the now-wiped
+        // trade history; clearing it keeps the risk-control state consistent.
+        foreach (app(\App\Services\Strategy\StrategyRegistry::class)->all() as $strat) {
+            \Illuminate\Support\Facades\Cache::forget("circuit_breaker:{$strat->key()}:cooldown_until");
+            \Illuminate\Support\Facades\Cache::forget("circuit_breaker:{$strat->key()}:equity_samples");
+        }
+        // Legacy pre-Phase-1 keys, in case of a partial deploy.
         \Illuminate\Support\Facades\Cache::forget('circuit_breaker:cooldown_until');
         \Illuminate\Support\Facades\Cache::forget('circuit_breaker:measurement_start');
         \Illuminate\Support\Facades\Cache::forget('circuit_breaker:equity_peak');
@@ -805,7 +816,7 @@ class DashboardController extends Controller
         ]);
     }
 
-    public function stats(ExchangeInterface $exchange): JsonResponse
+    public function stats(ExchangeInterface $exchange, TradingEngine $engine): JsonResponse
     {
         $isDryRun = (bool) Settings::get('dry_run');
         $now = now();
@@ -984,9 +995,29 @@ class DashboardController extends Controller
             }
         }
 
-        $cooldownUntil = Cache::get('circuit_breaker:cooldown_until');
-        $cbPeak = (float) (Cache::get('circuit_breaker:equity_peak') ?? 0.0);
-        $cbActive = $cooldownUntil !== null && $cooldownUntil > $now->timestamp;
+        // Per-strategy breaker state map: one entry per registered strategy.
+        // Each value is the array returned by TradingEngine::circuitBreakerState,
+        // plus a normalized cooldown_until_ts (unix seconds) for the JS UI.
+        $registry = app(\App\Services\Strategy\StrategyRegistry::class);
+        $breakerByStrategy = [];
+        foreach ($registry->all() as $strat) {
+            $state = $engine->circuitBreakerState($strat->key());
+            $cooldownTs = null;
+            if ($state['cooldown_until']) {
+                try {
+                    $cooldownTs = \Carbon\Carbon::parse($state['cooldown_until'])->getTimestamp();
+                } catch (\Throwable) {
+                    $cooldownTs = null;
+                }
+            }
+            $breakerByStrategy[$strat->key()] = array_merge(
+                $state,
+                [
+                    'label' => $strat->label(),
+                    'cooldown_until_ts' => $cooldownTs,
+                ],
+            );
+        }
 
         // 30d funding split: paid (negative) vs received (positive).
         $fundingPaid = (float) Trade::where('is_dry_run', $isDryRun)
@@ -1034,12 +1065,7 @@ class DashboardController extends Controller
                 'type' => $streakType,
                 'count' => $streakCount,
             ],
-            'circuit_breaker' => [
-                'enabled' => (bool) Settings::get('circuit_breaker_enabled'),
-                'peak_equity' => round($cbPeak, 2),
-                'is_active' => $cbActive,
-                'cooldown_until' => $cbActive ? (int) $cooldownUntil : null,
-            ],
+            'circuit_breaker' => $breakerByStrategy,
             'funding_30d' => [
                 'paid' => round($fundingPaid, 4),
                 'received' => round($fundingReceived, 4),

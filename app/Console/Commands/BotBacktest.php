@@ -33,7 +33,7 @@ class BotBacktest extends Command
         {--truncate : Wipe dry-run Position/Trade rows before starting}
         {--use-1m : Load 1m klines and tick the clock every 60s. Synthesizes the 24h ticker from 1m bars (rolls minute-by-minute) so the scanner sees the same threshold-crossing events live does. Requires kline_history rows for interval=1m over the run window plus 24h lead-in.}
         {--no-force-close : Leave open positions in place at the end of the run instead of force-closing them. Used by bot:backtest-rolling so positions carry across month boundaries.}
-        {--strategies= : Comma-separated strategy keys to enable for this run (e.g. short_scalp,long_continuation). Defaults to all enabled strategies in config/strategies.php order.}
+        {--strategies= : Comma-separated strategy keys to enable for this run (e.g. short_scalp,long_bounce). Defaults to all enabled strategies in config/strategies.php order.}
         {--override=* : Repeatable key=value Settings::override() pair (e.g. --override=strategy.short_scalp.stop_loss_pct=1.5)}';
 
     protected $description = 'Replay historical klines through the strategy and report P&L';
@@ -68,8 +68,16 @@ class BotBacktest extends Command
             $this->warn('Truncating dry-run positions/trades…');
             Trade::where('is_dry_run', true)->delete();
             Position::where('is_dry_run', true)->delete();
-            // Circuit-breaker state can stick around from a prior run; wipe
-            // it so this backtest starts with a clean risk-control slate.
+            // Per-strategy circuit-breaker state can stick around from a prior
+            // run; wipe it so the new run starts with a clean slate. Iterates
+            // every registered strategy from config/strategies.php (cheap, no
+            // service resolution needed at this point).
+            foreach (array_keys((array) config('strategies.classes', [])) as $stratKey) {
+                \Illuminate\Support\Facades\Cache::forget("circuit_breaker:{$stratKey}:cooldown_until");
+                \Illuminate\Support\Facades\Cache::forget("circuit_breaker:{$stratKey}:equity_samples");
+            }
+            // Also clear the pre-Phase-1 global keys in case a partial deploy
+            // left them populated.
             \Illuminate\Support\Facades\Cache::forget('circuit_breaker:cooldown_until');
             \Illuminate\Support\Facades\Cache::forget('circuit_breaker:measurement_start');
             \Illuminate\Support\Facades\Cache::forget('circuit_breaker:equity_peak');
@@ -90,7 +98,7 @@ class BotBacktest extends Command
                 return self::FAILURE;
             }
             [$k, $v] = array_map('trim', explode('=', $pair, 2));
-            $meta = Settings::KEYS[$k] ?? null;
+            $meta = Settings::keys()[$k] ?? null;
             if (! $meta) {
                 $this->error("Unknown setting key: {$k}");
                 return self::FAILURE;
