@@ -2102,9 +2102,15 @@ class TradingEngine
     }
 
     /**
-     * Per-strategy P&L: realized (Trade) + unrealized (open Position), scoped
-     * to the current dry_run mode. Used by the breaker and by the dashboard's
-     * risk panel.
+     * Per-strategy equity: allocated starting balance + realized + unrealized,
+     * scoped to the current dry_run mode. Used by the breaker and by the
+     * dashboard's risk panel.
+     *
+     * The starting-balance allocation is `starting_balance / num_enabled_strategies`
+     * so the breaker's % drawdown math reduces to the legacy global breaker's
+     * behavior when only one strategy is enabled. Without this offset, the
+     * divisor (peak per-strategy P&L) is small/near-zero early in a run and
+     * drawdown % explodes meaninglessly the first time P&L crosses below zero.
      *
      * The is_dry_run filter mirrors the convention used by DashboardController
      * and DryRunExchange — it ensures the breaker doesn't mix backtest /
@@ -2125,7 +2131,11 @@ class TradingEngine
             ->where('is_dry_run', $isDryRun)
             ->sum('unrealized_pnl');
 
-        return $realized + $funding + $unrealized;
+        $startingBalance = (float) Settings::get('starting_balance');
+        $enabledCount = max(1, count(app(\App\Services\Strategy\StrategyRegistry::class)->enabled()));
+        $allocation = $startingBalance / $enabledCount;
+
+        return $allocation + $realized + $funding + $unrealized;
     }
 
     /**
