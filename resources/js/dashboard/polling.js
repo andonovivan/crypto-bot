@@ -141,6 +141,22 @@ async function fetchStats() {
         // Per-strategy breaker map: { <key>: { is_active, cooldown_until_ts, peak_equity, label, ... } }
         const breakerMap = data.circuit_breaker && typeof data.circuit_breaker === 'object' ? data.circuit_breaker : {};
         const breakerEntries = Object.entries(breakerMap);
+
+        // Breaker-allocation card on the Risk page: configured starting balance,
+        // current wallet, and the derived per-strategy allocation. Updates on
+        // every stats poll so the card reflects deposit/sync changes promptly.
+        const startEl = document.getElementById('risk-starting-balance');
+        const walletEl = document.getElementById('risk-current-wallet');
+        const allocEl = document.getElementById('risk-allocation');
+        if (startEl || walletEl || allocEl) {
+            const startBal = Number(data.starting_balance ?? 0);
+            const wallet = Number(data.wallet_balance ?? 0);
+            const enabledCount = Math.max(1, breakerEntries.filter(([, v]) => !!v?.enabled).length);
+            const allocation = enabledCount > 0 ? startBal / enabledCount : startBal;
+            if (startEl) startEl.textContent = fmtMoney(startBal);
+            if (walletEl) walletEl.textContent = fmtMoney(wallet);
+            if (allocEl) allocEl.textContent = `${fmtMoney(allocation)} (÷ ${enabledCount})`;
+        }
         const activeBreaker = breakerEntries
             .map(([k, v]) => ({ key: k, ...v }))
             .filter((b) => b.is_active)

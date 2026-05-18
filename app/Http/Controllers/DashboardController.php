@@ -612,6 +612,53 @@ class DashboardController extends Controller
         return response()->json(['ok' => true]);
     }
 
+    /**
+     * Rebase per-strategy breaker allocation to the current wallet.
+     *
+     * `TradingEngine::strategyEquity()` computes each strategy's equity as
+     * `(starting_balance / num_enabled_strategies) + own_pnl`. When the
+     * account grows (deposits, accumulated P&L), the configured
+     * `starting_balance` drifts away from the real wallet and the per-strategy
+     * allocation becomes too small relative to position sizing. This action
+     * snaps `starting_balance` to the current wallet and clears the cached
+     * equity-sample peaks so each breaker re-anchors to the new base on its
+     * next check.
+     *
+     * Live + dry-run safe: reads whichever wallet the active ExchangeDispatcher
+     * resolves (real Binance walletBalance live, simulated otherwise).
+     */
+    public function syncStartingBalance(ExchangeInterface $exchange): JsonResponse
+    {
+        $account = $exchange->getAccountData();
+        $wallet = (float) ($account['walletBalance'] ?? 0);
+
+        if ($wallet <= 0) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'Wallet balance is zero or negative — refusing to sync.',
+            ], 400);
+        }
+
+        $previous = (float) Settings::get('starting_balance');
+        Settings::set('starting_balance', round($wallet, 2));
+
+        // Re-anchor each strategy's breaker peak on next check. Cooldowns stay
+        // intact: an actively-tripped breaker shouldn't resume just because the
+        // operator rebased the allocation.
+        $cleared = [];
+        foreach (app(\App\Services\Strategy\StrategyRegistry::class)->all() as $strat) {
+            \Illuminate\Support\Facades\Cache::forget("circuit_breaker:{$strat->key()}:equity_samples");
+            $cleared[] = $strat->key();
+        }
+
+        return response()->json([
+            'ok' => true,
+            'previous' => round($previous, 2),
+            'new' => round($wallet, 2),
+            'samples_cleared' => $cleared,
+        ]);
+    }
+
     public function scannerData(Request $request): JsonResponse
     {
         $strategyFilter = $request->string('strategy')->trim()->toString();
@@ -1033,6 +1080,7 @@ class DashboardController extends Controller
             'is_dry_run' => $isDryRun,
             'equity' => round($equity, 2),
             'wallet_balance' => round($walletBalance, 2),
+            'starting_balance' => round((float) Settings::get('starting_balance'), 2),
             'available_balance' => round($availableBalance, 2),
             'equity_24h_ago' => $equity24hAgo !== null ? round($equity24hAgo, 2) : null,
             'current_drawdown_pct' => round($currentDdPct, 2),

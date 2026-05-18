@@ -6,6 +6,37 @@
     <x-kpi-tile label="Open Exposure" value-id="kpi-exposure" sub-id="kpi-exposure-sub" />
 </div>
 
+<x-card title="Breaker Allocation" class="mb-6">
+    <x-slot:actions>
+        <button
+            id="risk-sync-balance-btn"
+            type="button"
+            class="text-xs px-3 py-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-elevated)] cursor-pointer"
+            title="Snap starting_balance to current wallet; re-anchors each strategy's breaker peak on next check.">
+            Sync to wallet
+        </button>
+    </x-slot:actions>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+        <div>
+            <div class="text-xs text-[var(--color-text-muted)] mb-1">Configured starting balance</div>
+            <div id="risk-starting-balance" class="font-mono text-base">—</div>
+        </div>
+        <div>
+            <div class="text-xs text-[var(--color-text-muted)] mb-1">Current wallet</div>
+            <div id="risk-current-wallet" class="font-mono text-base">—</div>
+        </div>
+        <div>
+            <div class="text-xs text-[var(--color-text-muted)] mb-1">Per-strategy allocation</div>
+            <div id="risk-allocation" class="font-mono text-base">—</div>
+        </div>
+    </div>
+    <div class="text-xs text-[var(--color-text-muted)] mt-3">
+        Each strategy's circuit breaker measures drawdown against
+        <code>starting_balance / num_enabled_strategies + own pnl</code>. Sync rebases this allocation to the current wallet so the breaker
+        scales with the real account size. Active cooldowns are <em>not</em> cleared.
+    </div>
+</x-card>
+
 <div id="risk-cb-container" class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
     <div class="text-xs text-[var(--color-text-muted)] p-4">Loading circuit breaker state…</div>
 </div>

@@ -7,6 +7,7 @@ import { bindScanner } from './tables/scanner.js';
 import { bindTradesTable } from './tables/trades.js';
 import { bindFailedTable } from './tables/failed.js';
 import { bindSettingsPage } from './settings.js';
+import { bindRiskPage } from './risk.js';
 
 window.Alpine = Alpine;
 
@@ -23,6 +24,7 @@ function mountPage() {
     if (document.getElementById('history-body')) bindTradesTable();
     if (document.getElementById('failed-body')) bindFailedTable();
     if (document.getElementById('settings-form')) bindSettingsPage();
+    if (document.getElementById('risk-sync-balance-btn')) bindRiskPage();
 
     window.dashboardPolling.start(page);
 }
