@@ -2,12 +2,15 @@
 
 ## Project Overview
 
-Laravel 13 (PHP 8.4) **multi-strategy trading bot** for Binance Futures, built around a plug-in strategy architecture. Two strategies ship today, both registered in `config/strategies.php`:
+Laravel 13 (PHP 8.4) **multi-strategy trading bot** for Binance Futures, built around a plug-in strategy architecture. Two production strategies ship today plus 2 benched long-side variants under reserve, all registered in `config/strategies.php`:
 
 - **`short_scalp`** (default ON) — shorts pump/dump candidates in the +25% to +50% / ≤-10% 24h band. The historical workhorse. Current production config (May 2026): trailing TP arm 1.5% / trail 1.0%, fixed 2.5% SL, 8h hold, strict 15m downtrend gate **disabled** (wide-entry mode), drawdown circuit breaker enabled at 20% threshold / 4h cooldown. Cross-window backtest over Sept-Oct 2025, Feb-Apr 2026, and May 1-15 2026 shows breaker at 20%/4h adds ~+23% net P&L vs no breaker (validated 3 regimes); R:R lands around 0.74-0.85 in backtest with live realizing ~0.63-0.70 due to the documented early-trail-fire gap.
-- **`long_continuation`** — longs the +50–100% 24h pump band that `short_scalp` explicitly avoids (research showed pumps ≥50% have a continuation pattern, median +12.6% further over 24h). Currently enabled in dry-run after L1 baseline showed +$1.68/trade edge on March 2026 (29 trades, WR 58.6%, R:R 1.81). The 2-month dual-strategy backtest (Mar-Apr 2026, both strategies on, fixed-sizing $100) confirmed the strategies don't interfere: short_scalp + long_continuation summed to +$2,245 total (short ~78%, long ~22% of P&L); long_continuation kept R:R ≈ 2.34 vs short's 0.84. **Still awaiting full L2-L7 backtest matrix + Sep'25→Apr'26 walk-forward before live deployment** — disable via `Settings::set('strategy.long_continuation.enabled', false)` if regime-shift detector trips.
+- **`long_microdump`** (default ON, Phase 5 pick 2026-05-18) — longs the -2 to -5% 24h dump band on 10M-50M USDT liquid coins. Mean-reversion play that enters on EMA fast crossing back up through slow + first green 15m candle. Inherits short_scalp's exit profile via `Settings::ALIASES` (trailing TP arm 1.5% / trail 1.0%, fixed SL 2.5%) until Phase 6 promotes per-variant exits. Phase 4B walk-forward Nov 25 → Apr 26: 8,572 trades, **WR 65.8%**, every month positive (worst +$50K, best +$99K). Picked over `long_thinvol_pump` and `long_lowpump` (which posted higher raw P&L) because the higher-WR / mid-volume / mean-reversion profile is structurally robust to live slippage and regime shifts.
+- **`long_thinvol_pump`**, **`long_lowpump`** (both default OFF) — Phase 4B runners-up kept on the bench. See `docs/long-strategy-variants.md` for why they were not picked and when to re-evaluate.
 
-Both strategies coexist behind one global `max_positions` cap with optional per-strategy sub-caps, share the same wallet, and run in lockstep on the same scanner gate (one scan per closed 1m candle). Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
+The previous `long_continuation` strategy was **deleted in Phase 2** of the long-strategy overhaul (2026-05-16). Of the original 20-variant Phase 4A sweep, 17 were deleted in Phase 5 cleanup (2026-05-18); their design notes are preserved in `docs/long-strategy-variants.md` for re-derivation if needed. Historical `Trade`/`Position` rows with `strategy_key='long_continuation'` or any deleted variant key are preserved for analysis.
+
+Strategies coexist behind one global `max_positions` cap with optional per-strategy sub-caps, share the same wallet, and run in lockstep on the same scanner gate (one scan per closed 1m candle). Runs in Docker on port 8090. Currently in **DRY_RUN mode** (no real trades).
 
 ## Architecture
 
@@ -49,7 +52,7 @@ Both strategies coexist behind one global `max_positions` cap with optional per-
    - **Entry loop** (per enabled strategy, in declared order):
      - `$strategy->getCandidates()` returns its own `Candidate[]` (one ticker call per strategy via direction-specific filters)
      - foreach candidate: apply cross-strategy invariant (one open position per symbol globally), per-`(symbol, strategy_key)` cooldown + failed-entry cooldown, per-strategy `max_positions` sub-cap if set, then `$strategy->analyze($symbol)` and `$strategy->buildSignal($candidate, $analysis)` if `analysis->ok`. Open via `$engine->open($signal)`.
-     - **Cross-cycle dedupe**: a symbol opened by strategy A this cycle is skipped by strategy B in the same cycle (first-in-`order` wins). The bands of the two shipped strategies don't overlap, so this rarely fires.
+     - **Cross-cycle dedupe**: a symbol opened by strategy A this cycle is skipped by strategy B in the same cycle (first-in-`order` wins). With only `short_scalp` enabled in production today, this is moot; it becomes relevant once a long variant is promoted and bands overlap (e.g. `long_midpump`'s +25-50% band overlaps `short_scalp`'s pump band).
 3. **Cycle summary** logged per strategy + total: `strategy=short_scalp candidates=4 analyzed=2 opened=0` then `Cycle: total candidates=4 analyzed=2 opened=0 openPositions=2`.
 
 **Boundary-aligned wake-up**: BotRun's sleep math targets `ceil(now / scan_interval) * scan_interval` so cycles wake at predictable boundaries — e.g. with `scan_interval=30`, the loop fires at `:00` and `:30` of each minute (epoch-aligned). Combined with the 1m candle gate above, the scanner block runs within milliseconds of each `:00` boundary instead of drifting with cycle duration. This makes live entry timing deterministic and matches the backtest's exact-boundary tick.
@@ -72,7 +75,7 @@ All strategies implement [`StrategyInterface`](app/Services/Strategy/StrategyInt
 - One open position per symbol globally — enforced by `Position::open()->where('symbol', X)->exists()` check in both BotRun and TradingEngine.
 - Cooldowns scope per `(symbol, strategy_key)` — strategy A closing a symbol does not block strategy B from re-entering that symbol immediately (subject to its own cooldown).
 - `max_positions` is a global cap; per-strategy sub-caps are additive (null = no sub-cap).
-- The two shipped strategies have non-overlapping 24h bands by design (short: pump 25–50% or dump ≤-10%; long: pump >50–100%), so they never compete for the same symbol within a single scan.
+- In production today `short_scalp` and `long_microdump` are enabled. The 2 benched long variants (`long_thinvol_pump`, `long_lowpump`) are registered but `enabled=false`. Bands do not overlap between the active pair — short_scalp's +25 to +50% pump band and ≤-10% dump band don't intersect long_microdump's -2 to -5% dump band — so cross-strategy collisions are rare in practice. The cross-strategy invariant + `StrategyRegistry::inOrder()` priority (short_scalp first) handle any same-symbol race anyway.
 
 ### SL/TP close reconciliation (mode-dependent)
 
@@ -115,54 +118,42 @@ All strategies implement [`StrategyInterface`](app/Services/Strategy/StrategyInt
 
 **Cooldown:** `cooldown_minutes` (default 120 = 2h) after any close on same symbol. `failed_entry_cooldown_minutes` (default 0 = disabled) after any `status=Failed` row on same `(symbol, short_scalp)`.
 
-### Long-Continuation Strategy
+### Long-Side Variants (Phase 5 outcome — 3 kept)
 
-The complement to short-scalp: longs the +50–100% 24h pump band that short_scalp explicitly avoids. Research showed pumps in this band have a continuation pattern (median 24h close +12.6% further), so this strategy rides the move instead of fighting it. Off by default (`strategy.long_continuation.enabled=false`) until full L2-L7 + walk-forward validation.
+The original `long_continuation` strategy was deleted in Phase 2 of the long-strategy overhaul (2026-05-16) and replaced by a broad sweep of 20 distinct entry-signal variants. Phase 4A (one bear week + one bull week, all 20 variants) ranked them; Phase 4B walk-forward (Nov 25 → Apr 26, top 3 only) confirmed the leaders; Phase 5 cleanup (2026-05-18) kept **3** and deleted the other 17:
 
-**Entry criteria (all must pass):**
-1. **24h mover (strict-greater on lower bound)**: `priceChangePct > pump_threshold_pct` (default +50%) AND `priceChangePct <= pump_max_pct` (default +100%, `pump_max_pct=0` disables the upper cap). The strict-greater on the lower bound means the +50% boundary belongs to short_scalp (`pump_max_pct=50` inclusive there) — bands therefore never overlap by construction.
-2. **Liquidity window**: `min_volume_usdt <= 24h quote volume <= max_volume_usdt` (defaults 5M / 100M USDT, `max_volume_usdt=0` disables the upper cap). Wider than short's 10M-25M because pump-continuation coins tend to be heavier.
-3. **15m uptrend (Strict rule)** — only when `strict_uptrend_enabled=true` (default true). When false, this entire block is skipped and only the funding-rate guard below applies.
-   - EMA fast (default 9) > EMA slow (default 21) on BOTH current and prior 15m candle
-   - Current price (close of last closed candle) > EMA fast
-   - **Last N CLOSED 15m candles are green** (close > open) — where N = `min_green_candles` (default 2). Checks `candles[last-1]` and `candles[last-2]`. Mirror of short's red-candle gate.
-   - Candle body of last closed candle <= `max_candle_body_pct` (default 5% — wider than short's 3% because pump-continuation candles are inherently fat)
-4. **Higher-timeframe confirmation** (conditional, `htf_filter_enabled=true` by default, only checked when strict gate is on): 1h close > 1h EMA (period `htf_ema_period`, default 21). Fetches `htf_ema_period + 5` 1h klines via `checkHigherTfUptrend()`. **Fails open** — if the 1h fetch errors or returns too few bars, the filter passes.
-5. **Funding guard (INVERTED vs short)**: current funding rate `<= funding_max_rate` (default +0.10% per 8h). LONGs *pay* funding when positive — skipping rates above the cap avoids joining a crowded squeeze (positive funding means longs are paying shorts; very high rates indicate over-crowded long side).
-6. **Capacity gates**: trading not paused, global `max_positions` not hit, per-strategy `max_positions` sub-cap not hit (default `strategy.long_continuation.max_positions=3` — pump events are rare; >3 simultaneous setups is likely noise), no open position on this symbol globally (cross-strategy invariant), post-close cooldown cleared (`cooldown_minutes`, default 240 = 4h), post-failure cooldown cleared (`failed_entry_cooldown_minutes`, default 0 = disabled).
-7. **Circuit breaker**: same shared breaker as short_scalp.
+- **`long_microdump`** — Phase 5 production pick (default ON). -2 to -5% dump band, 10M-50M USDT liquid coins, EMA cross-up + first green candle.
+- **`long_thinvol_pump`** — benched (default OFF). +10 to +30% pump, 1M-5M USDT meme tier. Highest backtest P&L but slippage-fragile in live.
+- **`long_lowpump`** — benched (default OFF). +10 to +25% pump, 5M-25M USDT mid-volume.
 
-**Exit criteria:**
-- **Fixed TP** (when `trailing_tp_enabled=false`): `entry × (1 + take_profit_pct / 100)` — for LONG, TP is ABOVE entry (default 3% above). Placed at entry as a `TAKE_PROFIT_MARKET` algo bracket.
-- **Trailing TP** (when `trailing_tp_enabled=true`, **default**): native `TRAILING_STOP_MARKET` algo. `activationPrice = entry × (1 + trailing_tp_arm_pct / 100)` (default arm 1.5% favorable — tighter than short's 2.0% because continuations exhaust faster); `callbackRate = trailing_tp_trail_pct` (default 1.0% — wider than short's 0.7% because pump-noise has more give). Binance arms when highest price reaches activationPrice and fires when latest ≤ highest × (1 - callbackRate/100). Mirror of short's logic with the side flipped.
-- SL hit: `entry × (1 - stop_loss_pct / 100)` — for LONG, SL is BELOW entry (default 3% below). `atr_sl_enabled=false` by default for v1 — deterministic for backtesting; flip true to use `atr_sl_multiplier × ATR14` instead. SL stays in place when trailing TP is on.
-- **Partial TP**: disabled by default (`partial_tp_trigger_pct=0`) — competes with trailing TP for the favorable-side exit. Leave at 0 unless you've explicitly disabled trailing.
-- Expiry: `max_hold_minutes` (default 720 = 12h — half of short's recommended 1440, since the continuation tail mostly lands in the first 12h after signal).
+Authoritative catalog with bands / volume windows / signal designs / Phase 4 results: **`docs/long-strategy-variants.md`**.
 
-**Risk sizing (current dry-run config: 10x leverage, $1000 wallet):**
-- Margin per trade = `position_size_pct` (default 10%) × wallet balance = $100
-- Notional = margin × leverage = $1000 per trade (100% wallet)
-- SL 3% adverse = 30% margin loss = 3% wallet loss per bad trade
-- Backtest-validated edge (L1 baseline, March 2026 fixed-sizing $100): 29 trades, WR 58.6%, R:R 1.81, +$48.82 net (per-trade edge $1.68 — about 3× short's $0.65/trade on the same window). April 2026 was pumpier: 122 trades, WR 58.2%, R:R 2.34, +$299.
+**Common scaffolding** under `app/Services/Strategy/LongBase/`:
+- `LongScannerBase` — abstract base with shared 24h band/volume filter, 15m kline fetch + 15s cache, EMA/ATR/RSI helpers, HTF check, funding guard. Subclasses override `strategyKey()`, `bandPass($ticker)`, and `evaluateSignal($klines, $analysis)`.
+- `LongStrategyBase` — adapter wrapping a scanner behind `StrategyInterface`; reads `strategy.<key>.enabled` for the master toggle.
 
-**Cooldown:** `cooldown_minutes` (default 240 = 4h) after any close on same `(symbol, long_continuation)`. Longer than short's 120m because pump events are once-per-pump — re-entering the same symbol within 4h of a previous close means the second pump is unrelated.
+**Phase 4 history (2026-05-17 → 18)**: Phase 4A ran a bear week (Nov 10–17 2025) + bull week (Apr 20–26 2026) on all 20 variants. Phase 4B walk-forward (Nov 25 → Apr 26) ran the top-3 via `scripts/long-top3-backtest.sh`. All inherited `short_scalp`'s exit profile (trailing TP arm 1.5% / trail 1.0%, fixed SL 2.5%, lev 10) via `Settings::ALIASES`. Wins were unbounded by trailing TP riding 100–200% alt bounces; losses capped. Raw CSVs preserved at `storage/perf-snapshots/long-sweep-*` (Phase 4A) and `storage/perf-snapshots/long-top3-*` (Phase 4B).
 
-**Why this strategy exists** (research justification): the original short-scalp design discovered that pumps ≥50% had a *continuation* pattern (median +12.6% further over the next 24h, p25 of -1.77% drawdown), unlike mild pumps which mean-revert (-10% trough). Short avoids this band via `pump_max_pct=50`; long_continuation rides it. The two strategies are complementary by construction — they share the same wallet and `max_positions` ceiling but never compete for the same symbol within a single scan.
+**Round B picks** (top-7 by cross-regime composite score): `long_microdump`, `long_thinvol_pump`, `long_lowpump`, `long_btc_aligned`, `long_breakout_new_high`, `long_shallowpull`, `long_midpump`. Top-3 for Round C / promotion: first three of those.
+
+**Promotion gate** ([scripts/long-top3-backtest.sh](scripts/long-top3-backtest.sh)): full Oct 2025 → Apr 2026 walk-forward (`bot:backtest-rolling` with `--use-1m --fixed-sizing`); must clear positive P&L in ≥5/7 months, worst-month ≥ -15%, avg R:R ≥ 0.7, avg WR ≥ 50%, ≥200 trades. Phase 5 then promotes the winner with its own per-variant exits and deletes the other 17.
+
+**Band/volume bookkeeping**: bands are deliberately overlapping across variants (e.g. `long_midpump` 25-50% overlaps `short_scalp`'s short band). The cross-strategy invariant — one open position per symbol globally — and `StrategyRegistry::inOrder()` priority (short_scalp first) keep them from competing in production.
 
 ### Risk Controls
 
-**Drawdown circuit breaker** (`circuit_breaker_enabled`, default `false`; **production override: `true` with 20% threshold / 4h cooldown** as of 2026-05-16 after cross-window backtest validation):
+**Drawdown circuit breaker — per strategy** (`strategy.<key>.circuit_breaker.enabled`, default `false`; **production override for short_scalp: `true` with 20% threshold / 4h cooldown / window 0h** as of 2026-05-16 after cross-window backtest validation):
 
-Evaluated at every `TradingEngine::open()` call (both SHORT and LONG paths) — gates entries only, already-open positions continue to be managed normally.
+Evaluated at every `TradingEngine::open()` call by passing `$signal->strategyKey` into `checkCircuitBreaker($strategyKey)`. Gates entries only — already-open positions continue to be managed normally. Two strategies running side by side trip and cool down independently.
 
-- **Equity** = `walletBalance + sum(unrealized_pnl on open positions)`.
-- **Peak** = rolling high-water mark, persisted in cache key `circuit_breaker:equity_peak`. Updated on every check; anchored to the trough when the breaker trips.
-- **Drawdown** = `(peak - equity) / peak × 100`.
-- **Trip condition**: `drawdown >= circuit_breaker_drawdown_pct` (default 25%) → write `circuit_breaker:cooldown_until = now + circuit_breaker_cooldown_hours` (default 24h) and block new entries.
-- **Short-circuit**: while `cooldown_until > now()`, both `openShortInternal()` and `openLongInternal()` return early.
-- **Clock reset**: cache key `circuit_breaker:measurement_start` is a v1 remnant — set by older code paths but not consulted by the current detector; safe to ignore but not yet removed.
-- `circuit_breaker_window_hours` exists in `Settings::KEYS` for backwards compat but is **not read** by the v2 detector. Only the drawdown-and-cooldown pair matters.
-- `bot:backtest --truncate` clears all three cache keys so the backtest starts with a clean risk-control slate.
+- **Strategy equity** = `(starting_balance / num_enabled_strategies) + Trade::strategy_key=K->sum(pnl + funding_fee) + Position::open()->strategy_key=K->sum(unrealized_pnl)`. The starting-balance allocation is what makes the 20% threshold mean what it always meant — without it, peak per-strategy P&L is tiny early in a run and any losing streak yields nonsense drawdowns (576%, 4258%, etc., observed pre-fix on 2026-05-17). With a single enabled strategy, this reduces exactly to the legacy global-breaker behavior.
+- **Peak** = `max` over the strategy's cached equity samples (`circuit_breaker:<key>:equity_samples`). Samples grow on each check; on trip, the array collapses to a single anchor sample at the trough.
+- **Drawdown** = `(peak - current_equity) / peak × 100`.
+- **Trip condition**: `drawdown >= strategy.<key>.circuit_breaker.drawdown_pct` (default 25%) → write `circuit_breaker:<key>:cooldown_until = now + cooldown_hours` (default 24h) and block new entries for that strategy. Other strategies are unaffected.
+- **Short-circuit**: while the strategy's cooldown is active, both `openShortInternal()` and `openLongInternal()` return early for signals from that strategy.
+- **`window_hours` knob**: `0` (the validated short_scalp default) = all-time peak since the last trip — exactly the legacy semantics. `> 0` = sliding window; samples older than the cutoff are pruned and peak is the max within the window. Operator-tunable per strategy via the dashboard.
+- **Backwards-compat aliases**: the legacy flat keys (`circuit_breaker_enabled`, `circuit_breaker_drawdown_pct`, `circuit_breaker_cooldown_hours`, `circuit_breaker_window_hours`) resolve via `Settings::ALIASES` to the namespaced `strategy.short_scalp.circuit_breaker.*` keys. Dashboard reads/writes work through either form.
+- **Cache eviction on `bot:backtest --truncate`**: clears `circuit_breaker:<key>:cooldown_until` + `circuit_breaker:<key>:equity_samples` for every registered strategy, plus the three pre-Phase-1 global keys (`circuit_breaker:equity_peak`, `cooldown_until`, `measurement_start`) in case a partial deploy left them populated.
 
 ### Scanners
 
@@ -174,13 +165,12 @@ Each strategy ships its own scanner under `app/Services/Strategy/<Key>/`. They s
 - HTF confirmation: when `strict_downtrend_enabled=true` AND `htf_filter_enabled=true`, requires 1h close < 1h EMA.
 - The `ShortScalpStrategy` adapter maps these legacy DTOs to the generic `Candidate` / `Analysis` / `Signal` types.
 
-**`LongContinuationScanner`** ([app/Services/Strategy/LongContinuation/LongContinuationScanner.php](app/Services/Strategy/LongContinuation/LongContinuationScanner.php), used directly by `LongContinuationStrategy`):
-- Mirror of `ShortScanner` for the +50–100% pump band (boundary-strict on the lower bound so the +50 boundary belongs to short).
-- Strict 15m uptrend gate (when enabled): EMA fast > slow on current+prior, last N green candles, body cap, price > EMA fast.
-- HTF: 1h close > 1h EMA.
-- Funding guard is INVERTED vs short: longs PAY funding when positive, so this scanner skips rates ABOVE `funding_max_rate` (default +0.10%) — opposite of short's "skip rates too negative".
+**Long-side scanners** (3 variants under `app/Services/Strategy/Long*/<Variant>Scanner.php`, all extending `LongScannerBase`):
+- Common base in [LongScannerBase](app/Services/Strategy/LongBase/LongScannerBase.php) handles the shared 24h band/volume filter, 15m kline fetch + 15s cache, EMA/ATR/RSI helpers, HTF check (1h close > 1h EMA), and inverted funding guard (skip rates ABOVE `funding_max_rate`, default +0.10%, because longs pay positive funding).
+- Each variant subclass overrides `strategyKey()`, `bandPass($ticker)` (24h band membership), and `evaluateSignal($klines, $analysis)` (the entry rule itself). Catalog: [docs/long-strategy-variants.md](docs/long-strategy-variants.md).
+- BTC-regime variants (`long_btc_aligned`, `long_btc_inverted`) additionally fetch `BTCUSDT` 1h + 4h klines per cycle. The replay exchange got 4h support on 2026-05-17 to make these work in backtest; in live they hit `BinanceExchange::getKlines` with the 15s cache, so it's one extra API call per cycle.
 
-Both scanners share:
+All scanners share:
 - **Kline cache**: 15s TTL in-memory cache, keyed on `Carbon::now()->getTimestamp()` (sim-time aware) so backtests are deterministic. Without this, two identical backtest runs could serve different klines for the same sim-tick.
 - **TechnicalAnalysis**: `calculateEMA`, `calculateATR(klines, 14)`, etc. — completely direction-agnostic.
 
@@ -218,8 +208,9 @@ Both scanners share:
 | `app/Services/Strategy/AbstractStrategy.php` | Optional base providing `isEnabled()` (reads `strategy.<key>.enabled`) and `setting($k)` namespace helper. |
 | `app/Services/Strategy/{Signal,Candidate,Analysis}.php` | Generic DTOs replacing the legacy `Short*` types (which still exist as adapters). |
 | `app/Services/Strategy/ShortScalp/ShortScalpStrategy.php` | Adapter wrapping `ShortScanner` behind `StrategyInterface`. Maps DTOs. |
-| `app/Services/Strategy/LongContinuation/LongContinuationStrategy.php` | Long-continuation strategy implementation. |
-| `app/Services/Strategy/LongContinuation/LongContinuationScanner.php` | Scanner for the +50–100% pump band: green-candle gate, EMA fast > slow, 1h HTF up, inverted funding guard. |
+| `app/Services/Strategy/LongBase/LongScannerBase.php` | Abstract base for the 3 long-side variant scanners: shared 24h band/volume filter, kline cache, EMA/ATR/RSI helpers, HTF + funding gates. Subclasses override `bandPass()` + `evaluateSignal()`. |
+| `app/Services/Strategy/LongBase/LongStrategyBase.php` | Adapter base wrapping a scanner behind `StrategyInterface`. |
+| `app/Services/Strategy/Long{Microdump,ThinvolPump,Lowpump}/` | The 3 kept variant directories, each with `<Variant>Strategy.php` + `<Variant>Scanner.php`. Catalog: `docs/long-strategy-variants.md`. |
 | `app/Providers/StrategyServiceProvider.php` | Builds `StrategyRegistry` from `config/strategies.php` at boot. |
 | `config/strategies.php` | `classes` map (key → class), `order` (priority for symbol-collision dedupe), `enabled` defaults. |
 | `app/Services/ShortScanner.php` | Original short-scalp scanner (still used; wrapped by `ShortScalpStrategy`). |
@@ -278,7 +269,7 @@ Both scanners share:
 | `enabled` | true | Master toggle for this strategy |
 | `scan_interval` | 30 | Seconds between scan cycles |
 | `pump_threshold_pct` | 25.0 | 24h gain lower bound (`>=`) |
-| `pump_max_pct` | 50.0 | 24h gain upper bound (`<=`). Above this is continuation territory — handed off to `long_continuation`. `0` disables the upper cap. |
+| `pump_max_pct` | 50.0 | 24h gain upper bound (`<=`). Above this is continuation territory — no long variant currently covers it after Phase 5 (the `long_highpump` control was deleted; design notes preserved in `docs/long-strategy-variants.md`). `0` disables the upper cap. |
 | `dump_threshold_pct` | 10.0 | 24h loss threshold to qualify (stored positive, compared to -value) |
 | `min_volume_usdt` | 10_000_000 | Minimum 24h quote volume |
 | `max_volume_usdt` | 25_000_000 | Skip pumps with volume above this. `0` disables the upper cap. |
@@ -303,42 +294,21 @@ Both scanners share:
 | `trailing_tp_arm_pct` | 2.0 | Favorable % at which trail arms |
 | `trailing_tp_trail_pct` | 1.5 | Trail distance / Binance callback rate. Clamped to 0.1–5.0% live. |
 
-### Long-Continuation Strategy (`strategy.long_continuation.*`)
-| Key | Default | Description |
-|-----|---------|-------------|
-| `enabled` | false | Master toggle. Off until backtest validation completes. |
-| `pump_threshold_pct` | 50.0 | 24h gain lower bound (strict-greater so the +50% boundary belongs to short_scalp) |
-| `pump_max_pct` | 100.0 | 24h gain upper bound. Above 100% is the "Extreme" pump bucket — fewer events, more outlier-driven. `0` disables the upper cap. |
-| `min_volume_usdt` / `max_volume_usdt` | 5M / 100M | Liquidity window. Wider than short's 10M-25M because pump-continuation coins tend to be heavier. |
-| `ema_fast` / `ema_slow` | 9 / 21 | 15m EMA periods |
-| `min_green_candles` | 2 | Minimum consecutive closed 15m green candles required (mirror of short's `min_red_candles`) |
-| `max_candle_body_pct` | 5.0 | Wider than short's 3% — pump-continuation candles are fat by nature |
-| `funding_max_rate` | 0.001 | LONGs *pay* funding when positive — skip rates ABOVE this cap (default +0.10% per 8h). Inverted vs short's "skip too negative". |
-| `strict_uptrend_enabled` | true | Require EMA fast > slow on current+prior, last N green, body cap, 1h HTF up. Mirror of short's `strict_downtrend_enabled`. |
-| `htf_filter_enabled` | true | Require 1h close above 1h EMA |
-| `htf_ema_period` | 21 | EMA period on the 1h timeframe |
-| `stop_loss_pct` | 3.0 | SL distance below entry. Wider than short's 2.5%. |
-| `atr_sl_enabled` | false | Deterministic for v1; flip to true for ATR-based SL |
-| `atr_sl_multiplier` | 1.5 | |
-| `take_profit_pct` | 3.0 | Fallback TP (used only when trailing TP is off) |
-| `partial_tp_trigger_pct` / `partial_tp_size_pct` | 0 / 50 | Disabled by default — competes with trailing |
-| `trailing_tp_enabled` | true | Native TRAILING_STOP_MARKET above entry |
-| `trailing_tp_arm_pct` | 1.5 | Tighter than short's 2.0 — continuations exhaust fast |
-| `trailing_tp_trail_pct` | 1.0 | Wider than short's 0.7 — pump-noise tolerance |
-| `max_hold_minutes` | 720 | 12h (half of short's recommended 1440) |
-| `cooldown_minutes` | 240 | 4h post-close — pump events are once-per-pump |
-| `failed_entry_cooldown_minutes` | 0 | Inherits same semantics as short |
-| `use_post_only_entry` | false | Pumping markets disfavor maker fills — straight MARKET by default |
-| `limit_order_timeout_seconds` | 3 | |
-| `max_positions` | 3 | Per-strategy sub-cap. Pump-continuation events are rare (~15/month from research); >3 simultaneous setups is likely noise. Counted against the global `max_positions` ceiling. |
+### Long-Side Variants (`strategy.long_*.enabled`)
+
+Each of the 3 kept variants only ships its master `enabled` toggle in `Settings::KEYS` plus 4 dynamic per-strategy circuit-breaker keys (added via `Settings::dynamicKeys()`). Individual gate parameters (band, volume window, EMAs, body cap, candle counts, etc.) live as hardcoded fallbacks inside each variant's scanner. **`long_microdump` defaults `enabled=true`** (Phase 5 production pick); the other 2 default OFF. Phase 6 will give microdump its own complete settings block (per-variant TP/SL/cooldown) once it has run live for some weeks.
+
+For per-variant signal designs, default band/volume ranges, and Phase 4 results see [docs/long-strategy-variants.md](docs/long-strategy-variants.md).
 
 ### Risk Controls (shared)
 | Key | Default | Description |
 |-----|---------|-------------|
-| `circuit_breaker_enabled` | false | Gate new entries when realized+unrealized drawdown breaches the threshold. **Production override: true.** |
-| `circuit_breaker_drawdown_pct` | 25.0 | Peak-to-trough drawdown % that trips the breaker. **Production override: 20.** |
-| `circuit_breaker_cooldown_hours` | 24 | How long to block new entries after a trip. **Production override: 4.** |
-| `circuit_breaker_window_hours` | 24 | Legacy v1 setting — present in `Settings::KEYS` for backwards compat, not read by the current detector |
+| `strategy.<key>.circuit_breaker.enabled` | false | Gate new entries when this strategy's drawdown breaches the threshold. **Production override for `short_scalp`: true.** |
+| `strategy.<key>.circuit_breaker.drawdown_pct` | 25.0 | Peak-to-trough drawdown % that trips the breaker. **Production override for `short_scalp`: 20.** |
+| `strategy.<key>.circuit_breaker.cooldown_hours` | 24 | How long to block new entries after a trip. **Production override for `short_scalp`: 4.** |
+| `strategy.<key>.circuit_breaker.window_hours` | 0 | `0` = all-time peak since last trip (legacy semantics). `>0` = sliding window. **Production override for `short_scalp`: 0.** |
+
+The legacy flat keys (`circuit_breaker_enabled`, etc.) still resolve via `Settings::ALIASES` to the `strategy.short_scalp.circuit_breaker.*` form — keep using namespaced keys in new code.
 
 ## API Endpoints
 
@@ -366,7 +336,7 @@ Both scanners share:
 
 **Tables**: `positions`, `trades`, `balance_snapshots`, `bot_settings`, `kline_history`, `cache`, `jobs`, `users`
 
-**`positions` / `trades` strategy attribution**: both tables have a `strategy_key` column (varchar nullable, indexed). Every new Position+Trade row carries the originating strategy's key (e.g. `'short_scalp'`, `'long_continuation'`). The Phase-1 multi-strategy migration backfilled `'short_scalp'` for all pre-existing rows. Composite indexes `(strategy_key, status)` on positions and `(strategy_key, created_at)` on trades keep per-strategy queries fast as the tables grow. Cooldown checks scope per `(symbol, strategy_key)`; the global one-position-per-symbol invariant remains enforced via `Position::open()->where('symbol', X)->exists()`.
+**`positions` / `trades` strategy attribution**: both tables have a `strategy_key` column (varchar nullable, indexed). Every new Position+Trade row carries the originating strategy's key (e.g. `'short_scalp'`, `'long_microdump'`). The Phase-1 multi-strategy migration backfilled `'short_scalp'` for all pre-existing rows; historical `'long_continuation'` rows from before that strategy was deleted in Phase 2 are preserved for analysis. Composite indexes `(strategy_key, status)` on positions and `(strategy_key, created_at)` on trades keep per-strategy queries fast as the tables grow. Cooldown checks scope per `(symbol, strategy_key)`; the global one-position-per-symbol invariant remains enforced via `Position::open()->where('symbol', X)->exists()`.
 
 **`bot_settings`**: settings storage. Phase-1 migration renamed all short-scalp keys from flat (e.g. `pump_threshold_pct`) to namespaced (`strategy.short_scalp.pump_threshold_pct`). Legacy flat keys still resolve via the alias map in `Settings::ALIASES` for backwards compatibility.
 
@@ -636,6 +606,7 @@ When the user asks "how is the bot doing?", lead with **server numbers** (which 
 - **Tailscale requires both ends connected** — the laptop must be signed into the same Tailscale account as the server, and the Tailscale app must show "Connected." `tailscale status` on either end should list both devices. A common failure mode after a laptop reboot is Tailscale silently disconnecting; reconnect via the menu bar app.
 - **First-time setup requires bootstrapping `.env` on the server before `deploy.sh` works** — the script's pre-flight check refuses to run if `<DEPLOY_PATH>/.env` doesn't exist. The bootstrap sequence is: `mkdir -p /root/crypto-bot`, `scp .env.example` to the server as `.env`, edit values, generate `APP_KEY` locally with `php artisan key:generate --show`, paste into server's `.env`. Then `./deploy.sh` works.
 - **`docker compose restart` doesn't always reload `env_file`** — after editing `.env`, use `docker compose down` followed by `docker compose up -d` to force fresh containers with re-injected env vars. `restart` reuses the existing container's environment snapshot, which can silently keep old values (e.g., blank `BINANCE_API_KEY` even after you've pasted one in). Observed live: dry-run mode kept throwing `-2014 "API-key format invalid"` errors because the bot container's env was a stale snapshot from before the key was added; `restart` did nothing, `down && up -d` fixed it instantly.
+- **`docker compose up -d` alone doesn't pick up a rebuilt image** — after `docker compose build` produces a new image SHA, plain `up -d` still treats running healthy containers as "up to date" and skips recreation. `deploy.sh` now uses `up -d --force-recreate`. Observed live on 2026-05-17: a migration renamed `circuit_breaker_*` → `strategy.short_scalp.circuit_breaker.*` and the matching Settings.php aliases were rsync'd + built into new images, but containers kept running 3-day-old images for ~24h, leaving `Settings::get('circuit_breaker_enabled')` falling back to the config-default `false` (DB rows had been renamed away from the flat key, alias map was only in the new code). Net effect: the production circuit breaker was silently inert. Fix: `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate`. If you ever observe a setting "not taking effect" after a deploy, check `md5sum app/Services/<file>.php` on disk vs `docker compose exec <svc> md5sum /app/app/Services/<file>.php` to detect this state.
 - **`DryRunExchange::getMaxLeverage()` requires real Binance API keys** — it delegates to `BinanceExchange::getMaxLeverage()` which calls the signed `/fapi/v1/leverageBracket` endpoint. `TradingEngine::open()` calls this at line ~103 of every entry attempt to clamp leverage to the symbol's tier-1 cap. Without valid keys, the call throws -2014 and `open()` bails before writing any DB row — the bot looks like it's scanning normally (`candidates=N analyzed=N`) but `opened=0` always. A **read-only** key is sufficient (Reading permission only; no Futures Trading needed for the leverage-bracket call) and keeps dry-run safe.
 - **The `extra_hosts: fstream.binance.com:18.178.11.87`** in `docker-compose.yml` is the laptop's ISP-DNS-hijacking workaround. `docker-compose.prod.yml` clears it via `!override []`. If you ever copy `docker-compose.yml` to a new environment, audit whether `extra_hosts` is needed locally.
 
@@ -682,7 +653,7 @@ Read each file in the snapshot dir, then produce a structured response in this s
 
 1. **TL;DR** (2-3 sentences): mode (dry-run / live), P&L direction, market regime label, anything alarming.
 2. **Headline numbers**: equity, today P&L, win rate, profit factor, open positions, current drawdown.
-3. **By-strategy comparison**: `short_scalp` vs `long_continuation` — trade count, WR, R:R, net P&L over the window.
+3. **By-strategy comparison**: `short_scalp` vs `long_microdump` (the two active strategies in production today) — trade count, WR, R:R, net P&L over the window. The 2 benched long variants surface in `/api/stats.by_strategy` with zero rows until enabled.
 4. **Market context**: BTC direction & magnitude over the last 24h / 7d (from `market-btc-*.json`), breadth from `market-tickers.json` (count of perps with priceChangePercent in buckets: >0, >5, >10, >25, >50 and mirror for dumps), median 24h move, median funding rate from `market-funding.json` (crowded longs vs shorts), top 3 pumpers and dumpers.
 5. **Strategy-vs-market fit**: explicit reasoning from "How market context maps to strategy" below. Did the bot get the expected number of candidates given the breadth? Are the close-reason mixes (`aggregates.json`) consistent with the regime?
 6. **Interesting findings**: scan `laravel.log` for the patterns in the checklist below.
@@ -713,10 +684,10 @@ In **`containers-stdout.log`** (Docker stdout from all 5 services):
 The reasoning model for interpreting `market-*.json`:
 
 - **Breadth high & pumpy** (many >25% movers, BTC up): `short_scalp`'s mean-reversion edge has plenty of setups but avg win may shrink because pumpers keep running. Expect higher trade count, lower per-trade R:R than the backtest baseline (~0.85 R:R).
-- **Breadth high & dumpy** (many <-10% movers): `short_scalp`'s dump path picks up candidates; `long_continuation` is starved.
+- **Breadth high & dumpy** (many <-10% movers): `short_scalp`'s dump path picks up candidates; long-side variants (when enabled) are starved.
 - **Breadth low, BTC sideways**: both strategies idle. Low candidate count is *expected*, not a bug — don't conclude "the gate is broken" without checking breadth first.
-- **BTC crashing hard** (>-3% 24h): `long_continuation` entries here often fail because continuation patterns break down in a falling tide. If long entries are open and BTC is dumping, flag as regime-misfit rather than strategy failure.
-- **High positive median funding** (>0.05%): longs are crowded. `long_continuation` entries face higher cascade-liquidation risk; confirm `funding_max_rate` (default 0.001 = 0.10%) is actually gating, not just passing them through.
+- **BTC crashing hard** (>-3% 24h): long entries (any pump-continuation variant) often fail because continuation patterns break down in a falling tide. If long entries are open and BTC is dumping, flag as regime-misfit rather than strategy failure.
+- **High positive median funding** (>0.05%): longs are crowded. Long-side entries face higher cascade-liquidation risk; confirm the variant's `funding_max_rate` (default 0.001 = 0.10% on `LongScannerBase`) is actually gating, not just passing them through.
 - **Negative median funding**: shorts are crowded. `short_scalp` entries here may bleed funding — the strategy's `>= -0.05%` guard rejects only the worst.
 
 ### When NOT to use this
@@ -735,11 +706,11 @@ The reasoning model for interpreting `market-*.json`:
 - **Mode-dependent SL/TP close path**: In **dry-run** mode, `checkPosition()` price-triggers SL/TP and calls `closePosition()`; `maybeTrailStop` ratchets the SL toward the running extreme on a favorable move when trailing TP is on. In **live** mode, Binance owns the close via `STOP_MARKET` / `TAKE_PROFIT_MARKET` (or `TRAILING_STOP_MARKET` when trailing is on) brackets; the bot's `checkPosition()` only updates P&L and handles expiry, and `maybeTrailStop` short-circuits because Binance trails the order server-side. Live close reconciliation happens via `ws-user-data` (primary), `BotRun` safety reconcile (fallback), or `closePosition()`'s idempotent error path (race with manual close). This avoids the previous race where a bot-issued MARKET close would error out against a Binance SL/TP fill that already flattened the position.
 - **listenKey lifecycle**: Binance user-data listenKeys are valid 60 min and must be kept alive every 30 min or less via `PUT /fapi/v1/listenKey`. The `ws-user-data` worker schedules this; on any disconnect it requests a fresh listenKey (previous one may have silently expired). If the worker is down for longer than 60s, `BotRun`'s safety reconcile (every 30s cycle) picks up missed fills via `getOpenPositions` + `getOrderStatus`.
 - **Live trading readiness**: Per-order cancellation ensures closing one position doesn't destroy other symbols' orders. Fail-safe on open ensures no unprotected positions. Reconciliation converges through multiple paths (ws stream, safety poll, manual close) — all guarded by `status !== Open` refresh checks so idempotency holds.
-- **LONG positions**: opened only when an enabled strategy has `side()='LONG'` (currently `long_continuation`, default OFF) emits a Signal, **or** when the dashboard `Reverse` button flips a SHORT into a LONG. The cross-strategy invariant (one open position per symbol globally) prevents conflicting directions on the same coin.
+- **LONG positions**: opened only when an enabled LONG-side strategy emits a Signal (today `long_microdump` is the only enabled LONG; `long_thinvol_pump` and `long_lowpump` are benched), **or** when the dashboard `Reverse` button flips a SHORT into a LONG. The cross-strategy invariant (one open position per symbol globally) prevents conflicting directions on the same coin.
 - **`dry_run` toggle caveat**: `ExchangeDispatcher` reads the setting on every call, so flipping the dashboard toggle takes effect on the next bot cycle. **But open positions are tied to whichever exchange created them** (real orders on Binance vs DB-only rows with `is_dry_run=true`). Flipping mid-flight routes close orders to the wrong side. **Always close all open positions before toggling `dry_run`.**
 - **Backtest shares the dry-run DB**: `bot:backtest` writes `is_dry_run=true` `Position` + `Trade` rows. If the `bot` container is also running in dry-run mode, it will see those rows and try to manage them — including closing backtest stragglers at today's price. Safest workflow: `./develop stop bot ws-worker ws-user-data` before a backtest, or always pass `--truncate` and let `forceCloseStragglers()` flatten everything at the final simulated bar. The bigger equity-curve widget on the dashboard will also mix live and backtest history (both are `is_dry_run=true` samples); the range pills or a manual `balance_snapshots` purge are the only separators.
-- **HTF filter fails open**: if the 1h kline fetch errors or returns fewer than `htf_ema_period + 1` bars, both `ShortScanner::checkHigherTfDowntrend()` and `LongContinuationScanner::checkHigherTfUptrend()` return `true` — the filter is permissive on data gaps rather than restrictive. Backtests inherit this: a symbol with spotty 1h history will pass HTF even when the 15m state alone wouldn't justify an entry.
-- **ATR SL default differs by strategy**: `strategy.short_scalp.atr_sl_enabled=true` out of the box, so the short strategy's `stop_loss_pct` is only consulted as a fallback. `strategy.long_continuation.atr_sl_enabled=false` so the long strategy uses its `stop_loss_pct=3.0` directly. When tuning the fixed-pct SL on the short strategy, flip `atr_sl_enabled=false` or the override will be silently ignored.
+- **HTF filter fails open**: if the 1h kline fetch errors or returns fewer than `htf_ema_period + 1` bars, both `ShortScanner::checkHigherTfDowntrend()` and `LongScannerBase::checkHtf()` return `true` — the filter is permissive on data gaps rather than restrictive. Backtests inherit this: a symbol with spotty 1h history will pass HTF even when the 15m state alone wouldn't justify an entry.
+- **ATR SL default differs by strategy**: `strategy.short_scalp.atr_sl_enabled=true` out of the box, so the short strategy's `stop_loss_pct` is only consulted as a fallback. The 3 kept long variants currently inherit `short_scalp`'s exit profile via `Settings::ALIASES` from the Phase 4 sweeps — Phase 6 will give `long_microdump` its own atr/exit defaults once it has live data. When tuning the fixed-pct SL on the short strategy, flip `atr_sl_enabled=false` or the override will be silently ignored.
 - **Trailing TP and partial TP are mutually exclusive in spirit**: both target the favorable side. Leaving `partial_tp_trigger_pct > 0` while `trailing_tp_enabled=true` will scale out half at the partial trigger and leave the remainder under the trailing stop, which mostly defeats the trailing TP's job of riding the move. The recommended trailing config sets `partial_tp_trigger_pct=0`.
 - **`callbackRate` clamping**: Binance accepts 0.1–5.0%; values outside that band are rejected with `-2021/-1102` and would orphan the position with no favorable-side bracket. `BinanceExchange::openTrailingStop()` clamps before submission so a config typo can't kill an entry mid-flight. Backtest harness has no clamp (uses arbitrary `trailing_tp_trail_pct`), but live placement always respects the band.
 - **Trailing-armed SL labelling**: in dry-run, when the trailing stop ratchets into the favorable side of entry and then fires, `trailingExitReason()` returns `CloseReason::TakeProfit` (not `StopLoss`), even though the close went through the slHit branch. The Trade row reflects "TakeProfit" so the close-reason mix and dashboard summaries treat trailed exits as wins, matching how live `TRAILING_STOP_MARKET` fills are reconciled (also as TakeProfit, via `tp_order_id` match in `ws-user-data`).

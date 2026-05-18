@@ -101,8 +101,16 @@ echo "  • rebuilding images"
 echo "  • migrating database"
 "${COMPOSE[@]}" run --rm app php artisan migrate --force
 
-echo "  • restarting services"
-"${COMPOSE[@]}" up -d
+echo "  • restarting services (force-recreate to pick up rebuilt images)"
+# --force-recreate is required because `up -d` alone treats a healthy
+# container as "up to date" even after `build` produces a new image SHA.
+# Without it the rsync + build steps look successful but the running
+# containers keep executing the previous image — observed 2026-05-17
+# when a Settings.php rename migration was applied to the DB while the
+# old code (without the matching ALIASES) kept running, silently
+# disabling the circuit breaker for ~24h. See deployment gotchas in
+# CLAUDE.md.
+"${COMPOSE[@]}" up -d --force-recreate
 
 echo "  • pruning dangling images"
 docker image prune -f >/dev/null 2>&1 || true

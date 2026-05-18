@@ -35,6 +35,12 @@ services:
       - "8090:8090"
     volumes:
       - ./storage/logs:/app/storage/logs
+      # bot:backtest / bot:backtest-rolling write per-month CSVs under
+      # storage/perf-snapshots. Bind-mount so host-side helpers (e.g.
+      # scripts/long-top3-backtest.sh's aggregator) can read them without
+      # docker cp. Production server doesn't run backtests but the mount
+      # is harmless — the directory is empty there.
+      - ./storage/perf-snapshots:/app/storage/perf-snapshots
     depends_on:
       db:
         condition: service_healthy

@@ -1,40 +1,31 @@
 #!/usr/bin/env bash
-# Long-strategy variant sweep — Phase 4A of the long-strategy overhaul.
-#
-# Runs each registered long_* variant in a separate `bot:backtest` invocation,
-# captures the stdout summary, parses the per-variant metrics out, and emits
-# a single CSV ranking them by composite score.
+# Long-strategy variant sweep — originally Phase 4A of the long-strategy
+# overhaul. Discovers all registered `long_*` strategies via the
+# StrategyRegistry and runs each in a separate `bot:backtest` invocation,
+# capturing summary stats into a CSV. Auto-discovery means this stays useful
+# any time you add new long variants — even though Phase 5 trimmed the
+# registered set from 20 down to 3.
 #
 # Usage:
 #   scripts/long-variant-sweep.sh                    # default: 2026-03-01 → 2026-04-01, --use-1m
 #   scripts/long-variant-sweep.sh --from=2026-04-01 --to=2026-05-01
 #   scripts/long-variant-sweep.sh --no-1m            # skip --use-1m (faster, less accurate intra-bar)
-#   scripts/long-variant-sweep.sh --variants=long_microdump,long_milddump   # subset
+#   scripts/long-variant-sweep.sh --variants=long_microdump,long_thinvol_pump   # subset
 #   scripts/long-variant-sweep.sh --balance=10000    # alternate starting balance
 #
 # Output dir: storage/perf-snapshots/long-sweep-<UTC-ts>/
 #   round-a.csv         — one row per variant with parsed metrics
-#   <variant>.log       — full bot:backtest stdout per variant (kept for borderline re-analysis)
+#   <variant>.log       — full bot:backtest stdout per variant
 #
-# IMPORTANT — known limitations of Phase-4A sweep:
+# Known limitations:
 #
 # 1. Variants share short_scalp's global TP/SL/hold defaults (via Settings
 #    aliases). The sweep isolates the ENTRY-signal edge with a common exit
-#    profile. Phase 5 promotes the winner with its own per-strategy exits.
+#    profile. Per-variant exits land in Phase 6.
 #
 # 2. HTF filter (1h close > 1h EMA) is OFF for all variants — they fall back
 #    to the LongScannerBase default of false because no per-variant KEYS
-#    entry exists for `htf_filter_enabled`. Variants whose docstrings claim
-#    HTF gating (e.g. long_highpump as long_continuation control) are
-#    effectively running WITHOUT HTF in this sweep.
-#
-# 3. long_btc_aligned and long_btc_inverted need BTCUSDT 4h klines in
-#    kline_history. The default download (--intervals=15m,1h,1m) does NOT
-#    include 4h. Run before the sweep:
-#        ./develop art bot:download-history --symbols=BTCUSDT \
-#            --intervals=4h --end-month=2026-03 --months=1 --skip-existing
-#    On missing 4h data: long_btc_aligned fails OPEN (emits candidates as
-#    if BTC regime were up); long_btc_inverted fails CLOSED (0 candidates).
+#    entry exists for `htf_filter_enabled`.
 
 set -euo pipefail
 

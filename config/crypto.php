@@ -150,30 +150,17 @@ return [
     'strategy' => [
         'short_scalp' => $shortScalpDefaults,
 
-        // Long variants under test (Phase 4 sweep). Each only ships its
-        // master `enabled` toggle as a config-default — individual gate
-        // parameters live as hardcoded fallbacks inside each variant's
-        // scanner. The winner of Phase 4 gets a full settings block during
-        // Phase 5 promotion; the 19 losers and their entries here are
-        // deleted alongside their scanner directories.
-        'long_microdump' => ['enabled' => false],
-        'long_milddump' => ['enabled' => false],
-        'long_bigdump' => ['enabled' => false],
-        'long_extremedump' => ['enabled' => false],
-        'long_oversold_strict' => ['enabled' => false],
-        'long_shallowpull' => ['enabled' => false],
-        'long_deeppull' => ['enabled' => false],
-        'long_consolidation_break' => ['enabled' => false],
-        'long_breakout_new_high' => ['enabled' => false],
-        'long_range_reclaim' => ['enabled' => false],
-        'long_lowpump' => ['enabled' => false],
-        'long_midpump' => ['enabled' => false],
-        'long_highpump' => ['enabled' => false],
-        'long_extremepump' => ['enabled' => false],
+        // Long-side variants kept after Phase 4A's promotion gate (2026-05-18).
+        // Each ships only its master `enabled` toggle as a config-default;
+        // individual gate parameters are hardcoded fallbacks inside each
+        // variant's scanner. Phase 5 will give long_microdump (the live pick)
+        // a full per-strategy settings block once it has run live for some
+        // weeks; the other 2 stay benched in case microdump underperforms.
+        'long_microdump' => [
+            'enabled' => filter_var(env('STRATEGY_LONG_MICRODUMP_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
+        ],
         'long_thinvol_pump' => ['enabled' => false],
-        'long_thickvol_pump' => ['enabled' => false],
-        'long_btc_aligned' => ['enabled' => false],
-        'long_btc_inverted' => ['enabled' => false],
+        'long_lowpump' => ['enabled' => false],
     ],
 
     /*

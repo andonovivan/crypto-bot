@@ -26,8 +26,10 @@ class HistoricalReplayExchange implements ExchangeInterface
     private array $bars1h = [];
 
     /** 4h bars — only loaded if any kline_history row with interval=4h exists.
-     * Used by cross-symbol regime gates (e.g. long_btc_aligned which reads
-     * BTCUSDT 4h EMA). Memory cost is tiny since 4h has 6 bars/day.
+     * Originally added for BTC-regime variants (long_btc_aligned / inverted)
+     * during Phase 4A; those variants were deleted in Phase 5 but the 4h
+     * support stays in case future strategies need cross-timeframe BTC reads.
+     * Memory cost is tiny since 4h has 6 bars/day.
      * @var array<string, array<int, array{o: float, h: float, l: float, c: float, v: float, qv: float}>> */
     private array $bars4h = [];
 

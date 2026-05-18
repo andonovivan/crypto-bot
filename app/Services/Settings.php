@@ -60,35 +60,20 @@ class Settings
         // works. All other gate parameters fall back to hardcoded defaults
         // inside the variant's scanner.
         'strategy.long_microdump.enabled' => ['config' => 'crypto.strategy.long_microdump.enabled', 'type' => 'bool', 'label' => 'Long Microdump Enabled'],
-        'strategy.long_milddump.enabled' => ['config' => 'crypto.strategy.long_milddump.enabled', 'type' => 'bool', 'label' => 'Long Milddump Enabled'],
-        'strategy.long_bigdump.enabled' => ['config' => 'crypto.strategy.long_bigdump.enabled', 'type' => 'bool', 'label' => 'Long Bigdump Enabled'],
-        'strategy.long_extremedump.enabled' => ['config' => 'crypto.strategy.long_extremedump.enabled', 'type' => 'bool', 'label' => 'Long Extremedump Enabled'],
-        'strategy.long_oversold_strict.enabled' => ['config' => 'crypto.strategy.long_oversold_strict.enabled', 'type' => 'bool', 'label' => 'Long Oversold-Strict Enabled'],
-        'strategy.long_shallowpull.enabled' => ['config' => 'crypto.strategy.long_shallowpull.enabled', 'type' => 'bool', 'label' => 'Long Shallowpull Enabled'],
-        'strategy.long_deeppull.enabled' => ['config' => 'crypto.strategy.long_deeppull.enabled', 'type' => 'bool', 'label' => 'Long Deeppull Enabled'],
-        'strategy.long_consolidation_break.enabled' => ['config' => 'crypto.strategy.long_consolidation_break.enabled', 'type' => 'bool', 'label' => 'Long Consolidation-Break Enabled'],
-        'strategy.long_breakout_new_high.enabled' => ['config' => 'crypto.strategy.long_breakout_new_high.enabled', 'type' => 'bool', 'label' => 'Long Breakout-New-High Enabled'],
-        'strategy.long_range_reclaim.enabled' => ['config' => 'crypto.strategy.long_range_reclaim.enabled', 'type' => 'bool', 'label' => 'Long Range-Reclaim Enabled'],
-        'strategy.long_lowpump.enabled' => ['config' => 'crypto.strategy.long_lowpump.enabled', 'type' => 'bool', 'label' => 'Long Lowpump Enabled'],
-        'strategy.long_midpump.enabled' => ['config' => 'crypto.strategy.long_midpump.enabled', 'type' => 'bool', 'label' => 'Long Midpump Enabled'],
-        'strategy.long_highpump.enabled' => ['config' => 'crypto.strategy.long_highpump.enabled', 'type' => 'bool', 'label' => 'Long Highpump Enabled'],
-        'strategy.long_extremepump.enabled' => ['config' => 'crypto.strategy.long_extremepump.enabled', 'type' => 'bool', 'label' => 'Long Extremepump Enabled'],
         'strategy.long_thinvol_pump.enabled' => ['config' => 'crypto.strategy.long_thinvol_pump.enabled', 'type' => 'bool', 'label' => 'Long Thinvol-Pump Enabled'],
-        'strategy.long_thickvol_pump.enabled' => ['config' => 'crypto.strategy.long_thickvol_pump.enabled', 'type' => 'bool', 'label' => 'Long Thickvol-Pump Enabled'],
-        'strategy.long_btc_aligned.enabled' => ['config' => 'crypto.strategy.long_btc_aligned.enabled', 'type' => 'bool', 'label' => 'Long BTC-Aligned Enabled'],
-        'strategy.long_btc_inverted.enabled' => ['config' => 'crypto.strategy.long_btc_inverted.enabled', 'type' => 'bool', 'label' => 'Long BTC-Inverted Enabled'],
+        'strategy.long_lowpump.enabled' => ['config' => 'crypto.strategy.long_lowpump.enabled', 'type' => 'bool', 'label' => 'Long Lowpump Enabled'],
     ];
 
     /**
      * Lazily-built dynamic keys (e.g. per-variant breaker tuning). Returned by
      * the public keys() method alongside the static KEYS const. Kept out of
      * KEYS because PHP doesn't allow method calls in const initializers; this
-     * is the workaround for adding 20 × 4 = 80 per-variant breaker keys
-     * without inlining every entry.
+     * is the workaround for adding per-variant breaker keys without inlining
+     * every entry. With 3 variants × 4 keys it's small now; mainly kept as the
+     * scalable insertion point for future per-variant tuning.
      *
-     * The variant list is the source of truth — adding a variant adds its
-     * breaker keys here automatically. The 19 losing variants drop out
-     * when their entries are removed in Phase 5 cleanup.
+     * The variant list below is the source of truth — adding a variant adds
+     * its breaker keys here automatically.
      */
     private static ?array $dynamicKeys = null;
 
@@ -98,13 +83,9 @@ class Settings
             return self::$dynamicKeys;
         }
         $variants = [
-            'long_microdump', 'long_milddump', 'long_bigdump', 'long_extremedump',
-            'long_oversold_strict', 'long_shallowpull', 'long_deeppull',
-            'long_consolidation_break',
-            'long_breakout_new_high', 'long_range_reclaim', 'long_lowpump',
-            'long_midpump', 'long_highpump', 'long_extremepump',
-            'long_thinvol_pump', 'long_thickvol_pump',
-            'long_btc_aligned', 'long_btc_inverted',
+            'long_microdump',     // Phase 5 production pick (default ON)
+            'long_thinvol_pump',  // benched after Phase 4A — kept for re-evaluation
+            'long_lowpump',       // benched after Phase 4A — kept for re-evaluation
         ];
         $out = [];
         foreach ($variants as $v) {
