@@ -31,7 +31,6 @@
         </div>
         <div class="flex-1 min-w-0" x-show="!sidebarCollapsed" x-transition.opacity>
             <div class="text-sm font-semibold leading-tight">Crypto Bot</div>
-            <div class="text-[10px] text-[var(--color-text-subtle)] uppercase tracking-wider">Short Scalp</div>
         </div>
     </div>
 

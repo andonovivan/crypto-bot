@@ -79,6 +79,7 @@ rsync -avz --delete \
   --exclude='storage/framework/cache/' \
   --exclude='storage/framework/sessions/' \
   --exclude='storage/framework/views/' \
+  --exclude='storage/perf-snapshots/' \
   --exclude='*.sql' \
   --exclude='*.log' \
   -e "ssh ${SSH_OPTS[*]}" \
@@ -99,7 +100,12 @@ echo "  • rebuilding images"
 "${COMPOSE[@]}" build --quiet
 
 echo "  • migrating database"
-"${COMPOSE[@]}" run --rm app php artisan migrate --force
+# -T disables pseudo-TTY allocation. Without it, `docker compose run` reads
+# from the heredoc's stdin and silently consumes every remaining line —
+# including the `up -d --force-recreate` below. Observed 2026-05-18: the
+# migrate step ran fine but containers never recreated because the rest of
+# the heredoc was swallowed by docker compose run's stdin.
+"${COMPOSE[@]}" run --rm -T app php artisan migrate --force
 
 echo "  • restarting services (force-recreate to pick up rebuilt images)"
 # --force-recreate is required because `up -d` alone treats a healthy
